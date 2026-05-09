@@ -8,7 +8,7 @@ export interface CodexForkTimelineEntry {
   entryType: 'message' | 'tool' | 'status';
   timestamp: string;
   role?: 'user' | 'assistant';
-  kind?: 'prompt' | 'commentary' | 'final';
+  kind?: 'prompt' | 'commentary' | 'final' | 'transfer';
   text?: string;
   toolName?: string;
   title?: string;
@@ -24,6 +24,8 @@ export interface CodexForkContext {
   sourceCwd: string | null;
   forkEntryId: string;
   timeline: CodexForkTimelineEntry[];
+  transferSourceProvider?: 'codex' | 'claude' | null;
+  transferTargetProvider?: 'codex' | 'claude' | null;
 }
 
 export interface CodexForkSessionMetadata extends CodexForkContext {
@@ -88,7 +90,9 @@ function sanitizeForkTimelineEntry(value: any): CodexForkTimelineEntry | null {
     entryType: value.entryType,
     timestamp: value.timestamp,
     role: value.role === 'user' || value.role === 'assistant' ? value.role : undefined,
-    kind: value.kind === 'prompt' || value.kind === 'commentary' || value.kind === 'final' ? value.kind : undefined,
+    kind: value.kind === 'prompt' || value.kind === 'commentary' || value.kind === 'final' || value.kind === 'transfer'
+      ? value.kind
+      : undefined,
     text: typeof value.text === 'string' ? value.text : undefined,
     toolName: typeof value.toolName === 'string' ? value.toolName : undefined,
     title: typeof value.title === 'string' ? value.title : undefined,
@@ -128,6 +132,12 @@ function sanitizeForkMetadata(value: any): CodexForkSessionMetadata | null {
     sourceTitle: value.sourceTitle,
     sourceCwd: typeof value.sourceCwd === 'string' && value.sourceCwd.trim() ? value.sourceCwd.trim() : null,
     forkEntryId: value.forkEntryId,
+    transferSourceProvider: value.transferSourceProvider === 'codex' || value.transferSourceProvider === 'claude'
+      ? value.transferSourceProvider
+      : null,
+    transferTargetProvider: value.transferTargetProvider === 'codex' || value.transferTargetProvider === 'claude'
+      ? value.transferTargetProvider
+      : null,
     promptPreview: value.promptPreview.trim(),
     createdAt: value.createdAt,
     timeline,
@@ -165,6 +175,12 @@ function sanitizeForkDraftSession(value: any): CodexForkDraftSession | null {
     sourceTitle: value.sourceTitle,
     sourceCwd: typeof value.sourceCwd === 'string' && value.sourceCwd.trim() ? value.sourceCwd.trim() : null,
     forkEntryId: value.forkEntryId,
+    transferSourceProvider: value.transferSourceProvider === 'codex' || value.transferSourceProvider === 'claude'
+      ? value.transferSourceProvider
+      : null,
+    transferTargetProvider: value.transferTargetProvider === 'codex' || value.transferTargetProvider === 'claude'
+      ? value.transferTargetProvider
+      : null,
     promptPreview: value.promptPreview.trim(),
     promptPrefix: value.promptPrefix.trim(),
     createdAt: value.createdAt,

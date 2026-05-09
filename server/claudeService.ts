@@ -138,6 +138,42 @@ let authStatusCache: {
 };
 let runtimeStateLoadPromise: Promise<void> | null = null;
 let runtimeStatePersistTail: Promise<void> = Promise.resolve();
+
+function getProviderDisplayLabel(provider: 'codex' | 'claude'): string {
+  return provider === 'claude' ? 'Claude' : 'Codex';
+}
+
+function buildStartedTaskTitle(provider: 'codex' | 'claude'): string {
+  return `${getProviderDisplayLabel(provider)} התחיל את המשימה`;
+}
+
+function isTransferForkMetadata(metadata: CodexForkSessionMetadata | null | undefined): metadata is CodexForkSessionMetadata & {
+  transferSourceProvider: 'codex' | 'claude';
+  transferTargetProvider: 'codex' | 'claude';
+} {
+  return Boolean(
+    metadata
+    && metadata.transferSourceProvider
+    && metadata.transferTargetProvider
+  );
+}
+
+function buildTransferDisplayText(
+  metadata: CodexForkSessionMetadata & {
+    transferSourceProvider: 'codex' | 'claude';
+    transferTargetProvider: 'codex' | 'claude';
+  }
+): string {
+  const sourceProviderLabel = getProviderDisplayLabel(metadata.transferSourceProvider);
+  const targetProviderLabel = getProviderDisplayLabel(metadata.transferTargetProvider);
+
+  return [
+    `מה נכתב ל-${targetProviderLabel} לפני כל הצ'אט:`,
+    metadata.sourceCwd ? `אתה קורא עכשיו את הוורקספייס: ${metadata.sourceCwd}` : 'אתה קורא עכשיו את הוורקספייס הפעיל של השיחה.',
+    '[כל הצ\'אט]',
+    `עד כאן השיחה עם ${sourceProviderLabel} ועכשיו תורך. המשך מאותה שיחה באופן טבעי, בלי לסכם אותה מחדש.`,
+  ].join('\n');
+}
 let runtimeState: ClaudeRuntimeState = {
   profiles: {},
   sessions: {},
@@ -689,7 +725,12 @@ function buildDraftParsedSession(draft: CodexForkDraftSession): ParsedClaudeSess
   );
 
   return {
-    title: trimPreview(draft.promptPreview || draft.sourceTitle || draft.sessionId, 72),
+    title: trimPreview(
+      draft.transferSourceProvider && draft.transferTargetProvider
+        ? draft.sourceTitle || draft.sessionId
+        : draft.promptPreview || draft.sourceTitle || draft.sessionId,
+      72
+    ),
     preview,
     messages,
     timeline: draft.timeline.map((entry) => ({ ...entry })),
@@ -710,6 +751,14 @@ function applyForkSessionOverlay(
   const overlayMessages = parsed.messages.map((message) => {
     if (!firstPromptPatched && message.role === 'user' && message.kind === 'prompt') {
       firstPromptPatched = true;
+      if (isTransferForkMetadata(metadata)) {
+        return {
+          ...message,
+          role: 'assistant',
+          kind: 'transfer',
+          text: buildTransferDisplayText(metadata),
+        };
+      }
       return {
         ...message,
         text: metadata.promptPreview || message.text,
@@ -728,6 +777,14 @@ function applyForkSessionOverlay(
       && entry.kind === 'prompt'
     ) {
       firstTimelinePromptPatched = true;
+      if (isTransferForkMetadata(metadata)) {
+        return {
+          ...entry,
+          role: 'assistant',
+          kind: 'transfer',
+          text: buildTransferDisplayText(metadata),
+        };
+      }
       return {
         ...entry,
         text: metadata.promptPreview || entry.text,
@@ -742,7 +799,12 @@ function applyForkSessionOverlay(
     .filter((entry): entry is CodexSessionMessage => Boolean(entry));
 
   return {
-    title: trimPreview(metadata.promptPreview || parsed.title, 72),
+    title: trimPreview(
+      isTransferForkMetadata(metadata)
+        ? metadata.sourceTitle || parsed.title
+        : metadata.promptPreview || parsed.title,
+      72
+    ),
     preview: parsed.preview,
     messages: [...forkMessages, ...overlayMessages],
     timeline: [...metadata.timeline.map((entry) => ({ ...entry })), ...overlayTimeline],
@@ -853,7 +915,7 @@ async function parseClaudeSessionFile(filePath: string, sessionId: string): Prom
             id: `${sessionId}-status-dequeue-${timeline.length}`,
             entryType: 'status',
             timestamp,
-            title: 'Claude התחיל לעבוד',
+            title: buildStartedTaskTitle('claude'),
             subtitle: null,
             status: 'started',
           });
@@ -952,20 +1014,16 @@ async function parseClaudeSessionFile(filePath: string, sessionId: string): Prom
 
         for (const part of contentParts) {
           if (part?.type === 'thinking' && typeof part.thinking === 'string' && part.thinking.trim()) {
-            const entryId = `${sessionId}-assistant-thinking-${messages.length}-${timeline.length}`;
-            messages.push({
-              id: entryId,
-              role: 'assistant',
-              kind: 'commentary',
-              text: part.thinking.trim(),
-              timestamp,
-            });
             timeline.push({
-              id: entryId,
-              entryType: 'message',
-              role: 'assistant',
-              kind: 'commentary',
+              id: `${sessionId}-tool-thinking-${timeline.length}`,
+              entryType: 'tool',
               text: part.thinking.trim(),
+              toolName: 'thinking',
+              title: 'Thinking',
+              subtitle: 'Claude reasoning trace',
+              callId: null,
+              status: 'completed',
+              exitCode: null,
               timestamp,
             });
             continue;

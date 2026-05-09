@@ -110,7 +110,7 @@ interface CodexTimelineEntry {
   entryType: 'message' | 'tool' | 'status';
   timestamp: string;
   role?: 'user' | 'assistant';
-  kind?: 'prompt' | 'commentary' | 'final';
+  kind?: 'prompt' | 'commentary' | 'final' | 'transfer';
   text?: string;
   toolName?: string;
   title?: string;
@@ -249,6 +249,8 @@ interface ForkDraftContext {
   sourceTitle: string;
   sourceCwd: string | null;
   forkEntryId: string;
+  transferSourceProvider?: 'codex' | 'claude' | null;
+  transferTargetProvider?: 'codex' | 'claude' | null;
   forkedAt: string;
   timeline: CodexTimelineEntry[];
   promptPrefix: string;
@@ -401,6 +403,7 @@ const TIMELINE_FULL_LOAD_CHUNK_SIZE = 400;
 const APP_DISPLAY_NAME = 'code-ai';
 const APP_ICON_PATH = '/icons/code-ai-512.png';
 const APPLE_TOUCH_ICON_PATH = '/icons/apple-touch-icon.png';
+const CODEX_EMPTY_STATE_ICON_PATH = '/icons/codex-empty-state.png';
 const CLAUDE_EMPTY_STATE_ICON_PATH = '/icons/claude-agent.png';
 
 function formatTimestamp(value: string | null): string {
@@ -658,6 +661,8 @@ function mapForkDraftServerContext(
     sourceTitle: serverContext.sourceTitle,
     sourceCwd: serverContext.sourceCwd,
     forkEntryId: serverContext.forkEntryId,
+    transferSourceProvider: serverContext.transferSourceProvider || null,
+    transferTargetProvider: serverContext.transferTargetProvider || null,
     forkedAt: serverContext.updatedAt || fallbackTimestamp,
     timeline: serverContext.timeline,
     promptPrefix: serverContext.promptPrefix,
@@ -1227,10 +1232,6 @@ function buildTimelineRenderBlocks(timeline: CodexTimelineEntry[]): TimelineRend
   for (const entry of timeline) {
     if (entry.entryType === 'tool') {
       pendingTools.push(entry);
-
-      if (pendingTools.length === 4) {
-        flushPendingTools();
-      }
       continue;
     }
 
@@ -1261,6 +1262,9 @@ function collapseTimelineForDisplay(timeline: CodexTimelineEntry[]): CodexTimeli
     const finalAssistantMessages = currentSegment.filter((entry) => (
       entry.entryType === 'message' && entry.role === 'assistant' && entry.kind === 'final'
     ));
+    const transferMessages = currentSegment.filter((entry) => (
+      entry.entryType === 'message' && entry.kind === 'transfer'
+    ));
 
     if (userMessages.length === 0) {
       visibleEntries.push(...currentSegment.filter((entry) => entry.entryType === 'message'));
@@ -1276,8 +1280,9 @@ function collapseTimelineForDisplay(timeline: CodexTimelineEntry[]): CodexTimeli
 
     const finalAssistantIds = new Set(finalAssistantMessages.map((entry) => entry.id));
     const userMessageIds = new Set(userMessages.map((entry) => entry.id));
+    const transferMessageIds = new Set(transferMessages.map((entry) => entry.id));
     visibleEntries.push(...currentSegment.filter((entry) => (
-      userMessageIds.has(entry.id) || finalAssistantIds.has(entry.id)
+      userMessageIds.has(entry.id) || finalAssistantIds.has(entry.id) || transferMessageIds.has(entry.id)
     )));
     currentSegment = [];
   };
@@ -1514,6 +1519,10 @@ function getToolIdentity(entry: CodexTimelineEntry) {
 function getToolEntryIcon(entry: CodexTimelineEntry) {
   const identity = getToolIdentity(entry);
 
+  if (identity.includes('thinking')) {
+    return Brain;
+  }
+
   if (identity.includes('exec command') || identity.includes('write stdin') || identity.includes('terminal')) {
     return Command;
   }
@@ -1573,6 +1582,13 @@ function getToolEntryIcon(entry: CodexTimelineEntry) {
 
 function getToolEntryTone(entry: CodexTimelineEntry) {
   const identity = getToolIdentity(entry);
+
+  if (identity.includes('thinking')) {
+    return {
+      button: 'hover:border-fuchsia-200 hover:text-fuchsia-700',
+      icon: 'bg-fuchsia-100 text-fuchsia-600 group-hover:bg-fuchsia-200',
+    };
+  }
 
   if (identity.includes('exec command') || identity.includes('write stdin') || identity.includes('terminal')) {
     return {
@@ -1691,6 +1707,51 @@ function ToolCard({
   );
 }
 
+function ToolGroupCard({
+  blockId,
+  entries,
+  expanded,
+  onToggle,
+  onOpen,
+}: {
+  blockId: string;
+  entries: CodexTimelineEntry[];
+  expanded: boolean;
+  onToggle: (blockId: string) => void;
+  onOpen: (entry: CodexTimelineEntry) => void;
+}) {
+  const count = entries.length;
+  return (
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={() => onToggle(blockId)}
+        dir="rtl"
+        className="flex w-full items-center justify-between gap-3 rounded-[1.15rem] border border-slate-200/90 bg-white px-4 py-3 text-right shadow-sm transition-colors hover:bg-slate-50"
+      >
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-slate-700">
+            {`הופעלו ${count} כלים`}
+          </div>
+          <div className="mt-1 text-[11px] text-slate-400">
+            לחץ לפתיחת הפירוט
+          </div>
+        </div>
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500">
+          {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+        </div>
+      </button>
+      {expanded && (
+        <div className="grid grid-cols-4 gap-2">
+          {entries.map((entry) => (
+            <ToolCard key={entry.id} entry={entry} onOpen={onOpen} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MessageBubble({
   entry,
   onOpenFilePreview,
@@ -1712,8 +1773,11 @@ function MessageBubble({
 }) {
   const isUser = entry.role === 'user';
   const isCommentary = entry.kind === 'commentary';
-  const senderLabel = isUser ? 'אתה' : isCommentary ? commentaryLabel : assistantLabel;
+  const isTransfer = entry.kind === 'transfer';
+  const senderLabel = isTransfer ? 'העברה' : isUser ? 'אתה' : isCommentary ? commentaryLabel : assistantLabel;
   const messageText = entry.text || '';
+  const showForkAction = Boolean(onFork) && !isTransfer;
+  const showTransferAction = Boolean(onTransfer && transferLabel) && !isTransfer;
 
   return (
     <div className="flex w-full">
@@ -1729,17 +1793,31 @@ function MessageBubble({
         <div
           className={cn(
             'relative flex min-w-0 max-w-none flex-col gap-1 rounded-[1.25rem] px-4 py-3 text-[15px] leading-relaxed shadow-sm',
-            isUser ? 'flex-1' : 'w-full',
+            isTransfer ? 'max-w-[min(100%,42rem)] flex-none' : isUser ? 'flex-1' : 'w-full',
             isUser
               ? 'rounded-tr-sm border border-indigo-100/50 bg-gradient-to-br from-indigo-50 to-blue-50 text-indigo-950 dark:border-indigo-800/70 dark:from-indigo-950/70 dark:to-slate-900 dark:text-indigo-100'
+              : isTransfer
+                ? 'rounded-tl-sm border border-orange-200/80 bg-gradient-to-br from-orange-50 to-amber-50 text-slate-700 shadow-[0_10px_24px_rgba(251,146,60,0.10)]'
               : isCommentary
                 ? 'rounded-tl-sm border border-cyan-100 bg-cyan-50/60 text-slate-700'
                 : 'rounded-tl-sm border border-slate-100/80 bg-white text-slate-700'
           )}
         >
           <div className="mb-1 flex items-center gap-2 text-[10px] font-medium">
-            <span className={cn(isUser ? 'text-indigo-500/80 dark:text-indigo-200/90' : 'text-slate-400')}>{senderLabel}</span>
-            <span className={cn(isUser ? 'text-indigo-400/70 dark:text-indigo-300/75' : 'text-slate-400')}>
+            <span className={cn(
+              isUser
+                ? 'text-indigo-500/80 dark:text-indigo-200/90'
+                : isTransfer
+                  ? 'text-orange-500/90'
+                  : 'text-slate-400'
+            )}>{senderLabel}</span>
+            <span className={cn(
+              isUser
+                ? 'text-indigo-400/70 dark:text-indigo-300/75'
+                : isTransfer
+                  ? 'text-orange-400/80'
+                  : 'text-slate-400'
+            )}>
               {formatTimestamp(entry.timestamp)}
             </span>
           </div>
@@ -1750,13 +1828,17 @@ function MessageBubble({
               ariaLabel="העתק הודעה"
               className={cn(
                 'h-7 w-7 border-0 text-[10px]',
-                isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80' : 'bg-slate-50'
+                isUser
+                  ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80'
+                  : isTransfer
+                    ? 'bg-white/70 text-orange-500 hover:bg-white'
+                    : 'bg-slate-50'
               )}
             />
-            {onFork && (
+            {showForkAction && (
               <button
                 type="button"
-                onClick={() => onFork(entry.id)}
+                onClick={() => onFork?.(entry.id)}
                 className={cn(
                   'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors',
                   isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
@@ -1767,10 +1849,10 @@ function MessageBubble({
                 <GitBranch className="h-3.5 w-3.5" />
               </button>
             )}
-            {onTransfer && transferLabel && (
+            {showTransferAction && (
               <button
                 type="button"
-                onClick={() => onTransfer(entry.id)}
+                onClick={() => onTransfer?.(entry.id)}
                 disabled={isTransfering}
                 className={cn(
                   'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
@@ -4083,6 +4165,8 @@ export function CodexMobileApp() {
   const [fullTimelineLoadPercent, setFullTimelineLoadPercent] = useState(0);
   const [isTranscriptCollapsed, setIsTranscriptCollapsed] = useState(false);
   const [isPendingQueueSectionCollapsed, setIsPendingQueueSectionCollapsed] = useState(true);
+  const [expandedToolGroups, setExpandedToolGroups] = useState<Record<string, boolean>>({});
+  const [thinkingPulseIndex, setThinkingPulseIndex] = useState(0);
   const mainScrollRef = useRef<HTMLElement | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -4120,7 +4204,8 @@ export function CodexMobileApp() {
   const activeQueueCount = queueItems.filter(isQueueItemActive).length;
   const effectiveDraftCwd = draftCwd || null;
   const activeSessionCwd = selectedSession?.cwd || null;
-  const selectedProfileWorkspaceCwd = profiles.find((profile) => profile.id === profileId)?.workspaceCwd || null;
+  const currentProfile = profiles.find((profile) => profile.id === profileId) || null;
+  const selectedProfileWorkspaceCwd = currentProfile?.workspaceCwd || null;
   const activeComposerCwd = selectedSessionId ? activeSessionCwd : (effectiveDraftCwd || selectedProfileWorkspaceCwd);
   const selectedConversationId = selectedSessionId || (isDraftConversation ? draftSidebarSessionId : null);
   const isMobileEnterBehavior = shouldUseMobileEnterBehavior();
@@ -4209,7 +4294,20 @@ export function CodexMobileApp() {
 
   useEffect(() => {
     setIsPendingQueueSectionCollapsed(true);
+    setExpandedToolGroups({});
   }, [currentQueueKey, selectedSessionId]);
+  useEffect(() => {
+    if (currentSessionActiveQueueCount <= 0) {
+      setThinkingPulseIndex(0);
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setThinkingPulseIndex((current) => (current + 1) % 6);
+    }, 700);
+
+    return () => window.clearInterval(intervalId);
+  }, [currentSessionActiveQueueCount]);
   const pollUpdatesEvent = useEffectEvent(() => {
     void pollUpdates();
   });
@@ -4487,12 +4585,12 @@ export function CodexMobileApp() {
   }, []);
 
   useEffect(() => {
-    if (!authStatus?.authenticated) {
+    if (!authStatus?.authenticated || authStatus.deviceUnlocked === false) {
       return;
     }
 
     void loadProfiles();
-  }, [authStatus?.authenticated]);
+  }, [authStatus?.authenticated, authStatus?.deviceUnlocked]);
 
   useEffect(() => {
     if (!profileId) {
@@ -5227,6 +5325,7 @@ export function CodexMobileApp() {
     setIsDraftConversation(true);
     setForkDraftContext(null);
     setPrompt('');
+    setSearch('');
     setError(null);
     clearDraftAttachments();
     setScheduledFor('');
@@ -5238,6 +5337,7 @@ export function CodexMobileApp() {
     setActiveToolEntry(null);
     closeFilePreview();
     setDraftConversationKey(createDraftConversationKey());
+    setIsHeaderActionsOpen(false);
     setIsSidebarOpen(false);
   }
 
@@ -6251,12 +6351,18 @@ export function CodexMobileApp() {
     return true;
   }
 
-  const currentProfile = profiles.find((profile) => profile.id === profileId) || null;
   const selectedProvider = currentProfile?.provider
     || profiles.find((profile) => profile.defaultProfile)?.provider
     || profiles[0]?.provider
     || 'codex';
   const selectedProviderLabel = getProviderDisplayLabel(selectedProvider);
+  const thinkingDots = '.'.repeat((thinkingPulseIndex % 3) + 1);
+  const thinkingToneClass = [
+    'from-sky-400 via-cyan-300 to-emerald-300',
+    'from-fuchsia-400 via-rose-300 to-orange-300',
+    'from-indigo-400 via-violet-300 to-sky-300',
+  ][thinkingPulseIndex % 3];
+  const isCurrentConversationRunning = currentSessionActiveQueueCount > 0;
   const transferTargetProfile = useMemo(
     () => resolveTransferTargetProfile(profiles, currentProfile),
     [currentProfile, profiles]
@@ -6560,7 +6666,7 @@ export function CodexMobileApp() {
       />
 
       <div className="flex h-full flex-col">
-        <header className="relative flex-none border-b border-slate-100 bg-white/80 px-4 py-2.5 backdrop-blur-xl">
+        <header className="relative flex-none border-b border-slate-100 bg-white/80 px-4 py-2 shadow-[0_10px_22px_-24px_rgba(15,23,42,0.35)] backdrop-blur-xl">
           <button
             onClick={() => {
               setIsHeaderActionsOpen(false);
@@ -6571,7 +6677,7 @@ export function CodexMobileApp() {
             <Menu className="h-5 w-5" />
           </button>
 
-          <div dir="rtl" className="mx-auto flex min-h-[76px] max-w-[70vw] flex-col items-center justify-center text-center">
+          <div dir="rtl" className="mx-auto flex min-h-[66px] max-w-[70vw] flex-col items-center justify-center text-center">
             <h1 className="text-lg font-semibold tracking-tight text-slate-800">
               {currentProfile ? getProviderDisplayLabel(currentProfile.provider) : APP_DISPLAY_NAME}
             </h1>
@@ -6615,7 +6721,7 @@ export function CodexMobileApp() {
               onClick={() => setIsHeaderActionsOpen(false)}
               aria-label="Close actions menu"
             />
-            <div className="fixed left-1/2 top-[5.25rem] z-[55] w-[15.5rem] max-w-[calc(100vw-2rem)] -translate-x-1/2 rounded-[1.75rem] border border-slate-200 bg-white p-3 shadow-[0_24px_90px_-32px_rgba(15,23,42,0.35)]">
+            <div className="fixed left-1/2 top-[4.75rem] z-[55] w-[15.5rem] max-w-[calc(100vw-2rem)] -translate-x-1/2 rounded-[1.75rem] border border-slate-200 bg-white p-3 shadow-[0_24px_90px_-32px_rgba(15,23,42,0.35)]">
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -6802,10 +6908,10 @@ export function CodexMobileApp() {
                 />
               ) : (
                 <img
-                  src={APP_ICON_PATH}
+                  src={CODEX_EMPTY_STATE_ICON_PATH}
                   alt=""
                   aria-hidden="true"
-                  className="pointer-events-none h-36 w-36 select-none object-contain opacity-25 grayscale brightness-75 contrast-125 saturate-0 drop-shadow-[0_12px_30px_rgba(15,23,42,0.08)] sm:h-44 sm:w-44"
+                  className="pointer-events-none h-36 w-36 select-none object-contain opacity-95 drop-shadow-[0_12px_30px_rgba(15,23,42,0.08)] sm:h-44 sm:w-44"
                 />
               )}
             </div>
@@ -6814,11 +6920,17 @@ export function CodexMobileApp() {
           {timelineBlocks.map((block) => {
             if (block.type === 'tool-row') {
               return (
-                <div key={block.id} className="grid grid-cols-4 gap-2">
-                  {block.entries.map((entry) => (
-                    <ToolCard key={entry.id} entry={entry} onOpen={setActiveToolEntry} />
-                  ))}
-                </div>
+                <ToolGroupCard
+                  key={block.id}
+                  blockId={block.id}
+                  entries={block.entries}
+                  expanded={Boolean(expandedToolGroups[block.id])}
+                  onToggle={(blockId) => setExpandedToolGroups((current) => ({
+                    ...current,
+                    [blockId]: !current[blockId],
+                  }))}
+                  onOpen={setActiveToolEntry}
+                />
               );
             }
 
@@ -6849,6 +6961,19 @@ export function CodexMobileApp() {
               />
             );
           })}
+
+          {isCurrentConversationRunning && !isSending && (
+            <div className="flex w-full justify-end px-1 py-1">
+              <div dir="rtl" className="flex items-center">
+                <span className={cn(
+                  'animate-pulse bg-gradient-to-r bg-[length:200%_100%] bg-clip-text text-sm font-semibold text-transparent transition-colors duration-500',
+                  thinkingToneClass
+                )}>
+                  {`Thinking${thinkingDots}`}
+                </span>
+              </div>
+            </div>
+          )}
 
           {isSending && (
             <div className="flex w-full justify-end">

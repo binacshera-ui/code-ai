@@ -165,7 +165,9 @@ function sanitizeForkTimelineEntry(value: any): CodexForkTimelineEntry | null {
     entryType: value.entryType,
     timestamp: value.timestamp,
     role: value.role === 'user' || value.role === 'assistant' ? value.role : undefined,
-    kind: value.kind === 'prompt' || value.kind === 'commentary' || value.kind === 'final' ? value.kind : undefined,
+    kind: value.kind === 'prompt' || value.kind === 'commentary' || value.kind === 'final' || value.kind === 'transfer'
+      ? value.kind
+      : undefined,
     text: typeof value.text === 'string' ? value.text : undefined,
     toolName: typeof value.toolName === 'string' ? value.toolName : undefined,
     title: typeof value.title === 'string' ? value.title : undefined,
@@ -206,6 +208,12 @@ function normalizeForkContext(value: unknown): CodexForkContext | null {
       ? candidate.sourceCwd.trim()
       : null,
     forkEntryId: candidate.forkEntryId.trim(),
+    transferSourceProvider: candidate.transferSourceProvider === 'codex' || candidate.transferSourceProvider === 'claude'
+      ? candidate.transferSourceProvider
+      : null,
+    transferTargetProvider: candidate.transferTargetProvider === 'codex' || candidate.transferTargetProvider === 'claude'
+      ? candidate.transferTargetProvider
+      : null,
     timeline,
   };
 }
@@ -807,6 +815,8 @@ async function processQueueItem(item: CodexQueueItem) {
           sourceTitle: item.forkContext.sourceTitle,
           sourceCwd: item.forkContext.sourceCwd,
           forkEntryId: item.forkContext.forkEntryId,
+          transferSourceProvider: item.forkContext.transferSourceProvider || null,
+          transferTargetProvider: item.forkContext.transferTargetProvider || null,
           promptPreview: item.prompt.trim() || item.promptPreview,
           timeline: item.forkContext.timeline,
           createdAt: nowIso(),
@@ -835,6 +845,8 @@ async function processQueueItem(item: CodexQueueItem) {
         sourceTitle: item.forkContext.sourceTitle,
         sourceCwd: item.forkContext.sourceCwd,
         forkEntryId: item.forkContext.forkEntryId,
+        transferSourceProvider: item.forkContext.transferSourceProvider || null,
+        transferTargetProvider: item.forkContext.transferTargetProvider || null,
         promptPreview: item.prompt.trim() || item.promptPreview,
         timeline: item.forkContext.timeline,
         createdAt: nowIso(),

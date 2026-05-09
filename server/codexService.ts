@@ -36,7 +36,7 @@ export interface CodexUploadedAttachment {
 export interface CodexSessionMessage {
   id: string;
   role: 'user' | 'assistant';
-  kind: 'prompt' | 'commentary' | 'final';
+  kind: 'prompt' | 'commentary' | 'final' | 'transfer';
   text: string;
   timestamp: string;
 }
@@ -46,7 +46,7 @@ export interface CodexTimelineEntry {
   entryType: 'message' | 'tool' | 'status';
   timestamp: string;
   role?: 'user' | 'assistant';
-  kind?: 'prompt' | 'commentary' | 'final';
+  kind?: 'prompt' | 'commentary' | 'final' | 'transfer';
   text?: string;
   toolName?: string;
   title?: string;
@@ -257,6 +257,42 @@ const modelCatalogCache = new Map<string, {
   expiresAt: number;
   models: CodexAvailableModel[];
 }>();
+
+function getProviderDisplayLabel(provider: 'codex' | 'claude'): string {
+  return provider === 'claude' ? 'Claude' : 'Codex';
+}
+
+function buildStartedTaskTitle(provider: 'codex' | 'claude'): string {
+  return `${getProviderDisplayLabel(provider)} התחיל את המשימה`;
+}
+
+function isTransferForkMetadata(metadata: CodexForkSessionMetadata | null | undefined): metadata is CodexForkSessionMetadata & {
+  transferSourceProvider: 'codex' | 'claude';
+  transferTargetProvider: 'codex' | 'claude';
+} {
+  return Boolean(
+    metadata
+    && metadata.transferSourceProvider
+    && metadata.transferTargetProvider
+  );
+}
+
+function buildTransferDisplayText(
+  metadata: CodexForkSessionMetadata & {
+    transferSourceProvider: 'codex' | 'claude';
+    transferTargetProvider: 'codex' | 'claude';
+  }
+): string {
+  const sourceProviderLabel = getProviderDisplayLabel(metadata.transferSourceProvider);
+  const targetProviderLabel = getProviderDisplayLabel(metadata.transferTargetProvider);
+
+  return [
+    `מה נכתב ל-${targetProviderLabel} לפני כל הצ'אט:`,
+    metadata.sourceCwd ? `אתה קורא עכשיו את הוורקספייס: ${metadata.sourceCwd}` : 'אתה קורא עכשיו את הוורקספייס הפעיל של השיחה.',
+    '[כל הצ\'אט]',
+    `עד כאן השיחה עם ${sourceProviderLabel} ועכשיו תורך. המשך מאותה שיחה באופן טבעי, בלי לסכם אותה מחדש.`,
+  ].join('\n');
+}
 
 export class CodexRunCancelledError extends Error {
   constructor(message = 'Codex run was stopped') {
@@ -689,7 +725,7 @@ function buildRecoveredQueueParsedSession(
     }
 
     if (item.startedAt) {
-      pushStatus(item.startedAt, 'Codex התחיל לעבוד', 'started');
+      pushStatus(item.startedAt, buildStartedTaskTitle('codex'), 'started');
     }
 
     if (item.finalMessage) {
@@ -1116,7 +1152,12 @@ function buildParsedDraftSession(draft: CodexForkDraftSession): ParsedSession {
   const compactClone = parseCompactClonePrompt(messages[0]?.text || '');
 
   return {
-    title: trimPreview(`מזלג: ${draft.sourceTitle}`, 72),
+    title: trimPreview(
+      draft.transferSourceProvider && draft.transferTargetProvider
+        ? draft.sourceTitle
+        : `מזלג: ${draft.sourceTitle}`,
+      72
+    ),
     messages,
     preview: trimPreview(draft.promptPreview || draft.sourceTitle),
     timeline: draft.timeline.map((entry) => ({ ...entry })),
@@ -1144,6 +1185,14 @@ function applyForkSessionOverlay(
   const overlayMessages = parsed.messages.map((message) => {
     if (!firstPromptPatched && message.role === 'user' && message.kind === 'prompt') {
       firstPromptPatched = true;
+      if (isTransferForkMetadata(metadata)) {
+        return {
+          ...message,
+          role: 'assistant',
+          kind: 'transfer',
+          text: buildTransferDisplayText(metadata),
+        };
+      }
       return {
         ...message,
         text: metadata.promptPreview || message.text,
@@ -1162,6 +1211,14 @@ function applyForkSessionOverlay(
       && entry.kind === 'prompt'
     ) {
       firstTimelinePromptPatched = true;
+      if (isTransferForkMetadata(metadata)) {
+        return {
+          ...entry,
+          role: 'assistant',
+          kind: 'transfer',
+          text: buildTransferDisplayText(metadata),
+        };
+      }
       return {
         ...entry,
         text: metadata.promptPreview || entry.text,
@@ -1176,7 +1233,12 @@ function applyForkSessionOverlay(
     .filter((entry): entry is CodexSessionMessage => Boolean(entry));
 
   return {
-    title: trimPreview(metadata.promptPreview || parsed.title, 72),
+    title: trimPreview(
+      isTransferForkMetadata(metadata)
+        ? metadata.sourceTitle || parsed.title
+        : metadata.promptPreview || parsed.title,
+      72
+    ),
     preview: parsed.preview,
     messages: [...forkMessages, ...overlayMessages],
     timeline: [...metadata.timeline.map((entry) => ({ ...entry })), ...overlayTimeline],
@@ -1373,7 +1435,7 @@ async function parseSessionFile(
             id: `${sessionId}-status-started-${timeline.length}`,
             entryType: 'status',
             timestamp,
-            title: 'Codex התחיל לעבוד',
+            title: buildStartedTaskTitle('codex'),
             subtitle: payload.collaboration_mode_kind || null,
             status: 'started',
           });
