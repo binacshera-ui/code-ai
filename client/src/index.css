@@ -1,0 +1,199 @@
+@import url('https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;500;600;700&display=swap');
+
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme {
+  --font-sans: "Assistant", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Courier New", monospace;
+  --default-font-family: "Assistant", ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer base {
+  html,
+  body {
+    direction: rtl;
+    min-height: 100%;
+    background: #fafafa;
+    font-family: "Assistant", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+}
+
+@layer components {
+  .codex-theme-dark {
+    color-scheme: dark;
+    background: #020617;
+    color: #e2e8f0;
+  }
+
+  .codex-theme-dark .bg-\[\#FAFAFA\] {
+    background-color: #020617 !important;
+  }
+
+  .codex-theme-dark .bg-white,
+  .codex-theme-dark .bg-white\/80,
+  .codex-theme-dark .bg-white\/95 {
+    background-color: #0f172a !important;
+  }
+
+  .codex-theme-dark .bg-slate-50,
+  .codex-theme-dark .bg-slate-50\/45,
+  .codex-theme-dark .bg-slate-50\/50,
+  .codex-theme-dark .bg-slate-50\/60,
+  .codex-theme-dark .bg-slate-50\/70,
+  .codex-theme-dark .bg-slate-50\/80 {
+    background-color: #111827 !important;
+  }
+
+  .codex-theme-dark .bg-slate-100,
+  .codex-theme-dark .bg-slate-100\/45,
+  .codex-theme-dark .bg-slate-100\/50,
+  .codex-theme-dark .bg-slate-100\/80 {
+    background-color: #1e293b !important;
+  }
+
+  .codex-theme-dark .bg-indigo-50,
+  .codex-theme-dark .bg-indigo-50\/50,
+  .codex-theme-dark .bg-indigo-50\/60,
+  .codex-theme-dark .bg-indigo-50\/80 {
+    background-color: rgba(79, 70, 229, 0.18) !important;
+  }
+
+  .codex-theme-dark .bg-cyan-50,
+  .codex-theme-dark .bg-cyan-50\/60,
+  .codex-theme-dark .bg-cyan-50\/80,
+  .codex-theme-dark .bg-cyan-100 {
+    background-color: rgba(6, 182, 212, 0.18) !important;
+  }
+
+  .codex-theme-dark .bg-amber-50,
+  .codex-theme-dark .bg-amber-50\/80,
+  .codex-theme-dark .bg-amber-100 {
+    background-color: rgba(245, 158, 11, 0.16) !important;
+  }
+
+  .codex-theme-dark .bg-emerald-50,
+  .codex-theme-dark .bg-emerald-50\/70 {
+    background-color: rgba(16, 185, 129, 0.16) !important;
+  }
+
+  .codex-theme-dark .bg-emerald-400\/90 {
+    background-color: rgba(16, 185, 129, 0.9) !important;
+    color: #04130d !important;
+  }
+
+  .codex-theme-dark .bg-red-50,
+  .codex-theme-dark .bg-red-50\/70 {
+    background-color: rgba(239, 68, 68, 0.14) !important;
+  }
+
+  .codex-theme-dark .bg-rose-50 {
+    background-color: rgba(244, 63, 94, 0.14) !important;
+  }
+
+  .codex-theme-dark .border-slate-100,
+  .codex-theme-dark .border-slate-100\/50,
+  .codex-theme-dark .border-slate-100\/80,
+  .codex-theme-dark .border-slate-200,
+  .codex-theme-dark .border-slate-200\/80,
+  .codex-theme-dark .border-slate-300 {
+    border-color: #1f2937 !important;
+  }
+
+  .codex-theme-dark .text-slate-950,
+  .codex-theme-dark .text-slate-900,
+  .codex-theme-dark .text-slate-800 {
+    color: #f8fafc !important;
+  }
+
+  .codex-theme-dark .text-slate-700 {
+    color: #e2e8f0 !important;
+  }
+
+  .codex-theme-dark .text-slate-600 {
+    color: #cbd5e1 !important;
+  }
+
+  .codex-theme-dark .text-slate-500,
+  .codex-theme-dark .text-slate-400 {
+    color: #94a3b8 !important;
+  }
+
+  .codex-theme-dark .text-cyan-800,
+  .codex-theme-dark .text-cyan-700,
+  .codex-theme-dark .text-indigo-950,
+  .codex-theme-dark .text-indigo-700,
+  .codex-theme-dark .text-indigo-600,
+  .codex-theme-dark .text-indigo-500\/80,
+  .codex-theme-dark .text-indigo-400\/70,
+  .codex-theme-dark .text-amber-900,
+  .codex-theme-dark .text-amber-800,
+  .codex-theme-dark .text-amber-700,
+  .codex-theme-dark .text-emerald-800,
+  .codex-theme-dark .text-emerald-700,
+  .codex-theme-dark .text-red-700,
+  .codex-theme-dark .text-rose-700 {
+    color: #dbeafe !important;
+  }
+
+  .codex-theme-dark .placeholder\:text-slate-300::placeholder {
+    color: #64748b !important;
+  }
+
+  .codex-theme-dark .hover\:bg-slate-50:hover {
+    background-color: #1e293b !important;
+  }
+
+  .codex-theme-dark .hover\:bg-slate-100:hover,
+  .codex-theme-dark .hover\:bg-slate-200:hover {
+    background-color: #334155 !important;
+  }
+
+  .codex-theme-dark .hover\:text-slate-800:hover,
+  .codex-theme-dark .hover\:text-slate-700:hover {
+    color: #f8fafc !important;
+  }
+
+  .codex-theme-dark .from-white {
+    --tw-gradient-from: #020617 var(--tw-gradient-from-position) !important;
+    --tw-gradient-to: rgb(2 6 23 / 0) var(--tw-gradient-to-position) !important;
+  }
+
+  .codex-theme-dark .via-white {
+    --tw-gradient-via: #020617 var(--tw-gradient-via-position) !important;
+  }
+
+  .codex-theme-dark .to-white {
+    --tw-gradient-to: #0f172a var(--tw-gradient-to-position) !important;
+  }
+
+  .codex-theme-dark .to-transparent {
+    --tw-gradient-to: rgb(2 6 23 / 0) var(--tw-gradient-to-position) !important;
+  }
+
+  .codex-theme-dark .from-sky-50 {
+    --tw-gradient-from: #0f172a var(--tw-gradient-from-position) !important;
+    --tw-gradient-to: rgb(15 23 42 / 0) var(--tw-gradient-to-position) !important;
+  }
+
+  .codex-theme-dark .via-cyan-50 {
+    --tw-gradient-via: #111827 var(--tw-gradient-via-position) !important;
+  }
+}
+
+@layer utilities {
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
