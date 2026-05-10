@@ -4,7 +4,6 @@ import session from 'express-session';
 import connectPgSimple from 'connect-pg-simple';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import dashboardRoutes from './dashboardRoutes.js';
 import codexRoutes from './codexRoutes.js';
 import { recordCodexServerCrash } from './codexCrashLogs.js';
 import { CODEX_APP_CONFIG } from './config.js';
@@ -146,7 +145,6 @@ app.get('/api/auth/check-session', async (req, res) => {
   }
 });
 
-app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/codex', codexRoutes);
 
 const publicPath = path.join(__dirname, 'public');

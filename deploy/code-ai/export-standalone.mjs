@@ -88,6 +88,22 @@ async function removeExportNoise(rootPath) {
   }
 }
 
+async function pruneStandaloneOnlyFiles(outputDir) {
+  const pathsToRemove = [
+    'client/src/components/dashboard',
+    'client/src/pages',
+    'client/src/stores/authStore.ts',
+    'client/src/stores/chatStore.ts',
+    'client/src/stores/logStore.ts',
+    'client/src/lib/useSubmitGuard.ts',
+    'server/dashboardRoutes.ts',
+  ];
+
+  for (const relativePath of pathsToRemove) {
+    await rm(path.join(outputDir, relativePath), { recursive: true, force: true });
+  }
+}
+
 async function main() {
   const { outputDir, gitInit } = parseArgs(process.argv.slice(2));
 
@@ -113,6 +129,7 @@ async function main() {
   }
 
   await removeExportNoise(outputDir);
+  await pruneStandaloneOnlyFiles(outputDir);
 
   await writeFile(path.join(outputDir, '.gitignore'), 'node_modules\ndist\n.env\n.code-ai\n', 'utf8');
   await cp(path.join(APP_ROOT, 'deploy/code-ai/README.md'), path.join(outputDir, 'README.md'));
