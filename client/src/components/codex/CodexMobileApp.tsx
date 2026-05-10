@@ -881,6 +881,35 @@ function resolveToolDetailView(entry: CodexTimelineEntry): {
   };
 }
 
+function resolveToolDialogSubtitle(entry: CodexTimelineEntry): string | null {
+  const subtitle = entry.subtitle?.trim() || '';
+  if (!subtitle) {
+    return null;
+  }
+
+  const normalizedSubtitle = subtitle.replace(/\s+/g, ' ').trim();
+  if (!normalizedSubtitle) {
+    return null;
+  }
+
+  if (
+    subtitle.length > 140
+    || subtitle.includes('\n')
+    || subtitle.includes('{')
+    || subtitle.includes('[')
+    || subtitle.includes('```')
+  ) {
+    return null;
+  }
+
+  const detailText = resolveToolDetailView(entry).code.replace(/\s+/g, ' ').trim();
+  if (detailText && detailText.includes(normalizedSubtitle)) {
+    return null;
+  }
+
+  return subtitle;
+}
+
 function ToolDetailViewer({
   entry,
 }: {
@@ -8192,7 +8221,11 @@ export function CodexMobileApp() {
             onClick={() => setActiveToolEntry(null)}
             aria-label="Close tool dialog"
           />
-          <div className="relative z-10 flex max-h-[80dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+          {(() => {
+            const dialogSubtitle = resolveToolDialogSubtitle(activeToolEntry);
+
+            return (
+              <div className="relative z-10 flex max-h-[80dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
             <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
               <div className="flex items-start gap-3">
                 <div className={cn(
@@ -8211,9 +8244,9 @@ export function CodexMobileApp() {
                   <div className="mt-1 text-lg font-semibold text-slate-800">
                     {activeToolEntry.title || activeToolEntry.toolName || 'Tool'}
                   </div>
-                  {activeToolEntry.subtitle && (
+                  {dialogSubtitle && (
                     <div className="mt-1 break-words text-sm leading-6 text-slate-500 [overflow-wrap:anywhere]">
-                      {activeToolEntry.subtitle}
+                      {dialogSubtitle}
                     </div>
                   )}
                 </div>
@@ -8236,6 +8269,8 @@ export function CodexMobileApp() {
               <ToolDetailViewer entry={activeToolEntry} />
             </div>
           </div>
+            );
+          })()}
         </div>
       )}
 
