@@ -46,6 +46,7 @@ import { CodexRunCancelledError } from './codexService.js';
 import {
   beginSessionChangeCapture,
   discardSessionChangeCapture,
+  deriveSessionChangeRecordFromTimeline,
   finalizeSessionChangeCapture,
   readSessionChangeRecord,
   type SessionChangeRecord,
@@ -338,7 +339,30 @@ export function isAgentRunCancelledError(error: unknown): boolean {
 
 export async function getAgentSessionChangeRecord(
   sessionId: string,
-  entryId: string
+  entryId: string,
+  profileId?: string
 ): Promise<SessionChangeRecord | null> {
-  return readSessionChangeRecord(sessionId, entryId);
+  const storedRecord = await readSessionChangeRecord(sessionId, entryId);
+  if (storedRecord) {
+    return storedRecord;
+  }
+
+  if (!profileId) {
+    return null;
+  }
+
+  const profile = resolveProfile(profileId);
+  const detail = await getAgentSessionDetail(sessionId, profile.id, { full: true }).catch(() => null);
+  if (!detail) {
+    return null;
+  }
+
+  return deriveSessionChangeRecordFromTimeline({
+    sessionId,
+    entryId,
+    provider: profile.provider,
+    profileId: profile.id,
+    cwd: detail.cwd,
+    timeline: detail.timeline,
+  });
 }

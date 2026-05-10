@@ -1108,10 +1108,12 @@ async function fetchCodexRateLimits(profileId: string, sessionId?: string | null
 
 async function fetchSessionChangeRecord(
   sessionId: string,
-  entryId: string
+  entryId: string,
+  profileId?: string | null
 ): Promise<SessionChangeRecordResponse | null> {
+  const profileQuery = profileId ? `?profile=${encodeURIComponent(profileId)}` : '';
   const data = await fetchJson<{ record: SessionChangeRecordResponse | null }>(
-    `/api/codex/sessions/${encodeURIComponent(sessionId)}/changes/${encodeURIComponent(entryId)}`
+    `/api/codex/sessions/${encodeURIComponent(sessionId)}/changes/${encodeURIComponent(entryId)}${profileQuery}`
   );
   return data.record || null;
 }
@@ -6175,7 +6177,8 @@ export function CodexMobileApp() {
       setIsSessionChangeDialogOpen(true);
       setIsSessionChangeLoading(true);
       setActiveSessionChangeEntryId(entryId);
-      const record = await fetchSessionChangeRecord(selectedSessionId, entryId);
+      const activeProfileId = currentProfile?.id || selectedSession?.profileId || profileId || null;
+      const record = await fetchSessionChangeRecord(selectedSessionId, entryId, activeProfileId);
       setActiveSessionChangeRecord(record);
       setActiveSessionChangeFileId(record?.files[0]?.id || null);
     } catch (changesError: any) {

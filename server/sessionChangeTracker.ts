@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
+import type { CodexTimelineEntry } from './codexService.js';
 
 export type SessionChangeFileStatus = 'created' | 'modified' | 'deleted' | 'renamed';
 
@@ -77,6 +78,7 @@ interface TrackedFileDelta {
 const SESSION_CHANGE_ROOT = path.join(CODEX_APP_CONFIG.storageRoot, 'session-changes');
 const SESSION_CHANGE_TEMP_ROOT = path.join(SESSION_CHANGE_ROOT, '.tmp');
 const MAX_DIFF_TEXT_LENGTH = 200_000;
+const FILE_PATH_REGEX = /(?:^|[\s(])((?:\/|\.\/|\.\.\/)[^\s'")]+|[A-Za-z0-9._-]+\.[A-Za-z0-9._/-]+)/g;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -621,6 +623,323 @@ export async function discardSessionChangeCapture(capture: SessionChangeCapture 
   }
 
   await fs.rm(capture.tempRoot, { recursive: true, force: true }).catch(() => undefined);
+}
+
+function parseApplyPatchFileRecords(
+  patchText: string,
+  cwd: string,
+  repoRoot: string | null
+): SessionChangeFileRecord[] {
+  const lines = patchText.split('\n');
+  const files: SessionChangeFileRecord[] = [];
+  let current:
+    | {
+      path: string;
+      previousPath: string | null;
+      status: SessionChangeFileStatus;
+      lines: string[];
+    }
+    | null = null;
+
+  const flush = () => {
+    if (!current) {
+      return;
+    }
+
+    const body = current.lines.join('\n').trim();
+    const counts = countDiffLines(body);
+    files.push({
+      id: `${current.status}:${current.previousPath || ''}:${current.path}`,
+      path: current.path,
+      displayPath: repoRoot ? computeDisplayPath(current.path, cwd, repoRoot) : current.path,
+      previousPath: current.previousPath,
+      status: current.status,
+      additions: counts.additions,
+      deletions: counts.deletions,
+      isBinary: false,
+      diffText: body,
+      diffTruncated: false,
+    });
+    current = null;
+  };
+
+  for (const line of lines) {
+    if (line.startsWith('*** Add File: ')) {
+      flush();
+      current = {
+        path: line.slice('*** Add File: '.length).trim(),
+        previousPath: null,
+        status: 'created',
+        lines: [line],
+      };
+      continue;
+    }
+
+    if (line.startsWith('*** Update File: ')) {
+      flush();
+      const filePath = line.slice('*** Update File: '.length).trim();
+      current = {
+        path: filePath,
+        previousPath: filePath,
+        status: 'modified',
+        lines: [line],
+      };
+      continue;
+    }
+
+    if (line.startsWith('*** Delete File: ')) {
+      flush();
+      current = {
+        path: line.slice('*** Delete File: '.length).trim(),
+        previousPath: null,
+        status: 'deleted',
+        lines: [line],
+      };
+      continue;
+    }
+
+    if (line.startsWith('*** Move to: ') && current) {
+      current.status = 'renamed';
+      current.path = line.slice('*** Move to: '.length).trim();
+      current.lines.push(line);
+      continue;
+    }
+
+    if (current) {
+      current.lines.push(line);
+    }
+  }
+
+  flush();
+  return files;
+}
+
+function extractLikelyToolPaths(entry: CodexTimelineEntry): string[] {
+  const paths = new Set<string>();
+
+  const pushCandidate = (value: string | null | undefined) => {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+      return;
+    }
+    paths.add(trimmed);
+  };
+
+  const text = entry.text || '';
+  const subtitle = entry.subtitle || '';
+
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') {
+      const object = parsed as Record<string, unknown>;
+      for (const key of ['file_path', 'path', 'target_file', 'new_file_path']) {
+        if (typeof object[key] === 'string') {
+          pushCandidate(object[key] as string);
+        }
+      }
+    }
+  } catch {
+    // ignore non-JSON payloads
+  }
+
+  const successPathMatch = text.match(/(?:created|wrote|write|updated|overwrote).*?:\s+([^\s]+(?:\/[^\s]+)+)/i);
+  if (successPathMatch?.[1]) {
+    pushCandidate(successPathMatch[1]);
+  }
+
+  for (const candidateText of [subtitle, text]) {
+    for (const match of candidateText.matchAll(FILE_PATH_REGEX)) {
+      pushCandidate(match[1]);
+    }
+  }
+
+  return [...paths];
+}
+
+function resolveRepoRelativePath(
+  repoRoot: string,
+  cwd: string,
+  rawPath: string
+): { absolutePath: string; relativePath: string } | null {
+  const absolutePath = path.isAbsolute(rawPath)
+    ? path.resolve(rawPath)
+    : path.resolve(cwd, rawPath);
+  const relativePath = path.relative(repoRoot, absolutePath).split(path.sep).join('/');
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return null;
+  }
+
+  return {
+    absolutePath,
+    relativePath,
+  };
+}
+
+function buildWorkingTreeFileRecord(
+  cwd: string,
+  rawPath: string,
+  explicitStatus: SessionChangeFileStatus = 'modified'
+): SessionChangeFileRecord | null {
+  const repoRoot = resolveGitRepoRoot(cwd);
+  if (!repoRoot) {
+    return null;
+  }
+
+  const resolved = resolveRepoRelativePath(repoRoot, cwd, rawPath);
+  if (!resolved) {
+    return null;
+  }
+
+  const { absolutePath, relativePath } = resolved;
+  const nameStatusOutput = runGit(repoRoot, ['diff', '--find-renames', '--name-status', '--', relativePath], {
+    allowFailure: true,
+  }).stdout.trim();
+  const numstatOutput = runGit(repoRoot, ['diff', '--find-renames', '--numstat', '--', relativePath], {
+    allowFailure: true,
+  }).stdout;
+  const workingTreeDiff = runGit(repoRoot, ['diff', '--find-renames', '--unified=3', '--', relativePath], {
+    allowFailure: true,
+  }).stdout.trim();
+
+  if (nameStatusOutput) {
+    const counts = parseNumstatLines(numstatOutput).get(relativePath) || { additions: 0, deletions: 0, isBinary: false };
+    const code = nameStatusOutput.split('\t')[0]?.charAt(0) || '';
+    const status: SessionChangeFileStatus = code === 'A'
+      ? 'created'
+      : code === 'D'
+        ? 'deleted'
+        : code === 'R'
+          ? 'renamed'
+          : explicitStatus;
+    const clipped = clipDiffText(workingTreeDiff);
+    return {
+      id: `${status}:${relativePath}`,
+      path: relativePath,
+      displayPath: computeDisplayPath(relativePath, cwd, repoRoot),
+      previousPath: null,
+      status,
+      additions: counts.additions,
+      deletions: counts.deletions,
+      isBinary: counts.isBinary,
+      diffText: clipped.text,
+      diffTruncated: clipped.truncated,
+    };
+  }
+
+  const trackedLookup = runGit(repoRoot, ['ls-files', '--error-unmatch', '--', relativePath], {
+    allowFailure: true,
+  });
+
+  if (trackedLookup.status !== 0) {
+    const diff = buildNoIndexDiff(null, absolutePath);
+    return {
+      id: `created:${relativePath}`,
+      path: relativePath,
+      displayPath: computeDisplayPath(relativePath, cwd, repoRoot),
+      previousPath: null,
+      status: explicitStatus === 'deleted' ? 'deleted' : 'created',
+      additions: diff.additions,
+      deletions: diff.deletions,
+      isBinary: diff.isBinary,
+      diffText: diff.diffText,
+      diffTruncated: diff.diffTruncated,
+    };
+  }
+
+  if (workingTreeDiff) {
+    const counts = countDiffLines(workingTreeDiff);
+    const clipped = clipDiffText(workingTreeDiff);
+    return {
+      id: `${explicitStatus}:${relativePath}`,
+      path: relativePath,
+      displayPath: computeDisplayPath(relativePath, cwd, repoRoot),
+      previousPath: null,
+      status: explicitStatus,
+      additions: counts.additions,
+      deletions: counts.deletions,
+      isBinary: false,
+      diffText: clipped.text,
+      diffTruncated: clipped.truncated,
+    };
+  }
+
+  return null;
+}
+
+export async function deriveSessionChangeRecordFromTimeline(input: {
+  sessionId: string;
+  entryId: string;
+  provider: AppProvider;
+  profileId: string;
+  cwd: string | null;
+  timeline: CodexTimelineEntry[];
+}): Promise<SessionChangeRecord | null> {
+  if (!input.cwd) {
+    return null;
+  }
+
+  const targetIndex = input.timeline.findIndex((entry) => entry.id === input.entryId);
+  if (targetIndex === -1) {
+    return null;
+  }
+
+  let segmentStart = 0;
+  for (let index = targetIndex - 1; index >= 0; index -= 1) {
+    const candidate = input.timeline[index];
+    if (candidate.entryType === 'message' && candidate.role === 'user' && candidate.kind === 'prompt') {
+      segmentStart = index + 1;
+      break;
+    }
+  }
+
+  const repoRoot = resolveGitRepoRoot(input.cwd);
+  const collectedFiles = new Map<string, SessionChangeFileRecord>();
+
+  for (const entry of input.timeline.slice(segmentStart, targetIndex + 1)) {
+    if (entry.entryType !== 'tool') {
+      continue;
+    }
+
+    const toolName = (entry.toolName || '').toLowerCase();
+    if (toolName.includes('apply_patch') || toolName === 'patch') {
+      for (const file of parseApplyPatchFileRecords(entry.text || '', input.cwd, repoRoot)) {
+        collectedFiles.set(`${file.status}:${file.path}:${file.previousPath || ''}`, file);
+      }
+      continue;
+    }
+
+    if (
+      toolName === 'write'
+      || toolName === 'write_file'
+      || toolName === 'edit'
+      || toolName === 'multiedit'
+      || toolName === 'notebookedit'
+    ) {
+      for (const filePath of extractLikelyToolPaths(entry)) {
+        const record = buildWorkingTreeFileRecord(input.cwd, filePath);
+        if (record) {
+          collectedFiles.set(`${record.status}:${record.path}:${record.previousPath || ''}`, record);
+        }
+      }
+    }
+  }
+
+  const files = [...collectedFiles.values()].sort((left, right) => left.displayPath.localeCompare(right.displayPath));
+  if (files.length === 0) {
+    return null;
+  }
+
+  return {
+    sessionId: input.sessionId,
+    entryId: input.entryId,
+    provider: input.provider,
+    profileId: input.profileId,
+    cwd: input.cwd,
+    repoRoot,
+    createdAt: nowIso(),
+    summary: buildSummary(files),
+    files,
+  };
 }
 
 export async function readSessionChangeRecord(

@@ -1032,7 +1032,10 @@ router.get('/sessions/:sessionId/changes/:entryId', requireCodexAccess, async (r
   try {
     const sessionId = readRouteParam(req.params.sessionId);
     const entryId = readRouteParam(req.params.entryId);
-    const record = await getAgentSessionChangeRecord(sessionId, entryId);
+    const profileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : undefined;
+    const record = await getAgentSessionChangeRecord(sessionId, entryId, profileId);
     res.json({ record });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load session change record' });
