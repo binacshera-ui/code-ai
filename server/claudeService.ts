@@ -447,12 +447,17 @@ function parseClaudeContextUsage(
   )
     ? (cacheReadInputTokens || 0) + (cacheCreationInputTokens || 0)
     : null;
+  const totalInputTokens = (
+    inputTokens !== null || cachedInputTokens !== null
+  )
+    ? (inputTokens || 0) + (cachedInputTokens || 0)
+    : null;
   const usagePercent = (
     contextWindow !== null
     && contextWindow > 0
-    && inputTokens !== null
+    && totalInputTokens !== null
   )
-    ? Math.min(100, Math.max(0, (inputTokens / contextWindow) * 100))
+    ? Math.min(100, Math.max(0, (totalInputTokens / contextWindow) * 100))
     : null;
 
   if (contextWindow === null && inputTokens === null && cachedInputTokens === null) {

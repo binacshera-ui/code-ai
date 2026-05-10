@@ -460,6 +460,18 @@ function formatCompactTokenCount(value: number | null): string {
   return `${Math.round(value)}`;
 }
 
+function getContextUsageDisplayTokens(context: CodexContextUsageSnapshotResponse | null | undefined): number | null {
+  if (!context) {
+    return null;
+  }
+
+  if (context.inputTokens === null && context.cachedInputTokens === null) {
+    return null;
+  }
+
+  return (context.inputTokens || 0) + (context.cachedInputTokens || 0);
+}
+
 function getRateLimitWindowLabel(windowMinutes: number | null, fallbackLabel: string): string {
   if (windowMinutes === 300) {
     return '5 שעות';
@@ -7789,7 +7801,7 @@ export function CodexMobileApp() {
                               />
                             </div>
                             <div className="mt-1 text-[9px] text-slate-400">
-                              {formatCompactTokenCount(rateLimitSnapshot.context.inputTokens)} / {formatCompactTokenCount(rateLimitSnapshot.context.modelContextWindow)}
+                              {formatCompactTokenCount(getContextUsageDisplayTokens(rateLimitSnapshot.context))} / {formatCompactTokenCount(rateLimitSnapshot.context.modelContextWindow)}
                             </div>
                             {rateLimitSnapshot.context.cachedInputTokens !== null && rateLimitSnapshot.context.cachedInputTokens !== undefined && (
                               <div className="mt-0.5 text-[8px] text-slate-300">
