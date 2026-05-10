@@ -4,6 +4,10 @@ Hebrew version:
 
 - `README.he.md`
 
+Windows field notes:
+
+- `WINDOWS.FIELD-NOTES.he.md`
+
 `code-ai` is a mobile-first workspace for operating the 3 leading terminal coding agents from one UI:
 
 - Codex
@@ -74,6 +78,21 @@ git clone https://github.com/binacshera-ui/code-ai.git
 cd code-ai
 install.cmd --app-name code-ai --port 4000 --profiles-json "[{\"id\":\"codex-main\",\"label\":\"Codex\",\"provider\":\"codex\",\"codexHome\":\"C:\\Users\\Administrator\\.codex\",\"workspaceCwd\":\"D:\\workspace\",\"defaultProfile\":true},{\"id\":\"claude-main\",\"label\":\"Claude\",\"provider\":\"claude\",\"codexHome\":\"C:\\Users\\Administrator\\.claude\",\"workspaceCwd\":\"D:\\workspace\"},{\"id\":\"gemini-main\",\"label\":\"Gemini\",\"provider\":\"gemini\",\"codexHome\":\"C:\\Users\\Administrator\\.gemini\",\"workspaceCwd\":\"D:\\workspace\"}]" --device-password change-me-now --session-secret change-me-too
 ```
+
+## Windows Field Notes
+
+If the target host is Windows, also read:
+
+- `WINDOWS.FIELD-NOTES.he.md`
+
+That document captures operational notes that usually appear only during real Windows installs:
+
+- `.cmd` / `.bat` wrapper behavior
+- resolving real CLI executables vs `PATH` shims
+- `Gemini CLI` specifics on Windows
+- reverse proxy / tunnel mismatches
+- PM2 behavior on Windows
+- paths with spaces
 
 ## What The Installer Actually Does
 

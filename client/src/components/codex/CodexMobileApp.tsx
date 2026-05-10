@@ -29,6 +29,7 @@ import {
   Download,
   Eye,
   File,
+  FileDiff,
   FileImage,
   FileText,
   Folder,
@@ -255,6 +256,41 @@ interface CodexRateLimitSnapshotResponse {
   primary: CodexRateLimitWindowResponse | null;
   secondary: CodexRateLimitWindowResponse | null;
   context: CodexContextUsageSnapshotResponse | null;
+}
+
+interface SessionChangeFileRecordResponse {
+  id: string;
+  path: string;
+  displayPath: string;
+  previousPath: string | null;
+  status: 'created' | 'modified' | 'deleted' | 'renamed';
+  additions: number;
+  deletions: number;
+  isBinary: boolean;
+  diffText: string;
+  diffTruncated: boolean;
+}
+
+interface SessionChangeSummaryResponse {
+  totalFiles: number;
+  created: number;
+  modified: number;
+  deleted: number;
+  renamed: number;
+  additions: number;
+  deletions: number;
+}
+
+interface SessionChangeRecordResponse {
+  sessionId: string;
+  entryId: string;
+  provider: 'codex' | 'claude' | 'gemini';
+  profileId: string;
+  cwd: string | null;
+  repoRoot: string | null;
+  createdAt: string;
+  summary: SessionChangeSummaryResponse;
+  files: SessionChangeFileRecordResponse[];
 }
 
 interface ForkDraftContext {
@@ -703,6 +739,32 @@ function getProviderLogoSrc(provider: CodexProfile['provider']): string {
   }
 }
 
+function getSessionChangeStatusLabel(status: SessionChangeFileRecordResponse['status']): string {
+  switch (status) {
+    case 'created':
+      return 'נוצר';
+    case 'deleted':
+      return 'נמחק';
+    case 'renamed':
+      return 'שונה שם';
+    default:
+      return 'עודכן';
+  }
+}
+
+function getSessionChangeStatusClasses(status: SessionChangeFileRecordResponse['status']): string {
+  switch (status) {
+    case 'created':
+      return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+    case 'deleted':
+      return 'border-rose-200 bg-rose-50 text-rose-700';
+    case 'renamed':
+      return 'border-violet-200 bg-violet-50 text-violet-700';
+    default:
+      return 'border-sky-200 bg-sky-50 text-sky-700';
+  }
+}
+
 function resolveTransferTargetProfiles(
   profiles: CodexProfile[],
   currentProfile: CodexProfile | null
@@ -1042,6 +1104,16 @@ async function fetchCodexRateLimits(profileId: string, sessionId?: string | null
     `/api/codex/rate-limits?${query.toString()}`
   );
   return data.rateLimits || null;
+}
+
+async function fetchSessionChangeRecord(
+  sessionId: string,
+  entryId: string
+): Promise<SessionChangeRecordResponse | null> {
+  const data = await fetchJson<{ record: SessionChangeRecordResponse | null }>(
+    `/api/codex/sessions/${encodeURIComponent(sessionId)}/changes/${encodeURIComponent(entryId)}`
+  );
+  return data.record || null;
 }
 
 function isGoalClearCommand(command: { name: string; args: string }): boolean {
@@ -1981,6 +2053,140 @@ function ToolCard({
   );
 }
 
+function SessionChangeDetailViewer({
+  record,
+  activeFileId,
+  onSelectFile,
+}: {
+  record: SessionChangeRecordResponse | null;
+  activeFileId: string | null;
+  onSelectFile: (fileId: string) => void;
+}) {
+  const selectedFile = record?.files.find((file) => file.id === activeFileId) || record?.files[0] || null;
+
+  if (!record) {
+    return (
+      <div className="flex min-h-[16rem] items-center justify-center rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50/80 px-6 text-center text-sm leading-7 text-slate-500">
+        אין עדיין נתוני שינויים עבור התשובה הזאת.
+      </div>
+    );
+  }
+
+  if (record.files.length === 0) {
+    return (
+      <div className="flex min-h-[16rem] items-center justify-center rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50/80 px-6 text-center text-sm leading-7 text-slate-500">
+        הריצה לא שינתה קבצים בתוך ה־workspace המתועד של השיחה הזאת.
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-4 md:flex-row-reverse">
+      <div className="w-full shrink-0 overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white md:w-72">
+        <div className="border-b border-slate-100 px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+            קבצים ששונו
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600">
+              סה״כ {record.summary.totalFiles}
+            </span>
+            <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] text-emerald-700">
+              +{record.summary.additions.toLocaleString('en-US')}
+            </span>
+            <span className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 text-[11px] text-rose-700">
+              -{record.summary.deletions.toLocaleString('en-US')}
+            </span>
+          </div>
+        </div>
+
+        <div className="max-h-[28dvh] overflow-y-auto p-2 md:max-h-[56dvh]">
+          <div className="space-y-2">
+            {record.files.map((file) => {
+              const isActive = selectedFile?.id === file.id;
+              return (
+                <button
+                  key={file.id}
+                  type="button"
+                  onClick={() => onSelectFile(file.id)}
+                  className={cn(
+                    'flex w-full flex-col items-stretch gap-2 rounded-[1.2rem] border px-3 py-3 text-right transition-colors',
+                    isActive
+                      ? 'border-sky-200 bg-sky-50/80 shadow-[0_10px_22px_-18px_rgba(14,165,233,0.55)]'
+                      : 'border-slate-200 bg-white hover:bg-slate-50'
+                  )}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <span className={cn(
+                      'rounded-full border px-2 py-1 text-[10px] font-semibold',
+                      getSessionChangeStatusClasses(file.status),
+                    )}>
+                      {getSessionChangeStatusLabel(file.status)}
+                    </span>
+                    <span dir="ltr" className="text-[10px] font-semibold tabular-nums text-slate-400">
+                      +{file.additions} / -{file.deletions}
+                    </span>
+                  </div>
+                  <div className="min-w-0 text-sm font-medium leading-6 text-slate-700 [overflow-wrap:anywhere]">
+                    {file.displayPath}
+                  </div>
+                  {file.previousPath && file.previousPath !== file.path && (
+                    <div className="text-[11px] leading-5 text-slate-400 [overflow-wrap:anywhere]">
+                      {file.previousPath} → {file.path}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="min-w-0 flex-1">
+        {selectedFile ? (
+          <div className="overflow-hidden rounded-[1.5rem] border border-slate-200 bg-slate-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+            <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Diff
+                </div>
+                <div dir="ltr" className="mt-1 truncate text-sm font-semibold text-slate-100">
+                  {selectedFile.displayPath}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-slate-400">
+                <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-semibold text-slate-200">
+                  DIFF
+                </span>
+                {selectedFile.isBinary && (
+                  <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2.5 py-1 font-semibold text-amber-200">
+                    BINARY
+                  </span>
+                )}
+              </div>
+            </div>
+            {selectedFile.diffText ? (
+              <CodexCodeBlock
+                code={selectedFile.diffText}
+                language="diff"
+                className="max-h-[56dvh] overflow-x-auto overflow-y-auto rounded-none border-0 shadow-none"
+              />
+            ) : (
+              <div className="px-4 py-6 text-sm text-slate-300">
+                אין diff טקסטואלי להצגה עבור הקובץ הזה.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="flex min-h-[16rem] items-center justify-center rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50/80 px-6 text-center text-sm leading-7 text-slate-500">
+            בחר קובץ כדי לראות את ה־diff המלא.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ToolGroupCard({
   blockId,
   entries,
@@ -2088,19 +2294,23 @@ function QueueSummaryButton({
 function MessageBubble({
   entry,
   onOpenFilePreview,
+  onOpenChanges,
   onFork,
   onTransfer,
   transferOptions,
   isTransfering = false,
+  isChangeLoading = false,
   assistantLabel = 'Codex',
   commentaryLabel = 'Codex עובד',
 }: {
   entry: CodexTimelineEntry;
   onOpenFilePreview: (rawPath: string) => void;
+  onOpenChanges?: (entryId: string) => void;
   onFork?: (entryId: string) => void;
   onTransfer?: (entryId: string, targetProfileId: string) => void;
   transferOptions?: TransferTargetOption[];
   isTransfering?: boolean;
+  isChangeLoading?: boolean;
   assistantLabel?: string;
   commentaryLabel?: string;
 }) {
@@ -2110,6 +2320,7 @@ function MessageBubble({
   const isTransfer = entry.kind === 'transfer';
   const senderLabel = isTransfer ? 'העברה' : isUser ? 'אתה' : isCommentary ? commentaryLabel : assistantLabel;
   const messageText = entry.text || '';
+  const showChangesAction = Boolean(onOpenChanges) && !isUser && !isCommentary && !isTransfer && entry.kind === 'final';
   const showForkAction = Boolean(onFork) && !isTransfer;
   const showTransferAction = Boolean(onTransfer && transferOptions?.length) && !isTransfer;
   const hasMultipleTransferTargets = (transferOptions?.length || 0) > 1;
@@ -2170,6 +2381,21 @@ function MessageBubble({
                     : 'bg-slate-50'
               )}
             />
+            {showChangesAction && (
+              <button
+                type="button"
+                onClick={() => onOpenChanges?.(entry.id)}
+                disabled={isChangeLoading}
+                className={cn(
+                  'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
+                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                )}
+                title="קבצים שהשיחה שינתה"
+                aria-label="קבצים שהשיחה שינתה"
+              >
+                {isChangeLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileDiff className="h-3.5 w-3.5" />}
+              </button>
+            )}
             {showForkAction && (
               <button
                 type="button"
@@ -4512,6 +4738,11 @@ export function CodexMobileApp() {
   const [draftConversationKey, setDraftConversationKey] = useState(createDraftConversationKey);
   const [isDraftConversation, setIsDraftConversation] = useState(true);
   const [activeToolEntry, setActiveToolEntry] = useState<CodexTimelineEntry | null>(null);
+  const [isSessionChangeDialogOpen, setIsSessionChangeDialogOpen] = useState(false);
+  const [activeSessionChangeRecord, setActiveSessionChangeRecord] = useState<SessionChangeRecordResponse | null>(null);
+  const [activeSessionChangeEntryId, setActiveSessionChangeEntryId] = useState<string | null>(null);
+  const [activeSessionChangeFileId, setActiveSessionChangeFileId] = useState<string | null>(null);
+  const [isSessionChangeLoading, setIsSessionChangeLoading] = useState(false);
   const [topicSession, setTopicSession] = useState<CodexSessionSummary | null>(null);
   const [folderTopics, setFolderTopics] = useState<CodexSessionTopic[]>([]);
   const [isTopicLoading, setIsTopicLoading] = useState(false);
@@ -5928,6 +6159,29 @@ export function CodexMobileApp() {
       });
     } catch (forkError: any) {
       setError(forkError.message || 'לא ניתן ליצור מזלוג מההודעה שנבחרה.');
+    }
+  }
+
+  async function openSessionChangesForEntry(entryId: string) {
+    if (!selectedSessionId) {
+      setError('לא נמצאה שיחה פעילה להצגת שינויי קבצים.');
+      return;
+    }
+
+    try {
+      setError(null);
+      setIsSessionChangeDialogOpen(true);
+      setIsSessionChangeLoading(true);
+      setActiveSessionChangeEntryId(entryId);
+      const record = await fetchSessionChangeRecord(selectedSessionId, entryId);
+      setActiveSessionChangeRecord(record);
+      setActiveSessionChangeFileId(record?.files[0]?.id || null);
+    } catch (changesError: any) {
+      setError(changesError.message || 'לא ניתן היה לטעון את שינויי הקבצים של ההודעה הזאת.');
+      setActiveSessionChangeRecord(null);
+      setActiveSessionChangeFileId(null);
+    } finally {
+      setIsSessionChangeLoading(false);
     }
   }
 
@@ -7363,12 +7617,14 @@ export function CodexMobileApp() {
                 key={block.entry.id}
                 entry={block.entry}
                 onOpenFilePreview={(rawPath) => void handleOpenFilePreview(rawPath)}
+                onOpenChanges={selectedSession ? (entryId) => void openSessionChangesForEntry(entryId) : undefined}
                 onFork={selectedSession ? (entryId) => forkFromTimelineEntry(entryId) : undefined}
                 onTransfer={selectedSession && transferTargetOptions.length > 0
                   ? (entryId, targetProfileId) => void transferFromTimelineEntry(entryId, targetProfileId)
                   : undefined}
                 transferOptions={selectedSession ? transferTargetOptions : undefined}
                 isTransfering={transferringEntryId === block.entry.id}
+                isChangeLoading={isSessionChangeLoading && activeSessionChangeEntryId === block.entry.id}
                 assistantLabel={assistantMessageLabel}
                 commentaryLabel={commentaryMessageLabel}
               />
@@ -8217,6 +8473,91 @@ export function CodexMobileApp() {
           onChangeIcon={setNewTopicIcon}
           onChangeColorKey={(value) => setNewTopicColorKey(value as keyof typeof TOPIC_COLOR_PRESETS)}
         />
+      )}
+
+      {isSessionChangeDialogOpen && (
+        <div className="fixed inset-0 z-[60] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+          <button
+            type="button"
+            className="absolute inset-0 cursor-default"
+            onClick={() => {
+              setIsSessionChangeDialogOpen(false);
+              setActiveSessionChangeRecord(null);
+              setActiveSessionChangeEntryId(null);
+              setActiveSessionChangeFileId(null);
+            }}
+            aria-label="Close session changes dialog"
+          />
+          <div className="relative z-10 flex max-h-[84dvh] w-full max-w-5xl flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+              <div className="flex items-start gap-3">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-sky-50 text-sky-600">
+                  <FileDiff className="h-5 w-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                    שינויי קבצים
+                  </div>
+                  <div className="mt-1 text-lg font-semibold text-slate-800">
+                    הקבצים שהשיחה האחרונה שינתה
+                  </div>
+                  {activeSessionChangeRecord && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                      <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">
+                        {getProviderDisplayLabel(activeSessionChangeRecord.provider)}
+                      </span>
+                      <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">
+                        {activeSessionChangeRecord.summary.totalFiles} קבצים
+                      </span>
+                      <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-emerald-700">
+                        +{activeSessionChangeRecord.summary.additions.toLocaleString('en-US')}
+                      </span>
+                      <span className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 text-rose-700">
+                        -{activeSessionChangeRecord.summary.deletions.toLocaleString('en-US')}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {activeSessionChangeRecord && activeSessionChangeFileId && (
+                  <CopyButton
+                    text={activeSessionChangeRecord.files.find((file) => file.id === activeSessionChangeFileId)?.diffText || ''}
+                  />
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsSessionChangeDialogOpen(false);
+                    setActiveSessionChangeRecord(null);
+                    setActiveSessionChangeEntryId(null);
+                    setActiveSessionChangeFileId(null);
+                  }}
+                  className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+              {isSessionChangeLoading ? (
+                <div className="flex min-h-[18rem] items-center justify-center rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50/80">
+                  <div className="flex items-center gap-3 text-sm text-slate-500">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>טוען את שינויי הקבצים של השיחה...</span>
+                  </div>
+                </div>
+              ) : (
+                <SessionChangeDetailViewer
+                  record={activeSessionChangeRecord}
+                  activeFileId={activeSessionChangeFileId}
+                  onSelectFile={setActiveSessionChangeFileId}
+                />
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {activeToolEntry && (

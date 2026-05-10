@@ -116,6 +116,7 @@ async function main() {
     '.env.example',
     'AGENT.md',
     'AGENT.he.md',
+    'WINDOWS.FIELD-NOTES.he.md',
     'package.json',
     'package-lock.json',
     'tsconfig.json',

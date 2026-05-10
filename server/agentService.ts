@@ -43,12 +43,56 @@ import {
   GeminiRunCancelledError,
 } from './geminiService.js';
 import { CodexRunCancelledError } from './codexService.js';
+import {
+  beginSessionChangeCapture,
+  discardSessionChangeCapture,
+  finalizeSessionChangeCapture,
+  readSessionChangeRecord,
+  type SessionChangeRecord,
+} from './sessionChangeTracker.js';
 
 export type AgentProfile = CodexProfile;
 
 export interface AgentRunResult {
   sessionId: string;
   finalMessage: string;
+}
+
+function resolveLatestAssistantEntryId(
+  detail: CodexSessionDetail,
+  baselineEntryIds: Set<string>
+): string | null {
+  const newAssistantMessages = detail.timeline.filter((entry) => (
+    entry.entryType === 'message'
+    && entry.role === 'assistant'
+    && !baselineEntryIds.has(entry.id)
+  ));
+
+  const preferredNewFinal = [...newAssistantMessages].reverse().find((entry) => entry.kind === 'final');
+  if (preferredNewFinal) {
+    return preferredNewFinal.id;
+  }
+
+  if (newAssistantMessages.length > 0) {
+    return newAssistantMessages[newAssistantMessages.length - 1]?.id || null;
+  }
+
+  const latestFinal = [...detail.timeline].reverse().find((entry) => (
+    entry.entryType === 'message'
+    && entry.role === 'assistant'
+    && entry.kind === 'final'
+  ));
+
+  if (latestFinal) {
+    return latestFinal.id;
+  }
+
+  const latestAssistant = [...detail.timeline].reverse().find((entry) => (
+    entry.entryType === 'message'
+    && entry.role === 'assistant'
+  ));
+
+  return latestAssistant?.id || null;
 }
 
 function resolveProfile(profileId?: string): AgentProfile {
@@ -216,14 +260,43 @@ export async function runAgentPrompt(
   } = {}
 ): Promise<AgentRunResult> {
   const profile = resolveProfile(profileId);
-  if (profile.provider === 'claude') {
-    return runClaudePrompt(prompt, sessionId, profile.id, attachments, options);
-  }
-  if (profile.provider === 'gemini') {
-    return runGeminiPrompt(prompt, sessionId, profile.id, attachments, options);
-  }
+  const resolvedCwd = options.cwd || (
+    sessionId
+      ? (await getAgentSessionDetail(sessionId, profile.id, { tail: 1 }).catch(() => null))?.cwd || profile.workspaceCwd
+      : profile.workspaceCwd
+  );
+  const beforeDetail = sessionId
+    ? await getAgentSessionDetail(sessionId, profile.id, { tail: 80 }).catch(() => null)
+    : null;
+  const baselineEntryIds = new Set(beforeDetail?.timeline.map((entry) => entry.id) || []);
+  const capture = await beginSessionChangeCapture({
+    provider: profile.provider,
+    profileId: profile.id,
+    cwd: resolvedCwd,
+  }).catch(() => null);
 
-  return runCodexPrompt(prompt, sessionId, profile.id, attachments, options);
+  try {
+    let result: AgentRunResult;
+    if (profile.provider === 'claude') {
+      result = await runClaudePrompt(prompt, sessionId, profile.id, attachments, options);
+    } else if (profile.provider === 'gemini') {
+      result = await runGeminiPrompt(prompt, sessionId, profile.id, attachments, options);
+    } else {
+      result = await runCodexPrompt(prompt, sessionId, profile.id, attachments, options);
+    }
+
+    const afterDetail = await getAgentSessionDetail(result.sessionId, profile.id, { tail: 160 }).catch(() => null);
+    const entryId = afterDetail ? resolveLatestAssistantEntryId(afterDetail, baselineEntryIds) : null;
+    await finalizeSessionChangeCapture(capture, {
+      sessionId: result.sessionId,
+      entryId,
+    }).catch(() => null);
+
+    return result;
+  } catch (error) {
+    await discardSessionChangeCapture(capture);
+    throw error;
+  }
 }
 
 export async function createAgentForkSession(
@@ -261,4 +334,11 @@ export function isAgentRunCancelledError(error: unknown): boolean {
   return error instanceof CodexRunCancelledError
     || error instanceof ClaudeRunCancelledError
     || error instanceof GeminiRunCancelledError;
+}
+
+export async function getAgentSessionChangeRecord(
+  sessionId: string,
+  entryId: string
+): Promise<SessionChangeRecord | null> {
+  return readSessionChangeRecord(sessionId, entryId);
 }

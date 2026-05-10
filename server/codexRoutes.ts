@@ -12,6 +12,7 @@ import {
 } from './codexService.js';
 import {
   createAgentForkSession,
+  getAgentSessionChangeRecord,
   getAgentModelCatalog,
   getAgentRateLimitSnapshot,
   getAgentSessionDetail,
@@ -1024,6 +1025,17 @@ router.get('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
     });
   } catch (error: any) {
     res.status(404).json({ error: error.message || 'Session was not found' });
+  }
+});
+
+router.get('/sessions/:sessionId/changes/:entryId', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const entryId = readRouteParam(req.params.entryId);
+    const record = await getAgentSessionChangeRecord(sessionId, entryId);
+    res.json({ record });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session change record' });
   }
 });
 

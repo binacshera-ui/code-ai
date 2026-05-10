@@ -4,6 +4,10 @@
 
 - `README.md`
 
+הערות שטח ל־Windows:
+
+- `WINDOWS.FIELD-NOTES.he.md`
+
 `code-ai` היא סביבת עבודה מוביילית לשליטה ב־3 סוכני הקוד המובילים מתוך ממשק אחד:
 
 - Codex
@@ -74,6 +78,21 @@ git clone https://github.com/binacshera-ui/code-ai.git
 cd code-ai
 install.cmd --app-name code-ai --port 4000 --profiles-json "[{\"id\":\"codex-main\",\"label\":\"Codex\",\"provider\":\"codex\",\"codexHome\":\"C:\\Users\\Administrator\\.codex\",\"workspaceCwd\":\"D:\\workspace\",\"defaultProfile\":true},{\"id\":\"claude-main\",\"label\":\"Claude\",\"provider\":\"claude\",\"codexHome\":\"C:\\Users\\Administrator\\.claude\",\"workspaceCwd\":\"D:\\workspace\"},{\"id\":\"gemini-main\",\"label\":\"Gemini\",\"provider\":\"gemini\",\"codexHome\":\"C:\\Users\\Administrator\\.gemini\",\"workspaceCwd\":\"D:\\workspace\"}]" --device-password change-me-now --session-secret change-me-too
 ```
+
+## הערות שטח ל־Windows
+
+אם ההתקנה היא על Windows, מומלץ מאוד לקרוא גם את:
+
+- `WINDOWS.FIELD-NOTES.he.md`
+
+המסמך הזה מרכז בעיות אמיתיות מהשטח:
+
+- wrappers של `.cmd` ו־`.bat`
+- נתיבי CLI אמיתיים מול `PATH`
+- `Gemini CLI` על Windows
+- reverse proxy / tunnel
+- PM2 על Windows
+- נתיבים עם רווחים
 
 ## מה המתקין עושה בפועל
 
