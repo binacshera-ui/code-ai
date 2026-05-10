@@ -7841,7 +7841,7 @@ export function CodexMobileApp() {
                 </div>
               )}
 
-              <div className="pointer-events-none absolute bottom-full -left-9 z-10 mb-2 flex flex-col gap-1.5">
+              <div className="pointer-events-none absolute bottom-full left-2 z-10 mb-2 flex flex-col gap-1.5">
                 <button
                   type="button"
                   onClick={scrollTranscriptToTop}
