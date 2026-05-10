@@ -73,7 +73,7 @@ export default function TypingPage() {
         thread: { id: job.id },
         message: {
           from: { address: user?.email },
-          to: [{ address: 'typing.bina.cshera@gmail.com' }],
+          to: [{ address: 'typing@example.com' }],
           subject: `הקלדת כתבי יד: ${accepted[0]?.name || 'מסמכים'}`,
         },
         attachments: accepted.map(file => ({

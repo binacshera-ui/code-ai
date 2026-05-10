@@ -77,13 +77,13 @@ export function ChatPage() {
       thread: { id: threadId },
       message: {
         id: `msg-${Date.now()}`,
-        headers: { messageId: `<${threadId}@web.bina-cshera.co.il>` },
+        headers: { messageId: `<${threadId}@web.code-ai.local>` },
         date: new Date().toISOString(),
         subject: selectedToolChoice ? `[${CHAT_OPTIONS.find(o => o.id === selectedToolChoice)?.label}]` : 'שיחה',
         text: messageContent,
         html: `<div dir="rtl">${messageContent}</div>`,
         from: { name: user.name || '', address: user.email },
-        to: [{ name: 'בינה כשרה', address: 'chat@app.bina-cshera.co.il' }],
+        to: [{ name: 'code-ai', address: 'chat@example.com' }],
       },
       attachments: [],
       ai_analysis: {

@@ -17,8 +17,8 @@ interface DemoUser {
 }
 
 const demoUsers: Map<string, DemoUser> = new Map([
-  ['demo@bina-cshera.co.il', {
-    email: 'demo@bina-cshera.co.il',
+  ['demo@example.com', {
+    email: 'demo@example.com',
     name: 'משתמש דמו',
     password: 'demo123',
     isPerUse: false,
@@ -169,7 +169,7 @@ router.post('/typing', upload.array('files'), async (req: Request, res: Response
       message: 'עבודת ההקלדה נרשמה ותועבר לשרשרת כתב היד',
       jobId: `typing-${Date.now()}`,
       filesCount: files.length,
-      result: `נקלטו ${files.length} קבצים למסלול ${option}. במערכת המלאה העבודה תישלח ל-typing.bina.cshera@gmail.com ותירשם בשרשרת ההקלדה.`,
+      result: `נקלטו ${files.length} קבצים למסלול ${option}. במערכת המלאה העבודה תישלח לכתובת ההקלדה שתוגדר אצלך ותירשם בשרשרת ההקלדה.`,
     });
   } catch (error: any) {
     console.error('[Dashboard] Typing error:', error);

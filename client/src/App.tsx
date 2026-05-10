@@ -5,12 +5,13 @@ import { CodexMobileApp } from '@/components/codex/CodexMobileApp';
 function shouldUseCodexMobile() {
   const host = window.location.hostname;
   const params = new URLSearchParams(window.location.search);
+  const configuredHost = String(import.meta.env.VITE_CODE_AI_HOSTNAME || '').trim().toLowerCase();
 
-  if (host === 'app-codex.bina-cshera.co.il') {
+  if (configuredHost && host.toLowerCase() === configuredHost) {
     return true;
   }
 
-  if (params.get('app') === 'codex') {
+  if (params.get('app') === 'codex' || params.get('app') === 'code-ai') {
     return true;
   }
 

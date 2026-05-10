@@ -65,7 +65,7 @@ export default function LoginPage() {
   };
 
   const handleDemoLogin = () => {
-    setUsername('demo@bina-cshera.co.il');
+    setUsername('demo@example.com');
     setPassword('demo123');
   };
 

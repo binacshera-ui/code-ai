@@ -64,7 +64,7 @@ export function TranscriptionPage() {
           thread: { id: job.id },
           message: {
             from: { address: user?.email },
-            to: [{ address: 'timlul.bina.cshera@gmail.com' }],
+            to: [{ address: 'transcription@example.com' }],
             subject: `תמלול: ${file.name}`,
           },
           attachments: [{

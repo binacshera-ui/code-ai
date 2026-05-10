@@ -65,7 +65,7 @@ export function CodePage() {
       thread: { id: job.id },
       message: {
         from: { address: user.email },
-        to: [{ address: 'code.bina.cshera@gmail.com' }],
+        to: [{ address: 'code@example.com' }],
         subject: `קוד: ${CODE_OPTIONS.find(o => o.id === option)?.label}`,
         text: trimmedInput,
       },

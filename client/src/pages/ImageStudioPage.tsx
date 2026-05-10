@@ -55,7 +55,7 @@ export function ImageStudioPage() {
       thread: { id: image.id },
       message: {
         from: { address: user.email },
-        to: [{ address: 'image.bina.cshera@gmail.com' }],
+        to: [{ address: 'image@example.com' }],
         subject: `תמונה: ${prompt.slice(0, 50)}`,
         text: prompt,
       },

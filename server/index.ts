@@ -14,13 +14,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const configuredCorsOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught exception in bina-cshera-app:', error);
+  console.error('❌ Uncaught exception in code-ai:', error);
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error('❌ Unhandled rejection in bina-cshera-app:', reason);
+  console.error('❌ Unhandled rejection in code-ai:', reason);
 });
 
 process.on('uncaughtExceptionMonitor', (error, origin) => {
@@ -41,15 +45,20 @@ process.on('unhandledRejection', (reason) => {
   }).catch(() => {});
 });
 
-// CORS - allow main site
 app.use(cors({
-  origin: [
-    'https://bina-cshera.co.il',
-    'https://app.bina-cshera.co.il',
-    'https://app-codex.bina-cshera.co.il',
-    'http://localhost:5000',
-    'http://localhost:4000',
-  ],
+  origin(origin, callback) {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (configuredCorsOrigins.length === 0 || configuredCorsOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('CORS origin not allowed'));
+  },
   credentials: true,
 }));
 

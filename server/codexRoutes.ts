@@ -332,7 +332,7 @@ function requireCodexAccess(req: Request, res: Response, next: NextFunction) {
   if (!authState.authenticated) {
     res.status(401).json({
       authenticated: false,
-      error: 'פתח את Codex דרך app-codex.bina-cshera.co.il.',
+      error: 'פתח את code-ai דרך הכתובת שהוגדרה לשרת.',
     });
     return;
   }

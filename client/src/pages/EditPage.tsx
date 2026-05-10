@@ -70,7 +70,7 @@ export function EditPage() {
       thread: { id: job.id },
       message: {
         from: { address: user.email },
-        to: [{ address: 'edit.bina.cshera@gmail.com' }],
+        to: [{ address: 'edit@example.com' }],
         subject: `עריכה: ${EDIT_OPTIONS.find(o => o.id === option)?.label}`,
         text: trimmedInput,
       },

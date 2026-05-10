@@ -425,6 +425,7 @@ const APPLE_TOUCH_ICON_PATH = '/icons/apple-touch-icon.png';
 const CODEX_EMPTY_STATE_ICON_PATH = '/icons/codex-empty-state.png';
 const CLAUDE_EMPTY_STATE_ICON_PATH = '/icons/claude-agent.png';
 const GEMINI_EMPTY_STATE_ICON_PATH = '/icons/gemini-agent.png';
+const CODE_AI_PUBLIC_ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
 const PROVIDER_DISPLAY_ORDER: CodexProfile['provider'][] = ['codex', 'claude', 'gemini'];
 
 function formatTimestamp(value: string | null): string {
@@ -3837,7 +3838,7 @@ function FileTreeDialog({
                   onOpenPath();
                 }
               }}
-              placeholder="/root/projects/bina-cshera"
+              placeholder="/workspace/project"
               dir="ltr"
               className="h-10 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm text-slate-700 outline-none transition focus:border-slate-300"
             />
@@ -6912,13 +6913,18 @@ export function CodexMobileApp() {
           <Badge className="mb-4 rounded-full bg-cyan-100 px-3 py-1 text-cyan-800">{APP_DISPLAY_NAME}</Badge>
           <h1 className="text-2xl font-black text-slate-950">{`פתח את ${APP_DISPLAY_NAME} דרך הדומיין הייעודי`}</h1>
           <p className="mt-4 text-sm leading-7 text-slate-600">
-            הממשק הזה מוגדר ל-open access על
-            <span className="mx-1 font-semibold text-slate-900">app-codex.bina-cshera.co.il</span>
-            . אם פתחת אותו דרך host אחר, עבור לשם.
+            הממשק הזה זמין דרך הכתובת שעליה ההתקנה הנוכחית מוגדרת.
+            {CODE_AI_PUBLIC_ORIGIN && (
+              <>
+                {' '}כתובת הבסיס שזוהתה כרגע היא
+                <span className="mx-1 font-semibold text-slate-900" dir="ltr">{CODE_AI_PUBLIC_ORIGIN}</span>
+              </>
+            )}
+            . אם פתחת אותו דרך host אחר, עבור לכתובת הבסיס של ההתקנה שלך.
           </p>
           <div className="mt-6 grid gap-3 sm:grid-cols-2">
             <button
-              onClick={() => window.location.assign('https://app-codex.bina-cshera.co.il/')}
+              onClick={() => window.location.assign(CODE_AI_PUBLIC_ORIGIN || '/')}
               className="flex h-12 items-center justify-center rounded-[18px] bg-slate-900 px-5 text-sm font-semibold text-white transition hover:bg-slate-800"
             >
               {`פתח את ${APP_DISPLAY_NAME}`}
