@@ -2121,7 +2121,10 @@ function MessageBubble({
                   {isTransfering ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Repeat className="h-3.5 w-3.5" />}
                 </button>
                 {hasMultipleTransferTargets && isTransferMenuOpen && (
-                  <div className="absolute bottom-full left-0 z-10 mb-2 min-w-[10rem] rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_16px_35px_-24px_rgba(15,23,42,0.24)]">
+                  <div
+                    dir="rtl"
+                    className="absolute bottom-full right-0 z-10 mb-2 w-44 max-w-[calc(100vw-2.5rem)] rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_16px_35px_-24px_rgba(15,23,42,0.24)]"
+                  >
                     <div className="mb-1 px-2 text-right text-[10px] font-semibold tracking-[0.16em] text-slate-400">
                       העבר ל
                     </div>
@@ -2134,10 +2137,10 @@ function MessageBubble({
                             setIsTransferMenuOpen(false);
                             onTransfer?.(entry.id, option.profileId);
                           }}
-                          className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-right text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50"
+                          className="flex w-full items-center justify-start gap-2 rounded-xl px-3 py-2 text-right text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50"
                         >
-                          <Repeat className="h-3.5 w-3.5 text-slate-400" />
-                          <span>{option.label}</span>
+                          <Repeat className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                          <span className="min-w-0 flex-1 truncate text-right">{option.label}</span>
                         </button>
                       ))}
                     </div>
