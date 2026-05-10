@@ -60,6 +60,7 @@ import {
   User,
   Wrench,
   X,
+  Zap,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { CodexCodeBlock } from '@/components/codex/CodexCodeBlock';
@@ -4146,6 +4147,734 @@ function FileTreeDialog({
   );
 }
 
+const RUNNER_GAME_WIDTH = 360;
+const RUNNER_GAME_HEIGHT = 520;
+const RUNNER_BASELINE_Y = 424;
+
+type RunnerSegment = {
+  id: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  accentHue: number;
+};
+
+type RunnerObstacle = {
+  id: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  hue: number;
+  kind: 'crate' | 'spike' | 'drone';
+};
+
+type RunnerCoin = {
+  id: number;
+  x: number;
+  y: number;
+  r: number;
+  kind: 'coin' | 'gem';
+  bob: number;
+  spin: number;
+};
+
+type RunnerParticle = {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  size: number;
+  hue: number;
+  alpha: number;
+};
+
+type RunnerCloud = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  speed: number;
+  opacity: number;
+};
+
+type RunnerGameState = {
+  player: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    vy: number;
+    grounded: boolean;
+    airJumpRemaining: number;
+    health: number;
+    invulnerability: number;
+    tilt: number;
+    stretch: number;
+    squash: number;
+  };
+  segments: RunnerSegment[];
+  obstacles: RunnerObstacle[];
+  coins: RunnerCoin[];
+  particles: RunnerParticle[];
+  clouds: RunnerCloud[];
+  score: number;
+  distance: number;
+  combo: number;
+  feverCharge: number;
+  feverTimer: number;
+  speed: number;
+  stage: number;
+  time: number;
+  nextId: number;
+};
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function randomBetween(min: number, max: number) {
+  return min + Math.random() * (max - min);
+}
+
+function drawRoundedRectPath(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number
+) {
+  const safeRadius = Math.max(0, Math.min(radius, Math.min(w, h) / 2));
+  context.beginPath();
+  context.moveTo(x + safeRadius, y);
+  context.arcTo(x + w, y, x + w, y + h, safeRadius);
+  context.arcTo(x + w, y + h, x, y + h, safeRadius);
+  context.arcTo(x, y + h, x, y, safeRadius);
+  context.arcTo(x, y, x + w, y, safeRadius);
+  context.closePath();
+}
+
+function spawnRunnerBurst(
+  state: RunnerGameState,
+  x: number,
+  y: number,
+  hue: number,
+  count = 14
+) {
+  for (let index = 0; index < count; index += 1) {
+    const angle = (Math.PI * 2 * index) / count + Math.random() * 0.45;
+    const speed = 28 + Math.random() * 90;
+    state.particles.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 0.22 + Math.random() * 0.35,
+      size: 2 + Math.random() * 3,
+      hue,
+      alpha: 0.65 + Math.random() * 0.3,
+    });
+  }
+}
+
+function spawnRunnerLandingDust(state: RunnerGameState, amount = 8) {
+  for (let index = 0; index < amount; index += 1) {
+    state.particles.push({
+      x: state.player.x + randomBetween(-8, 8),
+      y: state.player.y + state.player.h / 2 - 3,
+      vx: randomBetween(-28, 32),
+      vy: randomBetween(-12, 12),
+      life: 0.18 + Math.random() * 0.16,
+      size: 3 + Math.random() * 3,
+      hue: 32 + Math.random() * 26,
+      alpha: 0.35 + Math.random() * 0.18,
+    });
+  }
+}
+
+function spawnRunnerCoinArc(state: RunnerGameState, segment: RunnerSegment) {
+  const count = Math.random() > 0.66 ? 6 : 4 + Math.floor(Math.random() * 2);
+  const arcHeight = 30 + Math.random() * 48;
+  const startInset = 24 + Math.random() * 16;
+  const endInset = 24 + Math.random() * 18;
+  for (let index = 0; index < count; index += 1) {
+    const progress = count === 1 ? 0.5 : index / (count - 1);
+    const x = segment.x + startInset + progress * Math.max(18, segment.w - startInset - endInset);
+    const y = segment.y - 44 - Math.sin(progress * Math.PI) * arcHeight;
+    const isGem = count >= 5 && index === Math.floor(count / 2) && Math.random() > 0.44;
+    state.coins.push({
+      id: state.nextId++,
+      x,
+      y,
+      r: isGem ? 8 : 6.2,
+      kind: isGem ? 'gem' : 'coin',
+      bob: Math.random() * Math.PI * 2,
+      spin: Math.random() * Math.PI * 2,
+    });
+  }
+}
+
+function spawnRunnerObstacle(state: RunnerGameState, segment: RunnerSegment) {
+  if (segment.w < 118 || Math.random() < 0.2) {
+    return;
+  }
+
+  const obstacleCount = segment.w > 170 && Math.random() > 0.6 ? 2 : 1;
+  for (let index = 0; index < obstacleCount; index += 1) {
+    const kindRoll = Math.random();
+    const kind: RunnerObstacle['kind'] = kindRoll > 0.8 ? 'drone' : kindRoll > 0.46 ? 'crate' : 'spike';
+    const obstacleW = kind === 'spike' ? 30 : kind === 'drone' ? 28 : 34;
+    const obstacleH = kind === 'spike' ? 18 : kind === 'drone' ? 26 : 34;
+    const maxX = segment.x + segment.w - obstacleW - 28;
+    const minX = segment.x + 28;
+    if (maxX <= minX) {
+      return;
+    }
+
+    const slotSpacing = obstacleCount === 1 ? 0.5 : 0.28 + index * 0.38;
+    const x = clampNumber(
+      minX + slotSpacing * (maxX - minX) + randomBetween(-10, 10),
+      minX,
+      maxX
+    );
+    const y = kind === 'drone'
+      ? segment.y - obstacleH - randomBetween(34, 68)
+      : segment.y - obstacleH;
+
+    state.obstacles.push({
+      id: state.nextId++,
+      x,
+      y,
+      w: obstacleW,
+      h: obstacleH,
+      kind,
+      hue: kind === 'spike'
+        ? 348 + Math.random() * 18
+        : kind === 'drone'
+          ? 208 + Math.random() * 24
+          : 22 + Math.random() * 20,
+    });
+  }
+}
+
+function spawnRunnerSegment(state: RunnerGameState) {
+  const lastSegment = state.segments[state.segments.length - 1];
+  const previousY = lastSegment?.y ?? RUNNER_BASELINE_Y;
+  let gap = randomBetween(34, 74);
+  const y = clampNumber(previousY + randomBetween(-48, 44), 332, 438);
+
+  if (y < previousY - 24) {
+    gap = Math.min(gap, 56);
+  }
+  if (y > previousY + 28) {
+    gap = Math.min(gap, 62);
+  }
+
+  const w = randomBetween(118, 194);
+  const x = (lastSegment ? lastSegment.x + lastSegment.w : -60) + gap;
+  const segment: RunnerSegment = {
+    id: state.nextId++,
+    x,
+    y,
+    w,
+    h: RUNNER_GAME_HEIGHT - y + 24,
+    accentHue: 24 + Math.random() * 52,
+  };
+  state.segments.push(segment);
+
+  spawnRunnerCoinArc(state, segment);
+  spawnRunnerObstacle(state, segment);
+}
+
+function createRunnerClouds(): RunnerCloud[] {
+  return Array.from({ length: 7 }, (_, index) => ({
+    x: (RUNNER_GAME_WIDTH / 7) * index + randomBetween(-18, 12),
+    y: 52 + Math.random() * 150,
+    w: 56 + Math.random() * 54,
+    h: 24 + Math.random() * 18,
+    speed: 10 + Math.random() * 18,
+    opacity: 0.16 + Math.random() * 0.15,
+  }));
+}
+
+function createRunnerGameState(): RunnerGameState {
+  const state: RunnerGameState = {
+    player: {
+      x: 92,
+      y: RUNNER_BASELINE_Y - 19,
+      w: 28,
+      h: 38,
+      vy: 0,
+      grounded: true,
+      airJumpRemaining: 1,
+      health: 100,
+      invulnerability: 0,
+      tilt: 0,
+      stretch: 1,
+      squash: 1,
+    },
+    segments: [
+      { id: 1, x: -56, y: RUNNER_BASELINE_Y, w: 214, h: RUNNER_GAME_HEIGHT - RUNNER_BASELINE_Y + 24, accentHue: 24 },
+      { id: 2, x: 178, y: RUNNER_BASELINE_Y - 16, w: 184, h: RUNNER_GAME_HEIGHT - (RUNNER_BASELINE_Y - 16) + 24, accentHue: 38 },
+    ],
+    obstacles: [],
+    coins: [],
+    particles: [],
+    clouds: createRunnerClouds(),
+    score: 0,
+    distance: 0,
+    combo: 0,
+    feverCharge: 14,
+    feverTimer: 0,
+    speed: 182,
+    stage: 1,
+    time: 0,
+    nextId: 3,
+  };
+
+  spawnRunnerCoinArc(state, state.segments[0]);
+  spawnRunnerCoinArc(state, state.segments[1]);
+  while (state.segments[state.segments.length - 1].x + state.segments[state.segments.length - 1].w < RUNNER_GAME_WIDTH + 180) {
+    spawnRunnerSegment(state);
+  }
+  return state;
+}
+
+function triggerRunnerJump(state: RunnerGameState) {
+  if (state.player.health <= 0) {
+    return false;
+  }
+
+  const canGroundJump = state.player.grounded;
+  const canAirJump = !state.player.grounded && state.player.airJumpRemaining > 0;
+  if (!canGroundJump && !canAirJump) {
+    return false;
+  }
+
+  state.player.vy = canGroundJump
+    ? -426 - Math.min(26, state.speed * 0.04)
+    : -392 - Math.min(20, state.speed * 0.03);
+  state.player.grounded = false;
+  if (canAirJump) {
+    state.player.airJumpRemaining -= 1;
+    state.combo = Math.max(1, state.combo);
+    state.feverCharge = Math.min(100, state.feverCharge + 4);
+  } else {
+    state.player.airJumpRemaining = 1;
+  }
+  state.player.stretch = 1.18;
+  state.player.squash = 0.88;
+  spawnRunnerBurst(state, state.player.x - 4, state.player.y + 12, canGroundJump ? 24 : 288, canGroundJump ? 8 : 11);
+  return true;
+}
+
+function updateRunnerGame(state: RunnerGameState, dt: number) {
+  state.time += dt;
+  state.player.invulnerability = Math.max(0, state.player.invulnerability - dt);
+  state.player.stretch += (1 - state.player.stretch) * Math.min(1, dt * 8);
+  state.player.squash += (1 - state.player.squash) * Math.min(1, dt * 10);
+
+  if (state.feverTimer > 0) {
+    state.feverTimer = Math.max(0, state.feverTimer - dt);
+  }
+
+  const targetSpeed = 182 + Math.min(156, state.distance * 0.048) + (state.feverTimer > 0 ? 58 : 0);
+  state.speed += (targetSpeed - state.speed) * Math.min(1, dt * 2.4);
+  state.distance += state.speed * dt * 0.1;
+  state.stage = 1 + Math.floor(state.distance / 120);
+
+  const shift = state.speed * dt;
+  state.segments.forEach((segment) => {
+    segment.x -= shift;
+  });
+  state.obstacles.forEach((obstacle) => {
+    obstacle.x -= shift;
+    if (obstacle.kind === 'drone') {
+      obstacle.y += Math.sin(state.time * 6 + obstacle.id) * 0.42;
+    }
+  });
+  state.coins.forEach((coin) => {
+    coin.x -= shift;
+    coin.bob += dt * (coin.kind === 'gem' ? 4.4 : 3.2);
+    coin.spin += dt * (coin.kind === 'gem' ? 6.8 : 5.2);
+  });
+  state.clouds.forEach((cloud) => {
+    cloud.x -= cloud.speed * dt;
+    if (cloud.x + cloud.w < -24) {
+      cloud.x = RUNNER_GAME_WIDTH + randomBetween(12, 62);
+      cloud.y = 48 + Math.random() * 152;
+      cloud.w = 56 + Math.random() * 54;
+      cloud.h = 24 + Math.random() * 18;
+      cloud.speed = 10 + Math.random() * 18;
+      cloud.opacity = 0.16 + Math.random() * 0.15;
+    }
+  });
+
+  while (state.segments[state.segments.length - 1].x + state.segments[state.segments.length - 1].w < RUNNER_GAME_WIDTH + 180) {
+    spawnRunnerSegment(state);
+  }
+
+  const previousBottom = state.player.y + state.player.h / 2;
+  state.player.vy += 1120 * dt;
+  state.player.y += state.player.vy * dt;
+  const nextBottom = state.player.y + state.player.h / 2;
+
+  let landingY: number | null = null;
+  for (const segment of state.segments) {
+    const overlapsSegment = (
+      state.player.x + state.player.w * 0.34 > segment.x
+      && state.player.x - state.player.w * 0.34 < segment.x + segment.w
+    );
+    if (!overlapsSegment) {
+      continue;
+    }
+    if (state.player.vy >= 0 && previousBottom <= segment.y + 10 && nextBottom >= segment.y) {
+      landingY = landingY === null ? segment.y : Math.min(landingY, segment.y);
+    }
+  }
+
+  if (landingY !== null) {
+    if (!state.player.grounded) {
+      spawnRunnerLandingDust(state, 10);
+    }
+    state.player.y = landingY - state.player.h / 2;
+    state.player.vy = 0;
+    state.player.grounded = true;
+    state.player.airJumpRemaining = 1;
+    state.player.stretch = 0.92;
+    state.player.squash = 1.08;
+  } else {
+    state.player.grounded = false;
+  }
+
+  state.player.tilt += (
+    clampNumber(state.player.vy * 0.0016, -0.42, 0.5)
+    - state.player.tilt
+  ) * Math.min(1, dt * 8);
+
+  state.coins = state.coins.filter((coin) => {
+    if (coin.x + coin.r < -24) {
+      return false;
+    }
+
+    const coinY = coin.y + Math.sin(coin.bob) * (coin.kind === 'gem' ? 4 : 3);
+    if (Math.hypot(coin.x - state.player.x, coinY - state.player.y) < coin.r + state.player.w * 0.35) {
+      const baseScore = coin.kind === 'gem' ? 88 : 22;
+      const multiplier = state.feverTimer > 0 ? 2.2 : 1 + Math.min(0.9, state.combo * 0.05);
+      state.score += Math.round(baseScore * multiplier);
+      state.combo += 1;
+      state.feverCharge = Math.min(100, state.feverCharge + (coin.kind === 'gem' ? 18 : 8));
+      state.player.health = Math.min(100, state.player.health + (coin.kind === 'gem' ? 4 : 1));
+      spawnRunnerBurst(state, coin.x, coinY, coin.kind === 'gem' ? 205 : 44, coin.kind === 'gem' ? 16 : 10);
+      if (state.feverCharge >= 100 && state.feverTimer <= 0) {
+        state.feverTimer = 6.6;
+        state.feverCharge = 0;
+      }
+      return false;
+    }
+
+    return true;
+  });
+
+  state.obstacles = state.obstacles.filter((obstacle) => {
+    if (obstacle.x + obstacle.w < -36) {
+      return false;
+    }
+
+    const overlaps = (
+      state.player.x + state.player.w * 0.38 > obstacle.x
+      && state.player.x - state.player.w * 0.38 < obstacle.x + obstacle.w
+      && state.player.y + state.player.h * 0.42 > obstacle.y
+      && state.player.y - state.player.h * 0.42 < obstacle.y + obstacle.h
+    );
+    if (!overlaps) {
+      return true;
+    }
+
+    if (state.feverTimer > 0) {
+      state.score += 140;
+      state.combo += 1;
+      spawnRunnerBurst(state, obstacle.x + obstacle.w / 2, obstacle.y + obstacle.h / 2, 30 + obstacle.hue, 18);
+      return false;
+    }
+
+    if (state.player.invulnerability > 0) {
+      return true;
+    }
+
+    state.player.health = Math.max(0, state.player.health - (obstacle.kind === 'spike' ? 30 : obstacle.kind === 'drone' ? 24 : 18));
+    state.player.invulnerability = 1.15;
+    state.player.vy = -260;
+    state.player.grounded = false;
+    state.combo = 0;
+    state.player.stretch = 1.14;
+    state.player.squash = 0.86;
+    spawnRunnerBurst(state, state.player.x + 8, state.player.y - 4, 348, 16);
+    return obstacle.kind === 'spike';
+  });
+
+  state.segments = state.segments.filter((segment) => segment.x + segment.w > -90);
+
+  state.particles.push({
+    x: state.player.x - state.player.w * 0.34 + (Math.random() - 0.5) * 4,
+    y: state.player.y + state.player.h * 0.4,
+    vx: -24 - Math.random() * 22,
+    vy: 10 + Math.random() * 16,
+    life: 0.14 + Math.random() * 0.08,
+    size: 2 + Math.random() * 2,
+    hue: state.feverTimer > 0 ? 182 + Math.random() * 80 : 34 + Math.random() * 18,
+    alpha: 0.28 + Math.random() * 0.14,
+  });
+
+  state.particles = state.particles.filter((particle) => {
+    particle.x += particle.vx * dt;
+    particle.y += particle.vy * dt;
+    particle.vx *= 0.98;
+    particle.vy = particle.vy * 0.96 + 6 * dt;
+    particle.life -= dt;
+    return particle.life > 0;
+  });
+
+  if (state.player.y - state.player.h / 2 > RUNNER_GAME_HEIGHT + 64) {
+    state.player.health = 0;
+  }
+}
+
+function drawRunnerGame(context: CanvasRenderingContext2D, state: RunnerGameState) {
+  context.clearRect(0, 0, RUNNER_GAME_WIDTH, RUNNER_GAME_HEIGHT);
+  context.save();
+
+  const shakeAmount = state.player.invulnerability > 0 ? state.player.invulnerability * 3 : 0;
+  if (shakeAmount > 0) {
+    context.translate((Math.random() - 0.5) * shakeAmount, (Math.random() - 0.5) * shakeAmount);
+  }
+
+  const background = context.createLinearGradient(0, 0, 0, RUNNER_GAME_HEIGHT);
+  background.addColorStop(0, '#FFF7FB');
+  background.addColorStop(0.26, '#FFD8C7');
+  background.addColorStop(0.56, '#FDBA74');
+  background.addColorStop(1, '#4F46E5');
+  context.fillStyle = background;
+  context.fillRect(0, 0, RUNNER_GAME_WIDTH, RUNNER_GAME_HEIGHT);
+
+  const sunGlow = context.createRadialGradient(286, 108, 20, 286, 108, 130);
+  sunGlow.addColorStop(0, 'rgba(255,255,255,0.98)');
+  sunGlow.addColorStop(0.28, 'rgba(253,224,71,0.85)');
+  sunGlow.addColorStop(1, 'rgba(251,146,60,0)');
+  context.fillStyle = sunGlow;
+  context.beginPath();
+  context.arc(286, 108, 128, 0, Math.PI * 2);
+  context.fill();
+
+  const horizonOffset = state.distance * 4.4;
+  const mountainLayers = [
+    { color: 'rgba(251,191,36,0.22)', baseY: 336, amplitude: 28, frequency: 140, parallax: 0.18 },
+    { color: 'rgba(244,114,182,0.24)', baseY: 374, amplitude: 36, frequency: 118, parallax: 0.32 },
+    { color: 'rgba(59,130,246,0.22)', baseY: 408, amplitude: 30, frequency: 100, parallax: 0.48 },
+  ] as const;
+
+  for (const layer of mountainLayers) {
+    context.beginPath();
+    context.moveTo(0, RUNNER_GAME_HEIGHT);
+    for (let x = 0; x <= RUNNER_GAME_WIDTH + 16; x += 12) {
+      const angle = ((x + horizonOffset * layer.parallax) / layer.frequency) * Math.PI;
+      const y = layer.baseY - Math.sin(angle) * layer.amplitude - Math.cos(angle * 0.55) * (layer.amplitude * 0.25);
+      context.lineTo(x, y);
+    }
+    context.lineTo(RUNNER_GAME_WIDTH, RUNNER_GAME_HEIGHT);
+    context.closePath();
+    context.fillStyle = layer.color;
+    context.fill();
+  }
+
+  for (const cloud of state.clouds) {
+    context.save();
+    context.fillStyle = `rgba(255,255,255,${cloud.opacity})`;
+    context.beginPath();
+    context.ellipse(cloud.x, cloud.y, cloud.w * 0.36, cloud.h * 0.48, 0, 0, Math.PI * 2);
+    context.ellipse(cloud.x - cloud.w * 0.2, cloud.y + 6, cloud.w * 0.25, cloud.h * 0.38, 0, 0, Math.PI * 2);
+    context.ellipse(cloud.x + cloud.w * 0.22, cloud.y + 8, cloud.w * 0.24, cloud.h * 0.34, 0, 0, Math.PI * 2);
+    context.fill();
+    context.restore();
+  }
+
+  for (const segment of state.segments) {
+    context.save();
+    context.shadowColor = 'rgba(79,70,229,0.12)';
+    context.shadowBlur = 18;
+    const segmentGradient = context.createLinearGradient(segment.x, segment.y, segment.x, segment.y + segment.h);
+    segmentGradient.addColorStop(0, `hsl(${segment.accentHue}, 95%, 74%)`);
+    segmentGradient.addColorStop(0.12, `hsl(${segment.accentHue + 12}, 88%, 63%)`);
+    segmentGradient.addColorStop(1, 'hsl(255, 54%, 34%)');
+    drawRoundedRectPath(context, segment.x, segment.y, segment.w, segment.h, 18);
+    context.fillStyle = segmentGradient;
+    context.fill();
+
+    const turfGradient = context.createLinearGradient(segment.x, segment.y, segment.x, segment.y + 12);
+    turfGradient.addColorStop(0, 'rgba(255,255,255,0.95)');
+    turfGradient.addColorStop(1, 'rgba(254,215,170,0.9)');
+    drawRoundedRectPath(context, segment.x, segment.y - 3, segment.w, 12, 10);
+    context.fillStyle = turfGradient;
+    context.fill();
+
+    context.fillStyle = 'rgba(255,255,255,0.14)';
+    for (let stripeX = segment.x + 12; stripeX < segment.x + segment.w - 8; stripeX += 22) {
+      context.fillRect(stripeX, segment.y + 18, 6, segment.h - 24);
+    }
+    context.restore();
+  }
+
+  for (const coin of state.coins) {
+    const drawY = coin.y + Math.sin(coin.bob) * (coin.kind === 'gem' ? 4 : 3);
+    context.save();
+    context.translate(coin.x, drawY);
+    context.rotate(Math.sin(coin.spin) * 0.34);
+    context.shadowColor = coin.kind === 'gem' ? 'rgba(59,130,246,0.32)' : 'rgba(251,191,36,0.28)';
+    context.shadowBlur = 12;
+    const coinGradient = context.createRadialGradient(0, -1, coin.r * 0.2, 0, 0, coin.r);
+    if (coin.kind === 'gem') {
+      coinGradient.addColorStop(0, '#F0FDFA');
+      coinGradient.addColorStop(0.55, '#67E8F9');
+      coinGradient.addColorStop(1, '#2563EB');
+    } else {
+      coinGradient.addColorStop(0, '#FFF7BF');
+      coinGradient.addColorStop(0.55, '#FCD34D');
+      coinGradient.addColorStop(1, '#F97316');
+    }
+    context.fillStyle = coinGradient;
+    context.beginPath();
+    context.ellipse(0, 0, coin.r * 0.82, coin.r, 0, 0, Math.PI * 2);
+    context.fill();
+    context.fillStyle = 'rgba(255,255,255,0.72)';
+    context.fillRect(-coin.r * 0.18, -coin.r * 0.75, coin.r * 0.18, coin.r * 1.5);
+    context.restore();
+  }
+
+  for (const obstacle of state.obstacles) {
+    context.save();
+    if (obstacle.kind === 'spike') {
+      const spikeGradient = context.createLinearGradient(obstacle.x, obstacle.y, obstacle.x, obstacle.y + obstacle.h);
+      spikeGradient.addColorStop(0, '#FCA5A5');
+      spikeGradient.addColorStop(1, '#DB2777');
+      context.fillStyle = spikeGradient;
+      context.beginPath();
+      context.moveTo(obstacle.x, obstacle.y + obstacle.h);
+      context.lineTo(obstacle.x + obstacle.w * 0.25, obstacle.y);
+      context.lineTo(obstacle.x + obstacle.w * 0.5, obstacle.y + obstacle.h);
+      context.lineTo(obstacle.x + obstacle.w * 0.75, obstacle.y);
+      context.lineTo(obstacle.x + obstacle.w, obstacle.y + obstacle.h);
+      context.closePath();
+      context.fill();
+    } else if (obstacle.kind === 'drone') {
+      context.shadowColor = 'rgba(59,130,246,0.28)';
+      context.shadowBlur = 12;
+      const droneGradient = context.createLinearGradient(obstacle.x, obstacle.y, obstacle.x, obstacle.y + obstacle.h);
+      droneGradient.addColorStop(0, '#DBEAFE');
+      droneGradient.addColorStop(1, '#60A5FA');
+      drawRoundedRectPath(context, obstacle.x, obstacle.y, obstacle.w, obstacle.h, 10);
+      context.fillStyle = droneGradient;
+      context.fill();
+      context.fillStyle = 'rgba(15,23,42,0.78)';
+      context.fillRect(obstacle.x + 6, obstacle.y + 9, obstacle.w - 12, 5);
+      context.fillStyle = 'rgba(255,255,255,0.7)';
+      context.fillRect(obstacle.x + 8, obstacle.y + obstacle.h - 8, obstacle.w - 16, 3);
+    } else {
+      context.shadowColor = 'rgba(251,146,60,0.22)';
+      context.shadowBlur = 12;
+      const crateGradient = context.createLinearGradient(obstacle.x, obstacle.y, obstacle.x, obstacle.y + obstacle.h);
+      crateGradient.addColorStop(0, '#FED7AA');
+      crateGradient.addColorStop(1, '#EA580C');
+      drawRoundedRectPath(context, obstacle.x, obstacle.y, obstacle.w, obstacle.h, 10);
+      context.fillStyle = crateGradient;
+      context.fill();
+      context.strokeStyle = 'rgba(255,255,255,0.52)';
+      context.lineWidth = 2;
+      context.strokeRect(obstacle.x + 5, obstacle.y + 5, obstacle.w - 10, obstacle.h - 10);
+      context.beginPath();
+      context.moveTo(obstacle.x + 7, obstacle.y + 7);
+      context.lineTo(obstacle.x + obstacle.w - 7, obstacle.y + obstacle.h - 7);
+      context.moveTo(obstacle.x + obstacle.w - 7, obstacle.y + 7);
+      context.lineTo(obstacle.x + 7, obstacle.y + obstacle.h - 7);
+      context.stroke();
+    }
+    context.restore();
+  }
+
+  for (const particle of state.particles) {
+    context.fillStyle = `hsla(${particle.hue} 90% 65% / ${particle.alpha * Math.max(0, particle.life * 2)})`;
+    context.beginPath();
+    context.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  context.save();
+  context.translate(state.player.x, state.player.y);
+  context.rotate(state.player.tilt);
+  context.scale(state.player.stretch, state.player.squash);
+
+  context.fillStyle = 'rgba(15,23,42,0.14)';
+  context.beginPath();
+  context.ellipse(0, state.player.h * 0.62, state.player.w * 0.6, 7, 0, 0, Math.PI * 2);
+  context.fill();
+
+  const runPhase = state.time * (state.player.grounded ? 11 : 5.5);
+  const legSwing = Math.sin(runPhase) * (state.player.grounded ? 6 : 2);
+  context.strokeStyle = '#1E293B';
+  context.lineWidth = 5;
+  context.lineCap = 'round';
+  context.beginPath();
+  context.moveTo(-7, 10);
+  context.lineTo(-10 + legSwing, 24);
+  context.moveTo(7, 10);
+  context.lineTo(10 - legSwing, 24);
+  context.stroke();
+
+  const bodyGradient = context.createLinearGradient(0, -state.player.h / 2, 0, state.player.h / 2);
+  bodyGradient.addColorStop(0, state.feverTimer > 0 ? '#FDF2F8' : '#FEF3C7');
+  bodyGradient.addColorStop(0.42, '#FB7185');
+  bodyGradient.addColorStop(1, state.feverTimer > 0 ? '#7C3AED' : '#2563EB');
+  drawRoundedRectPath(context, -state.player.w / 2, -state.player.h / 2, state.player.w, state.player.h, 11);
+  context.fillStyle = bodyGradient;
+  context.fill();
+
+  context.fillStyle = 'rgba(255,255,255,0.66)';
+  drawRoundedRectPath(context, -state.player.w / 2 + 3, -state.player.h / 2 + 3, state.player.w - 6, 8, 5);
+  context.fill();
+
+  context.fillStyle = '#FFF7ED';
+  context.beginPath();
+  context.ellipse(0, -7, 8, 8.5, 0, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = '#0F172A';
+  context.beginPath();
+  context.arc(-3.2, -8, 1.4, 0, Math.PI * 2);
+  context.arc(3.4, -8, 1.4, 0, Math.PI * 2);
+  context.fill();
+  context.fillRect(-4.4, -2, 8.8, 3.2);
+
+  context.fillStyle = state.feverTimer > 0 ? '#22D3EE' : '#F97316';
+  context.beginPath();
+  context.moveTo(-state.player.w / 2 + 3, -5);
+  context.quadraticCurveTo(-state.player.w / 2 - 14, 4, -state.player.w / 2 + 1, 10);
+  context.quadraticCurveTo(-state.player.w / 2 + 10, 6, -state.player.w / 2 + 9, -1);
+  context.closePath();
+  context.fill();
+
+  if (state.player.invulnerability > 0) {
+    context.strokeStyle = `rgba(255,255,255,${0.22 + Math.sin(state.time * 18) * 0.1})`;
+    context.lineWidth = 3;
+    context.beginPath();
+    context.arc(0, 0, state.player.w * 0.86, 0, Math.PI * 2);
+    context.stroke();
+  }
+
+  context.restore();
+  context.restore();
+}
+
 function MiniGameDialog({
   isOpen,
   onClose,
@@ -4464,6 +5193,377 @@ function MiniGameDialog({
   );
 }
 
+function GamePickerDialog({
+  isOpen,
+  onClose,
+  onStart,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onStart: (game: 'sky-ace' | 'sunset-sprint') => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[77] flex items-end justify-center bg-slate-950/30 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close game picker"
+      />
+      <div className="relative z-10 flex w-full max-w-md flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.32)]">
+        <div className="border-b border-slate-100 bg-gradient-to-b from-cyan-50/70 via-white to-white px-5 py-5 text-right">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-cyan-50 text-cyan-600 shadow-sm">
+              <Gamepad2 className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Mini Arcade
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">
+                בחר משחק
+              </div>
+              <div className="mt-1 text-sm leading-6 text-slate-500">
+                Sky Ace נשאר כאן, ועכשיו יש גם runner חדש, מהיר וממכר הרבה יותר.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-full bg-slate-50 p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="grid gap-3 p-4">
+          <button
+            type="button"
+            onClick={() => onStart('sky-ace')}
+            className="group flex items-center gap-4 rounded-[1.6rem] border border-sky-100 bg-gradient-to-br from-sky-50 via-cyan-50 to-white px-4 py-4 text-right shadow-[0_18px_38px_-32px_rgba(14,165,233,0.3)] transition hover:-translate-y-0.5 hover:border-sky-200"
+          >
+            <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[1.35rem] bg-white text-sky-500 shadow-sm">
+              <Gamepad2 className="h-7 w-7" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-slate-800">Sky Ace</div>
+              <div className="mt-1 text-xs leading-5 text-slate-500">
+                הקרב האווירי הקיים: ירי אוטומטי, טבעות טעינה וגלי אויבים מהירים.
+              </div>
+            </div>
+            <Play className="h-4 w-4 shrink-0 text-sky-400 transition group-hover:text-sky-600" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onStart('sunset-sprint')}
+            className="group relative overflow-hidden rounded-[1.75rem] border border-rose-100 bg-gradient-to-br from-rose-50 via-amber-50 to-indigo-50 px-4 py-4 text-right shadow-[0_22px_46px_-34px_rgba(244,114,182,0.42)] transition hover:-translate-y-0.5 hover:border-rose-200"
+          >
+            <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-r from-rose-200/35 via-amber-200/35 to-sky-200/35 blur-2xl" />
+            <div className="relative flex items-center gap-4">
+              <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[1.35rem] bg-white/85 text-rose-500 shadow-sm backdrop-blur">
+                <Zap className="h-7 w-7" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-slate-800">Sunset Sprint</div>
+                  <span className="rounded-full bg-white/80 px-2.5 py-1 text-[10px] font-semibold text-rose-500 shadow-sm">
+                    חדש
+                  </span>
+                </div>
+                <div className="mt-1 text-xs leading-5 text-slate-500">
+                  runner צבעוני בסגנון פלטפורמה: דאבל־ג׳אמפ, fever, קומבואים ומסלול שלא מפסיק.
+                </div>
+              </div>
+              <Play className="h-4 w-4 shrink-0 text-rose-400 transition group-hover:text-rose-600" />
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RunnerGameDialog({
+  isOpen,
+  onClose,
+  sessionActiveCount,
+  sessionCompletionSignal,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  sessionActiveCount: number;
+  sessionCompletionSignal: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const animationRef = useRef<number | null>(null);
+  const stateRef = useRef<RunnerGameState>(createRunnerGameState());
+  const [isPaused, setIsPaused] = useState(false);
+  const [isGameOver, setIsGameOver] = useState(false);
+  const [score, setScore] = useState(0);
+  const [distance, setDistance] = useState(0);
+  const [combo, setCombo] = useState(0);
+  const [health, setHealth] = useState(100);
+  const [fever, setFever] = useState(0);
+  const [speed, setSpeed] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [topStatus, setTopStatus] = useState('Sunset Sprint');
+  const feverActiveRef = useRef(false);
+
+  const syncHud = useEffectEvent(() => {
+    const snapshot = stateRef.current;
+    setScore(snapshot.score);
+    setDistance(Math.round(snapshot.distance));
+    setCombo(snapshot.combo);
+    setHealth(Math.max(0, Math.round(snapshot.player.health)));
+    setFever(snapshot.feverTimer > 0 ? 100 : Math.round(snapshot.feverCharge));
+    setSpeed(Math.round(snapshot.speed));
+  });
+
+  const resetGame = useEffectEvent(() => {
+    stateRef.current = createRunnerGameState();
+    feverActiveRef.current = false;
+    setIsPaused(false);
+    setIsGameOver(false);
+    setNotice(null);
+    setTopStatus(sessionActiveCount > 0 ? 'הסשן רץ ברקע' : 'ריצה חלקה');
+    syncHud();
+  });
+
+  const triggerJump = useEffectEvent(() => {
+    if (isPaused || isGameOver) {
+      return;
+    }
+    const wasGrounded = stateRef.current.player.grounded;
+    if (!triggerRunnerJump(stateRef.current)) {
+      return;
+    }
+    setTopStatus(wasGrounded ? 'המריא' : 'דאבל־ג׳אמפ');
+    syncHud();
+  });
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    resetGame();
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === ' ' || event.key === 'ArrowUp' || event.key === 'w' || event.key === 'W') {
+        event.preventDefault();
+        triggerJump();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    if (sessionActiveCount > 0) {
+      setTopStatus('הסשן רץ ברקע');
+      return;
+    }
+
+    if (!isGameOver && !feverActiveRef.current) {
+      setTopStatus('ריצה חלקה');
+    }
+  }, [isGameOver, isOpen, sessionActiveCount]);
+
+  useEffect(() => {
+    if (!isOpen || sessionCompletionSignal === 0) {
+      return;
+    }
+
+    setNotice('הסשן הושלם, אפשר להמשיך לרוץ או לחזור לצ׳אט.');
+    setTopStatus('הסשן הושלם');
+    const timer = window.setTimeout(() => setNotice(null), 3600);
+    return () => window.clearTimeout(timer);
+  }, [isOpen, sessionCompletionSignal]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) {
+      return;
+    }
+
+    let lastFrame = performance.now();
+    const render = (frameTime: number) => {
+      animationRef.current = window.requestAnimationFrame(render);
+      if (isPaused || isGameOver) {
+        drawRunnerGame(context, stateRef.current);
+        return;
+      }
+
+      const delta = Math.min(0.033, (frameTime - lastFrame) / 1000);
+      lastFrame = frameTime;
+      const wasFeverActive = stateRef.current.feverTimer > 0;
+      updateRunnerGame(stateRef.current, delta);
+      drawRunnerGame(context, stateRef.current);
+      syncHud();
+
+      const isFeverActive = stateRef.current.feverTimer > 0;
+      if (!wasFeverActive && isFeverActive) {
+        feverActiveRef.current = true;
+        setTopStatus('Fever פעיל');
+        setNotice('Fever נדלק. עכשיו קופצים מהר יותר ושוברים מכשולים.');
+      } else if (wasFeverActive && !isFeverActive) {
+        feverActiveRef.current = false;
+        if (sessionActiveCount > 0) {
+          setTopStatus('הסשן רץ ברקע');
+        } else {
+          setTopStatus('ריצה חלקה');
+        }
+      }
+
+      if (stateRef.current.player.health <= 0) {
+        setIsGameOver(true);
+        setTopStatus('נפלת. אפשר להפעיל מחדש.');
+        setNotice('Game over. הפעל מחדש כדי לרדוף שוב אחרי הקומבו.');
+      }
+    };
+
+    animationRef.current = window.requestAnimationFrame(render);
+    return () => {
+      if (animationRef.current) {
+        window.cancelAnimationFrame(animationRef.current);
+        animationRef.current = null;
+      }
+    };
+  }, [isGameOver, isOpen, isPaused, sessionActiveCount]);
+
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[77] flex items-end justify-center bg-slate-950/30 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close runner game"
+      />
+      <div className="relative z-10 flex w-full max-w-sm flex-col overflow-hidden rounded-[2rem] border border-rose-100 bg-white text-slate-800 shadow-[0_30px_100px_-40px_rgba(244,114,182,0.38)]">
+        <div className="border-b border-rose-100 bg-gradient-to-b from-rose-50 via-amber-50 to-white px-5 py-4">
+          <div className="flex items-start justify-between gap-4">
+            <div
+              className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-rose-500 shadow-sm"
+              title={topStatus}
+            >
+              <Zap className="h-5 w-5" />
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsPaused((current) => !current)}
+                className="rounded-full bg-white p-2 text-slate-700 transition hover:bg-rose-50"
+              >
+                {isPaused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+              </button>
+              <button
+                type="button"
+                onClick={() => resetGame()}
+                className="rounded-full bg-white p-2 text-slate-700 transition hover:bg-rose-50"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-full bg-white p-2 text-slate-700 transition hover:bg-rose-50"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
+            <div className="rounded-2xl bg-white px-3 py-2">
+              <div className="text-slate-400">Score</div>
+              <div className="mt-1 text-base font-semibold">{score}</div>
+            </div>
+            <div className="rounded-2xl bg-white px-3 py-2">
+              <div className="text-slate-400">Meters</div>
+              <div className="mt-1 text-base font-semibold">{distance}</div>
+            </div>
+            <div className="rounded-2xl bg-white px-3 py-2">
+              <div className="text-slate-400">Combo</div>
+              <div className="mt-1 text-base font-semibold">{combo}x</div>
+            </div>
+            <div className={cn('rounded-2xl bg-white px-3 py-2', fever >= 100 && 'bg-rose-50 text-rose-700')}>
+              <div className={cn('text-slate-400', fever >= 100 && 'text-rose-400')}>Fever</div>
+              <div className="mt-1 text-base font-semibold">{fever}%</div>
+            </div>
+            <div className={cn('rounded-2xl bg-white px-3 py-2', health <= 40 && 'bg-amber-50 text-amber-700')}>
+              <div className={cn('text-slate-400', health <= 40 && 'text-amber-500')}>HP</div>
+              <div className="mt-1 text-base font-semibold">{health}%</div>
+            </div>
+            <div className="rounded-2xl bg-white px-3 py-2">
+              <div className="text-slate-400">Speed</div>
+              <div className="mt-1 text-base font-semibold">{speed}</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="relative px-4 pb-4 pt-4">
+          <canvas
+            ref={canvasRef}
+            width={RUNNER_GAME_WIDTH}
+            height={RUNNER_GAME_HEIGHT}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              triggerJump();
+            }}
+            onTouchStart={(event) => {
+              event.preventDefault();
+              triggerJump();
+            }}
+            className="aspect-[360/520] h-auto max-h-[58dvh] w-full touch-none rounded-[1.5rem] border border-white/10 bg-slate-900"
+          />
+          {notice && (
+            <div className="pointer-events-none absolute left-8 right-8 top-8 rounded-full bg-rose-400/90 px-4 py-2 text-center text-sm font-semibold text-white shadow-lg">
+              {notice}
+            </div>
+          )}
+          {isGameOver && (
+            <div className="absolute inset-8 flex items-center justify-center rounded-[1.5rem] bg-slate-950/60 backdrop-blur-sm">
+              <div className="text-center text-white">
+                <div className="text-xl font-bold">עוד סיבוב?</div>
+                <div className="mt-2 text-sm text-white/75">נסה לרוץ רחוק יותר ולהדליק Fever מוקדם יותר.</div>
+              </div>
+            </div>
+          )}
+          <div className="mt-3 rounded-[1.25rem] border border-rose-100 bg-rose-50/60 px-4 py-3 text-right text-xs leading-5 text-rose-800">
+            נגיעה אחת קופצת. נגיעה באוויר מפעילה דאבל־ג׳אמפ. אסוף מטבעות וג׳מים כדי למלא Fever ולמחוץ מכשולים.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TopicManagerDialog({
   session,
   topics,
@@ -4720,7 +5820,9 @@ export function CodexMobileApp() {
   const [fileTreeError, setFileTreeError] = useState<string | null>(null);
   const [fileTreePathInput, setFileTreePathInput] = useState('');
   const [fileTreeFilter, setFileTreeFilter] = useState('');
+  const [isGamePickerOpen, setIsGamePickerOpen] = useState(false);
   const [isGameOpen, setIsGameOpen] = useState(false);
+  const [isRunnerGameOpen, setIsRunnerGameOpen] = useState(false);
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
@@ -5474,6 +6576,18 @@ export function CodexMobileApp() {
   function openMiniGame() {
     setIsHeaderActionsOpen(false);
     setIsSidebarOpen(false);
+    setIsGamePickerOpen(true);
+  }
+
+  function startMiniGame(game: 'sky-ace' | 'sunset-sprint') {
+    setIsGamePickerOpen(false);
+    setIsGameOpen(false);
+    setIsRunnerGameOpen(false);
+    if (game === 'sunset-sprint') {
+      setIsRunnerGameOpen(true);
+      return;
+    }
+
     setIsGameOpen(true);
   }
 
@@ -6003,7 +7117,9 @@ export function CodexMobileApp() {
     setFileTreeLoadingPaths({});
     setFileTreeError(null);
     setIsFileTreeOpen(false);
+    setIsGamePickerOpen(false);
     setIsGameOpen(false);
+    setIsRunnerGameOpen(false);
     setThemeMode(readThemeModeForProfile(nextProfileId));
     folderBackStackRef.current = [];
     folderForwardStackRef.current = [];
@@ -6276,7 +7392,9 @@ export function CodexMobileApp() {
         setFileTreeLoadingPaths({});
         setFileTreeError(null);
         setIsFileTreeOpen(false);
+        setIsGamePickerOpen(false);
         setIsGameOpen(false);
+        setIsRunnerGameOpen(false);
         setRateLimitSnapshot(null);
         setAvailableModels([]);
         setModelPermissionSnapshot(null);
@@ -7415,7 +8533,7 @@ export function CodexMobileApp() {
                   className="flex flex-col items-center justify-center gap-2 rounded-[1.25rem] bg-cyan-50 px-3 py-4 text-center text-cyan-700 transition hover:bg-cyan-100"
                 >
                   <Gamepad2 className="h-5 w-5" />
-                  <span className="text-xs font-semibold">משחק</span>
+                  <span className="text-xs font-semibold">משחקים</span>
                 </button>
                 <button
                   type="button"
@@ -8402,9 +9520,22 @@ export function CodexMobileApp() {
         </div>
       )}
 
+      <GamePickerDialog
+        isOpen={isGamePickerOpen}
+        onClose={() => setIsGamePickerOpen(false)}
+        onStart={startMiniGame}
+      />
+
       <MiniGameDialog
         isOpen={isGameOpen}
         onClose={() => setIsGameOpen(false)}
+        sessionActiveCount={currentSessionActiveQueueCount}
+        sessionCompletionSignal={gameSessionCompletionSignal}
+      />
+
+      <RunnerGameDialog
+        isOpen={isRunnerGameOpen}
+        onClose={() => setIsRunnerGameOpen(false)}
         sessionActiveCount={currentSessionActiveQueueCount}
         sessionCompletionSignal={gameSessionCompletionSignal}
       />
