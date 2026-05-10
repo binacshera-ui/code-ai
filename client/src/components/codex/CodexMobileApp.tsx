@@ -7469,7 +7469,7 @@ export function CodexMobileApp() {
 
             <div ref={composerControlsRef} className="relative">
               {!isPendingQueueSectionCollapsed && collapsedQueueItems.length > 0 && (
-                <div className="absolute bottom-full left-0 right-0 z-20 mb-3 flex max-h-[40vh] flex-col gap-3 overflow-y-auto">
+                <div className="absolute bottom-full -left-1.5 -right-1.5 z-20 mb-3 flex max-h-[40vh] flex-col gap-3 overflow-y-auto px-1.5 pb-2 pt-1.5">
                   {collapsedQueueItems.map((item) => (
                     <QueueItemCard
                       key={item.id}

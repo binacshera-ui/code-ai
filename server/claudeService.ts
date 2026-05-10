@@ -52,6 +52,20 @@ interface ClaudeAuthStatusResponse {
   subscriptionType?: string;
 }
 
+interface ClaudeOauthTokens {
+  accessToken?: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  scopes?: string[];
+  subscriptionType?: string | null;
+  rateLimitTier?: string | null;
+}
+
+interface ClaudeCredentialsFile {
+  claudeAiOauth?: ClaudeOauthTokens;
+  organizationUuid?: string;
+}
+
 interface ParsedClaudeSession {
   title: string;
   preview: string;
@@ -68,6 +82,16 @@ interface ClaudeRateLimitInfo {
   overageStatus?: string;
   overageResetsAt?: number;
   isUsingOverage?: boolean;
+}
+
+interface ClaudeOauthUsageWindow {
+  utilization?: number | null;
+  resets_at?: string | null;
+}
+
+interface ClaudeOauthUsageResponse {
+  five_hour?: ClaudeOauthUsageWindow | null;
+  seven_day?: ClaudeOauthUsageWindow | null;
 }
 
 interface ClaudeRuntimeSnapshot {
@@ -112,7 +136,12 @@ const DEFAULT_PROFILE_ID = CODEX_APP_CONFIG.defaultProfileId;
 const MAX_SESSIONS = 80;
 const MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 const AUTH_STATUS_CACHE_TTL_MS = 60_000;
+const CLAUDE_USAGE_CACHE_TTL_MS = 20_000;
 const CLAUDE_RUNTIME_STATE_FILE = path.join(CODEX_APP_CONFIG.queueRoot, 'claude-runtime-state.json');
+const CLAUDE_CREDENTIALS_FILE = '.credentials.json';
+const CLAUDE_OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
+const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const SUPPORTED_REASONING_LEVELS: CodexReasoningLevelOption[] = [
   { effort: 'low', description: null },
   { effort: 'medium', description: null },
@@ -129,13 +158,14 @@ const modelCatalogCache = new Map<string, {
 }>();
 const queueTails = new Map<string, Promise<void>>();
 const activeClaudeRuns = new Map<string, ClaudeActiveRun>();
-let authStatusCache: {
+const authStatusCache = new Map<string, {
   expiresAt: number;
   value: ClaudeAuthStatusResponse | null;
-} = {
-  expiresAt: 0,
-  value: null,
-};
+}>();
+const usageCache = new Map<string, {
+  expiresAt: number;
+  value: { primary: CodexRateLimitWindow | null; secondary: CodexRateLimitWindow | null } | null;
+}>();
 let runtimeStateLoadPromise: Promise<void> | null = null;
 let runtimeStatePersistTail: Promise<void> = Promise.resolve();
 
@@ -278,6 +308,28 @@ function getClaudeProjectsRoot(profile: CodexProfile): string {
 
 function getClaudeProjectRoot(profile: CodexProfile): string {
   return path.join(getClaudeProjectsRoot(profile), sanitizeClaudeProjectKey(profile.workspaceCwd));
+}
+
+function getClaudeCredentialsPath(profile: CodexProfile): string {
+  return path.join(profile.codexHome, CLAUDE_CREDENTIALS_FILE);
+}
+
+async function readClaudeCredentials(profile: CodexProfile): Promise<ClaudeCredentialsFile | null> {
+  try {
+    const raw = await fs.readFile(getClaudeCredentialsPath(profile), 'utf-8');
+    return safeJsonParse<ClaudeCredentialsFile>(raw);
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function writeClaudeCredentials(profile: CodexProfile, credentials: ClaudeCredentialsFile): Promise<void> {
+  await fs.mkdir(profile.codexHome, { recursive: true });
+  await fs.writeFile(getClaudeCredentialsPath(profile), JSON.stringify(credentials, null, 2), 'utf-8');
 }
 
 function buildClaudeProcessEnv(profile: CodexProfile): NodeJS.ProcessEnv {
@@ -569,31 +621,160 @@ function buildRateLimitWindowFromClaudeEvent(
   };
 }
 
-async function readClaudeAuthStatus(): Promise<ClaudeAuthStatusResponse | null> {
-  if (authStatusCache.expiresAt > Date.now()) {
-    return authStatusCache.value;
+function isClaudeOauthTokenExpiring(expiresAt: number | null | undefined): boolean {
+  return typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt <= Date.now() + 5 * 60 * 1000;
+}
+
+async function getClaudeOauthTokens(profile: CodexProfile): Promise<ClaudeOauthTokens | null> {
+  const credentials = await readClaudeCredentials(profile);
+  return credentials?.claudeAiOauth || null;
+}
+
+async function refreshClaudeOauthTokens(profile: CodexProfile, tokens: ClaudeOauthTokens): Promise<ClaudeOauthTokens | null> {
+  const refreshToken = normalizeString(tokens.refreshToken);
+  if (!refreshToken) {
+    return null;
+  }
+
+  const response = await fetch(CLAUDE_OAUTH_TOKEN_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: CLAUDE_OAUTH_CLIENT_ID,
+      scope: Array.isArray(tokens.scopes) ? tokens.scopes.join(' ') : undefined,
+    }),
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const payload = await response.json().catch(() => null) as {
+    access_token?: unknown;
+    refresh_token?: unknown;
+    expires_in?: unknown;
+    scope?: unknown;
+  } | null;
+
+  const accessToken = normalizeString(payload?.access_token);
+  if (!accessToken) {
+    return null;
+  }
+
+  const refreshed: ClaudeOauthTokens = {
+    accessToken,
+    refreshToken: normalizeString(payload?.refresh_token) || refreshToken,
+    expiresAt: (() => {
+      const expiresInSeconds = parseNumber(payload?.expires_in);
+      return expiresInSeconds !== null ? Date.now() + expiresInSeconds * 1000 : tokens.expiresAt;
+    })(),
+    scopes: typeof payload?.scope === 'string'
+      ? payload.scope.split(/\s+/).map((value) => value.trim()).filter(Boolean)
+      : (tokens.scopes || []),
+    subscriptionType: tokens.subscriptionType || null,
+    rateLimitTier: tokens.rateLimitTier || null,
+  };
+
+  const credentials = await readClaudeCredentials(profile) || {};
+  credentials.claudeAiOauth = refreshed;
+  await writeClaudeCredentials(profile, credentials);
+  return refreshed;
+}
+
+function buildRateLimitWindowFromClaudeUsage(
+  info: ClaudeOauthUsageWindow | null | undefined,
+  windowMinutes: number | null
+): CodexRateLimitWindow | null {
+  const usedPercent = parseNumber(info?.utilization);
+  const resetsAtIso = normalizeString(info?.resets_at);
+  const resetsAtMs = resetsAtIso ? Date.parse(resetsAtIso) : Number.NaN;
+
+  if (usedPercent === null && !resetsAtIso) {
+    return null;
+  }
+
+  return {
+    usedPercent,
+    windowMinutes,
+    resetsAt: Number.isFinite(resetsAtMs) ? Math.floor(resetsAtMs / 1000) : null,
+    resetsAtIso: resetsAtIso || null,
+  };
+}
+
+async function fetchClaudeUsageWindows(
+  profile: CodexProfile
+): Promise<{ primary: CodexRateLimitWindow | null; secondary: CodexRateLimitWindow | null } | null> {
+  const cached = usageCache.get(profile.id);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  let tokens = await getClaudeOauthTokens(profile);
+  if (!tokens?.accessToken) {
+    usageCache.set(profile.id, { expiresAt: Date.now() + CLAUDE_USAGE_CACHE_TTL_MS, value: null });
+    return null;
+  }
+
+  if (isClaudeOauthTokenExpiring(tokens.expiresAt)) {
+    tokens = await refreshClaudeOauthTokens(profile, tokens) || tokens;
+  }
+
+  const response = await fetch(CLAUDE_USAGE_URL, {
+    headers: {
+      Authorization: `Bearer ${tokens.accessToken}`,
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01',
+    },
+  });
+
+  if (!response.ok) {
+    usageCache.set(profile.id, { expiresAt: Date.now() + CLAUDE_USAGE_CACHE_TTL_MS, value: null });
+    return null;
+  }
+
+  const payload = await response.json().catch(() => null) as ClaudeOauthUsageResponse | null;
+  const value = {
+    primary: buildRateLimitWindowFromClaudeUsage(payload?.five_hour, 300),
+    secondary: buildRateLimitWindowFromClaudeUsage(payload?.seven_day, 10080),
+  };
+
+  usageCache.set(profile.id, {
+    expiresAt: Date.now() + CLAUDE_USAGE_CACHE_TTL_MS,
+    value,
+  });
+  return value;
+}
+
+async function readClaudeAuthStatus(profile: CodexProfile): Promise<ClaudeAuthStatusResponse | null> {
+  const cached = authStatusCache.get(profile.id);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
   }
 
   const result = spawnSync(CLAUDE_BIN, ['auth', 'status'], {
     encoding: 'utf-8',
-    env: process.env,
+    env: buildClaudeProcessEnv(profile),
     maxBuffer: 1024 * 1024,
   });
 
   if (result.error || result.status !== 0) {
-    authStatusCache = {
+    authStatusCache.set(profile.id, {
       expiresAt: Date.now() + AUTH_STATUS_CACHE_TTL_MS,
       value: null,
-    };
+    });
     return null;
   }
 
   const payload = safeJsonParse<ClaudeAuthStatusResponse>((result.stdout || '').trim());
-  authStatusCache = {
+  authStatusCache.set(profile.id, {
     expiresAt: Date.now() + AUTH_STATUS_CACHE_TTL_MS,
     value: payload || null,
-  };
-  return authStatusCache.value;
+  });
+  return authStatusCache.get(profile.id)?.value || null;
 }
 
 async function readClaudeSettings(profile: CodexProfile): Promise<ClaudeSettings> {
@@ -1588,19 +1769,25 @@ async function buildSessionContextSnapshot(
   return {
     ...nextParsed.context,
     modelContextWindow: nextParsed.context.modelContextWindow || contextWindow,
-    usagePercent: (
-      (nextParsed.context.modelContextWindow || contextWindow)
-      && nextParsed.context.inputTokens !== null
-      && nextParsed.context.inputTokens !== undefined
-    )
-      ? Math.min(
-        100,
-        Math.max(
-          0,
-          (nextParsed.context.inputTokens / Number(nextParsed.context.modelContextWindow || contextWindow)) * 100
-        )
+    usagePercent: (() => {
+      const effectiveContextWindow = nextParsed.context.modelContextWindow || contextWindow;
+      const effectiveInputTokens = (
+        nextParsed.context.inputTokens !== null
+        || nextParsed.context.cachedInputTokens !== null
       )
-      : nextParsed.context.usagePercent,
+        ? (nextParsed.context.inputTokens || 0) + (nextParsed.context.cachedInputTokens || 0)
+        : null;
+
+      return (
+        effectiveContextWindow
+        && effectiveInputTokens !== null
+      )
+        ? Math.min(
+          100,
+          Math.max(0, (effectiveInputTokens / Number(effectiveContextWindow)) * 100)
+        )
+        : nextParsed.context.usagePercent;
+    })(),
   };
 }
 
@@ -1610,7 +1797,8 @@ export async function getClaudeRateLimitSnapshot(
 ): Promise<CodexRateLimitSnapshot | null> {
   const profile = resolveProfile(profileId);
   await ensureRuntimeStateLoaded();
-  const authStatus = await readClaudeAuthStatus();
+  const authStatus = await readClaudeAuthStatus(profile);
+  const usageWindows = await fetchClaudeUsageWindows(profile).catch(() => null);
   const profileSnapshot = runtimeState.profiles[profile.id] || null;
 
   if (sessionId?.trim()) {
@@ -1631,8 +1819,8 @@ export async function getClaudeRateLimitSnapshot(
       updatedAt: sessionSnapshot?.updatedAt || sessionRecord?.updatedAt || profileSnapshot?.updatedAt || null,
       planType: authStatus?.subscriptionType || sessionSnapshot?.planType || profileSnapshot?.planType || null,
       rateLimitReachedType: sessionSnapshot?.rateLimitReachedType || profileSnapshot?.rateLimitReachedType || null,
-      primary: cloneRateLimitWindow(sessionSnapshot?.primary || profileSnapshot?.primary || null),
-      secondary: cloneRateLimitWindow(sessionSnapshot?.secondary || profileSnapshot?.secondary || null),
+      primary: cloneRateLimitWindow(usageWindows?.primary || sessionSnapshot?.primary || profileSnapshot?.primary || null),
+      secondary: cloneRateLimitWindow(usageWindows?.secondary || sessionSnapshot?.secondary || profileSnapshot?.secondary || null),
       context,
     };
   }
@@ -1647,8 +1835,8 @@ export async function getClaudeRateLimitSnapshot(
     updatedAt: profileSnapshot.updatedAt,
     planType: authStatus?.subscriptionType || profileSnapshot.planType || null,
     rateLimitReachedType: profileSnapshot.rateLimitReachedType || null,
-    primary: cloneRateLimitWindow(profileSnapshot.primary),
-    secondary: cloneRateLimitWindow(profileSnapshot.secondary),
+    primary: cloneRateLimitWindow(usageWindows?.primary || profileSnapshot.primary),
+    secondary: cloneRateLimitWindow(usageWindows?.secondary || profileSnapshot.secondary),
     context: cloneContextSnapshot(profileSnapshot.context),
   };
 }
@@ -1882,7 +2070,8 @@ export async function runClaudePrompt(
         }
 
         await waitForClaudeSessionReady(profile, createdSessionId, previousSession?.updatedAt || null);
-        const authStatus = await readClaudeAuthStatus();
+        const authStatus = await readClaudeAuthStatus(profile);
+        const usageWindows = await fetchClaudeUsageWindows(profile).catch(() => null);
         await updateRuntimeSnapshot({
           profileId: profile.id,
           sessionId: createdSessionId,
@@ -1891,8 +2080,8 @@ export async function runClaudePrompt(
           rateLimitReachedType: latestRateLimitInfo?.status && latestRateLimitInfo.status !== 'allowed'
             ? latestRateLimitInfo.rateLimitType || latestRateLimitInfo.status
             : null,
-          primary: buildRateLimitWindowFromClaudeEvent(latestRateLimitInfo),
-          secondary: null,
+          primary: usageWindows?.primary || buildRateLimitWindowFromClaudeEvent(latestRateLimitInfo),
+          secondary: usageWindows?.secondary || null,
           context: cloneContextSnapshot(latestContext),
           model: latestModel,
           tools: latestTools,
