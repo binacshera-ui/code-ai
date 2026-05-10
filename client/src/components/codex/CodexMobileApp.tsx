@@ -70,6 +70,7 @@ import {
   SUDOKU_CATALOG,
   type SudokuPuzzleDifficulty,
 } from './sudokuCatalog';
+import { TempleGemQuestDialog } from './TempleGemQuestDialog';
 import {
   installCodexGlobalCrashHandlers,
   recordCodexBreadcrumb,
@@ -5204,7 +5205,7 @@ function GamePickerDialog({
 }: {
   isOpen: boolean;
   onClose: () => void;
-  onStart: (game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab') => void;
+  onStart: (game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest') => void;
 }) {
   if (!isOpen) {
     return null;
@@ -5232,7 +5233,7 @@ function GamePickerDialog({
                 בחר משחק
               </div>
               <div className="mt-1 text-sm leading-6 text-slate-500">
-                Sky Ace נשאר כאן, ועכשיו יש גם runner חדש, מהיר וממכר הרבה יותר.
+                משחקי הכיס כאן נשארים מקוריים, חדים, ועם עוד הרפתקה חדשה של מקדש־יהלומים.
               </div>
             </div>
             <button
@@ -5246,6 +5247,31 @@ function GamePickerDialog({
         </div>
 
         <div className="grid gap-3 p-4">
+          <button
+            type="button"
+            onClick={() => onStart('temple-gem-quest')}
+            className="group relative overflow-hidden rounded-[1.75rem] border border-amber-100 bg-gradient-to-br from-amber-50 via-lime-50 to-emerald-50 px-4 py-4 text-right shadow-[0_22px_46px_-34px_rgba(234,179,8,0.34)] transition hover:-translate-y-0.5 hover:border-amber-200"
+          >
+            <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-r from-amber-200/30 via-lime-200/30 to-emerald-200/30 blur-2xl" />
+            <div className="relative flex items-center gap-4">
+              <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[1.35rem] bg-white/90 text-amber-600 shadow-sm backdrop-blur">
+                <Command className="h-7 w-7" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-slate-800">Temple Gem Quest</div>
+                  <span className="rounded-full bg-white/85 px-2.5 py-1 text-[10px] font-semibold text-amber-600 shadow-sm">
+                    חדש
+                  </span>
+                </div>
+                <div className="mt-1 text-xs leading-5 text-slate-500">
+                  הרפתקת מקדש מקורית עם יהלומים, סלעים נופלים, מפתחות, חיפושיות ושלבים קצרים אבל חכמים.
+                </div>
+              </div>
+              <Play className="h-4 w-4 shrink-0 text-amber-400 transition group-hover:text-amber-600" />
+            </div>
+          </button>
+
           <button
             type="button"
             onClick={() => onStart('sky-ace')}
@@ -6247,6 +6273,7 @@ export function CodexMobileApp() {
   const [isGameOpen, setIsGameOpen] = useState(false);
   const [isRunnerGameOpen, setIsRunnerGameOpen] = useState(false);
   const [isSudokuOpen, setIsSudokuOpen] = useState(false);
+  const [isTempleGemQuestOpen, setIsTempleGemQuestOpen] = useState(false);
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
@@ -7003,17 +7030,22 @@ export function CodexMobileApp() {
     setIsGamePickerOpen(true);
   }
 
-  function startMiniGame(game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab') {
+  function startMiniGame(game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest') {
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
     setIsSudokuOpen(false);
+    setIsTempleGemQuestOpen(false);
     if (game === 'sunset-sprint') {
       setIsRunnerGameOpen(true);
       return;
     }
     if (game === 'sudoku-lab') {
       setIsSudokuOpen(true);
+      return;
+    }
+    if (game === 'temple-gem-quest') {
+      setIsTempleGemQuestOpen(true);
       return;
     }
 
@@ -7550,6 +7582,7 @@ export function CodexMobileApp() {
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
     setIsSudokuOpen(false);
+    setIsTempleGemQuestOpen(false);
     setThemeMode(readThemeModeForProfile(nextProfileId));
     folderBackStackRef.current = [];
     folderForwardStackRef.current = [];
@@ -7826,6 +7859,7 @@ export function CodexMobileApp() {
         setIsGameOpen(false);
         setIsRunnerGameOpen(false);
         setIsSudokuOpen(false);
+        setIsTempleGemQuestOpen(false);
         setRateLimitSnapshot(null);
         setAvailableModels([]);
         setModelPermissionSnapshot(null);
@@ -9974,6 +10008,13 @@ export function CodexMobileApp() {
       <SudokuDialog
         isOpen={isSudokuOpen}
         onClose={() => setIsSudokuOpen(false)}
+      />
+
+      <TempleGemQuestDialog
+        isOpen={isTempleGemQuestOpen}
+        onClose={() => setIsTempleGemQuestOpen(false)}
+        sessionActiveCount={currentSessionActiveQueueCount}
+        sessionCompletionSignal={gameSessionCompletionSignal}
       />
 
       {isFileTreeOpen && (
