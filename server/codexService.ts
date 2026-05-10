@@ -179,10 +179,22 @@ export interface CodexAvailableModel {
   isConfiguredDefault: boolean;
 }
 
+export interface CodexPermissionSnapshot {
+  accessLevel: 'full' | 'balanced' | 'restricted';
+  accessLabel: string;
+  modeLabel: string;
+  summary: string;
+  approvalLabel: string | null;
+  sandboxLabel: string | null;
+  toolsLabel: string | null;
+  trustLabel: string | null;
+}
+
 export interface CodexModelCatalog {
   models: CodexAvailableModel[];
   selectedModel: string | null;
   selectedReasoningEffort: string | null;
+  permissions: CodexPermissionSnapshot | null;
 }
 
 export interface CodexRateLimitWindow {
@@ -2399,6 +2411,7 @@ export async function getCodexModelCatalog(profileId?: string): Promise<CodexMod
     })),
     selectedModel,
     selectedReasoningEffort,
+    permissions: null,
   };
 }
 

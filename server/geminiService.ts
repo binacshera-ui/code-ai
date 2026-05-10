@@ -1312,6 +1312,7 @@ export async function getGeminiModelCatalog(profileId?: string): Promise<CodexMo
     })),
     selectedModel,
     selectedReasoningEffort,
+    permissions: null,
   };
 
   modelCatalogCache.set(profile.id, {
@@ -1326,6 +1327,7 @@ export async function getGeminiModelCatalog(profileId?: string): Promise<CodexMo
     })),
     selectedModel: catalog.selectedModel,
     selectedReasoningEffort: catalog.selectedReasoningEffort,
+    permissions: null,
   };
 }
 

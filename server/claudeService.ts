@@ -1586,6 +1586,7 @@ export async function getClaudeModelCatalog(profileId?: string): Promise<CodexMo
     models: nextModels,
     selectedModel,
     selectedReasoningEffort,
+    permissions: null,
   };
 }
 

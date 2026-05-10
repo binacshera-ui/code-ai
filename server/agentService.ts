@@ -11,6 +11,7 @@ import {
   runCodexPrompt,
   type CodexExecutionConfig,
   type CodexModelCatalog,
+  type CodexPermissionSnapshot,
   type CodexProfile,
   type CodexRateLimitSnapshot,
   type CodexSessionDetail,
@@ -78,6 +79,45 @@ export function getProviderForProfile(profileId?: string): AppProvider {
   return resolveProfile(profileId).provider;
 }
 
+function buildProviderPermissionSnapshot(profile: AgentProfile): CodexPermissionSnapshot {
+  if (profile.provider === 'claude') {
+    return {
+      accessLevel: 'full',
+      accessLabel: 'גישה מלאה',
+      modeLabel: 'bypassPermissions',
+      summary: 'Claude רץ בלי בקשות אישור ידניות, עם גישת tools מלאה ל־workspace.',
+      approvalLabel: 'אישורים: bypassPermissions',
+      sandboxLabel: 'Sandbox: ללא sandbox CLI',
+      toolsLabel: 'Tools: מלאים',
+      trustLabel: 'Workspace: add-dir פעיל לפי הצורך',
+    };
+  }
+
+  if (profile.provider === 'gemini') {
+    return {
+      accessLevel: 'full',
+      accessLabel: 'גישה מלאה',
+      modeLabel: 'yolo',
+      summary: 'Gemini רץ עם אישור אוטומטי לכל הפעולות ו־skip-trust פעיל.',
+      approvalLabel: 'אישורים: yolo',
+      sandboxLabel: 'Sandbox: לא הופעל דגל מפורש',
+      toolsLabel: 'Tools: auto-approve',
+      trustLabel: 'Workspace: skip-trust',
+    };
+  }
+
+  return {
+    accessLevel: 'full',
+    accessLabel: 'גישה מלאה',
+    modeLabel: 'danger-full-access',
+    summary: 'Codex רץ בלי sandbox ובלי אישורי ביניים.',
+    approvalLabel: 'אישורים: bypass / never',
+    sandboxLabel: 'Sandbox: danger-full-access',
+    toolsLabel: 'Shell: מלא',
+    trustLabel: 'Workspace: trusted',
+  };
+}
+
 export async function getAvailableProfiles(): Promise<AgentProfile[]> {
   const [codexProfiles, claudeProfiles, geminiProfiles] = await Promise.all([
     getAvailableCodexProfiles(),
@@ -127,13 +167,25 @@ export async function getAgentSessionDetail(
 export async function getAgentModelCatalog(profileId?: string): Promise<CodexModelCatalog> {
   const profile = resolveProfile(profileId);
   if (profile.provider === 'claude') {
-    return getClaudeModelCatalog(profile.id);
+    const catalog = await getClaudeModelCatalog(profile.id);
+    return {
+      ...catalog,
+      permissions: buildProviderPermissionSnapshot(profile),
+    };
   }
   if (profile.provider === 'gemini') {
-    return getGeminiModelCatalog(profile.id);
+    const catalog = await getGeminiModelCatalog(profile.id);
+    return {
+      ...catalog,
+      permissions: buildProviderPermissionSnapshot(profile),
+    };
   }
 
-  return getCodexModelCatalog(profile.id);
+  const catalog = await getCodexModelCatalog(profile.id);
+  return {
+    ...catalog,
+    permissions: buildProviderPermissionSnapshot(profile),
+  };
 }
 
 export async function getAgentRateLimitSnapshot(

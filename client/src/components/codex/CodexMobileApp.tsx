@@ -52,6 +52,7 @@ import {
   RotateCcw,
   Send,
   Settings2,
+  ShieldCheck,
   SquarePen,
   Tag,
   Sun,
@@ -217,6 +218,18 @@ interface CodexModelCatalogResponse {
   models: CodexModelOption[];
   selectedModel: string | null;
   selectedReasoningEffort: string | null;
+  permissions: CodexPermissionSnapshotResponse | null;
+}
+
+interface CodexPermissionSnapshotResponse {
+  accessLevel: 'full' | 'balanced' | 'restricted';
+  accessLabel: string;
+  modeLabel: string;
+  summary: string;
+  approvalLabel: string | null;
+  sandboxLabel: string | null;
+  toolsLabel: string | null;
+  trustLabel: string | null;
 }
 
 interface CodexRateLimitWindowResponse {
@@ -500,6 +513,30 @@ function clampPercent(value: number | null): number {
   }
 
   return Math.max(0, Math.min(100, value));
+}
+
+function getPermissionTone(permission: CodexPermissionSnapshotResponse | null): {
+  badgeClassName: string;
+  barClassName: string;
+} {
+  if (permission?.accessLevel === 'restricted') {
+    return {
+      badgeClassName: 'border border-emerald-100/80 bg-emerald-50 text-emerald-600',
+      barClassName: 'from-emerald-300 via-cyan-200 to-sky-200',
+    };
+  }
+
+  if (permission?.accessLevel === 'balanced') {
+    return {
+      badgeClassName: 'border border-sky-100/80 bg-sky-50 text-sky-600',
+      barClassName: 'from-sky-300 via-cyan-200 to-emerald-200',
+    };
+  }
+
+  return {
+    badgeClassName: 'border border-amber-100/80 bg-amber-50 text-amber-700',
+    barClassName: 'from-amber-300 via-orange-200 to-rose-200',
+  };
 }
 
 function trimText(text: string, limit = 72): string {
@@ -4426,6 +4463,7 @@ export function CodexMobileApp() {
   const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
   const [queueItems, setQueueItems] = useState<CodexQueueServerItem[]>([]);
   const [availableModels, setAvailableModels] = useState<CodexModelOption[]>([]);
+  const [modelPermissionSnapshot, setModelPermissionSnapshot] = useState<CodexPermissionSnapshotResponse | null>(null);
   const [rateLimitSnapshot, setRateLimitSnapshot] = useState<CodexRateLimitSnapshotResponse | null>(null);
   const [selectedModelSlug, setSelectedModelSlug] = useState<string | null>(null);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
@@ -5941,6 +5979,7 @@ export function CodexMobileApp() {
         setIsGameOpen(false);
         setRateLimitSnapshot(null);
         setAvailableModels([]);
+        setModelPermissionSnapshot(null);
         setSelectedModelSlug(null);
         setSelectedReasoningEffort(null);
         setSessionInstruction(null);
@@ -6486,6 +6525,7 @@ export function CodexMobileApp() {
   async function loadModelCatalog(nextProfileId = profileId) {
     if (!nextProfileId) {
       setAvailableModels([]);
+      setModelPermissionSnapshot(null);
       setSelectedModelSlug(null);
       setSelectedReasoningEffort(null);
       return;
@@ -6512,11 +6552,13 @@ export function CodexMobileApp() {
             || null;
 
       setAvailableModels(data.models);
+      setModelPermissionSnapshot(data.permissions || null);
       setSelectedModelSlug(nextModelSlug);
       setSelectedReasoningEffort(nextReasoningEffort);
     } catch (modelCatalogError: any) {
       if (requestToken === latestModelCatalogLoadTokenRef.current) {
         setAvailableModels([]);
+        setModelPermissionSnapshot(null);
         setSelectedModelSlug(null);
         setSelectedReasoningEffort(null);
         setError(modelCatalogError.message || 'Failed to load models');
@@ -6683,6 +6725,10 @@ export function CodexMobileApp() {
     () => supportedReasoningLevels.find((level) => level.effort === selectedReasoningEffort) || null,
     [selectedReasoningEffort, supportedReasoningLevels]
   );
+  const modelPermissionTone = useMemo(
+    () => getPermissionTone(modelPermissionSnapshot),
+    [modelPermissionSnapshot]
+  );
   const installMode = isStandaloneMode
     ? 'installed'
     : deferredInstallPrompt
@@ -6711,6 +6757,7 @@ export function CodexMobileApp() {
   useEffect(() => {
     if (!profileId) {
       setAvailableModels([]);
+      setModelPermissionSnapshot(null);
       setRateLimitSnapshot(null);
       setSelectedModelSlug(null);
       setSelectedReasoningEffort(null);
@@ -7545,94 +7592,138 @@ export function CodexMobileApp() {
                   </button>
 
                   {isModelPickerOpen && (
-                    <div className="absolute bottom-full right-0 z-20 mb-2 w-[min(17.5rem,80vw)] overflow-hidden rounded-[1.2rem] border border-slate-200/70 bg-white/98 shadow-[0_16px_42px_-34px_rgba(15,23,42,0.18)] backdrop-blur-xl">
-                      <div className="border-b border-slate-100/90 bg-gradient-to-b from-violet-50/55 via-white to-white px-3 py-2.5 text-right">
-                        <div className="flex items-center justify-between gap-3">
+                    <div className="absolute bottom-full right-0 z-20 mb-2 w-[min(13rem,74vw)] overflow-hidden rounded-[1rem] border border-slate-200/80 bg-white/96 shadow-[0_16px_36px_-30px_rgba(15,23,42,0.2)] backdrop-blur-xl">
+                      <div className="border-b border-slate-100/90 bg-gradient-to-b from-violet-50/45 via-white to-white px-2.5 py-2 text-right">
+                        <div className="flex items-center justify-between gap-2">
                           <Brain className="h-3.5 w-3.5 shrink-0 text-violet-400" />
                           <div className="min-w-0 flex-1">
-                            <div className="text-[13px] font-semibold text-slate-700">מודל ורמת חשיבה</div>
-                            <div className="mt-1 flex flex-wrap justify-end gap-1.5 text-[10px]">
-                              {selectedModelOption && (
-                                <span className="rounded-full border border-slate-200/80 bg-slate-50/80 px-2 py-0.5 text-slate-500">
-                                  {selectedModelOption.displayName}
-                                </span>
-                              )}
-                              {selectedReasoningOption && (
-                                <span className="rounded-full border border-violet-100/80 bg-violet-50/70 px-2 py-0.5 text-violet-600">
-                                  {getReasoningEffortLabel(selectedReasoningOption.effort)}
-                                </span>
-                              )}
-                              {!selectedModelOption && (
-                                <span className="text-slate-400">הרשימה נשלפת מה־{selectedProviderLabel} המקומי.</span>
-                              )}
+                            <div className="text-[11px] font-semibold text-slate-700">מודל וחשיבה</div>
+                            <div className="truncate text-[9px] text-slate-400">
+                              {selectedProviderLabel} המקומי
                             </div>
                           </div>
                         </div>
                       </div>
 
-                      <div className="max-h-[58vh] overflow-y-auto p-1.5">
-                        <div className="mb-1 px-2 text-right text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                          מודלים
-                        </div>
-                        {availableModels.length === 0 ? (
-                          <div className="rounded-[0.95rem] bg-slate-50/70 px-3 py-3.5 text-right text-[13px] text-slate-500">
-                            {isModelCatalogLoading ? 'טוען מודלים...' : 'לא נמצאו מודלים זמינים לפרופיל הזה.'}
+                      <div className="max-h-[58vh] space-y-2 overflow-y-auto p-2">
+                        <div className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-2 text-right">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] font-semibold text-slate-600">פעיל עכשיו</span>
+                            {selectedReasoningOption && (
+                              <span className="rounded-full border border-violet-100/80 bg-violet-50 px-1.5 py-0.5 text-[9px] text-violet-600">
+                                {getReasoningEffortLabel(selectedReasoningOption.effort)}
+                              </span>
+                            )}
                           </div>
-                        ) : (
-                          <div className="space-y-1">
-                            {availableModels.map((model) => (
-                              <button
-                                key={model.slug}
-                                type="button"
-                                onClick={() => {
-                                  setSelectedModelSlug(model.slug);
-                                  setSelectedReasoningEffort(
-                                    model.defaultReasoningLevel
-                                    || model.supportedReasoningLevels[0]?.effort
-                                    || null
-                                  );
-                                  setIsReasoningPickerOpen(false);
-                                }}
-                                className={cn(
-                                  'flex w-full items-start justify-between gap-2.5 rounded-[0.95rem] border px-3 py-2.25 text-right transition',
-                                  selectedModelSlug === model.slug
-                                    ? 'border-violet-200/80 bg-violet-50/80 text-violet-800'
-                                    : 'border-transparent bg-slate-50/55 text-slate-700 hover:border-slate-200/80 hover:bg-white'
-                                )}
-                              >
-                                <div className="min-w-0">
-                                  <div className="flex items-center justify-end gap-2">
-                                    {model.isConfiguredDefault && (
-                                      <span className={cn(
-                                        'rounded-full px-2 py-0.5 text-[10px] font-semibold',
-                                        selectedModelSlug === model.slug
-                                          ? 'bg-white/90 text-violet-500'
-                                          : 'bg-white/90 text-slate-400'
-                                      )}>
-                                        ברירת מחדל
-                                      </span>
-                                    )}
-                                    <span className="text-[13px] font-semibold">{model.displayName}</span>
-                                  </div>
-                                  <div className={cn(
-                                    'mt-1 truncate text-[10px]',
-                                    selectedModelSlug === model.slug ? 'text-violet-600/80' : 'text-slate-500'
-                                  )}>
-                                    {model.description || model.slug}
-                                  </div>
-                                </div>
-                                {selectedModelSlug === model.slug && <Check className="mt-0.5 h-4 w-4 shrink-0 text-violet-500" />}
-                              </button>
-                            ))}
+                          <div className="mt-1 text-[10px] font-medium text-slate-700">
+                            {selectedModelOption?.displayName || 'אין מודל פעיל'}
+                          </div>
+                          <div className="mt-0.5 truncate text-[8px] text-slate-400">
+                            {selectedModelOption?.description || 'הרשימה נשלפת ישירות מה־CLI הפעיל.'}
+                          </div>
+                        </div>
+
+                        {modelPermissionSnapshot && (
+                          <div className="rounded-[0.85rem] border border-slate-100 bg-white/85 px-2.5 py-2 text-right">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[10px] font-semibold text-slate-600">הרשאות</span>
+                              <span className={cn('rounded-full px-1.5 py-0.5 text-[9px] font-medium', modelPermissionTone.badgeClassName)}>
+                                {modelPermissionSnapshot.accessLabel}
+                              </span>
+                            </div>
+                            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-200/70">
+                              <div
+                                className={cn('h-full w-full rounded-full bg-gradient-to-l', modelPermissionTone.barClassName)}
+                              />
+                            </div>
+                            <div className="mt-1 text-[9px] leading-4 text-slate-500">
+                              {modelPermissionSnapshot.summary}
+                            </div>
+                            <div className="mt-1.5 space-y-1 text-[8px] leading-4 text-slate-400">
+                              <div className="flex items-center justify-between gap-2">
+                                <ShieldCheck className="h-3 w-3 shrink-0 text-slate-300" />
+                                <span className="truncate">{modelPermissionSnapshot.modeLabel}</span>
+                              </div>
+                              {modelPermissionSnapshot.approvalLabel && (
+                                <div className="truncate">{modelPermissionSnapshot.approvalLabel}</div>
+                              )}
+                              {modelPermissionSnapshot.sandboxLabel && (
+                                <div className="truncate">{modelPermissionSnapshot.sandboxLabel}</div>
+                              )}
+                              {modelPermissionSnapshot.toolsLabel && (
+                                <div className="truncate">{modelPermissionSnapshot.toolsLabel}</div>
+                              )}
+                              {modelPermissionSnapshot.trustLabel && (
+                                <div className="truncate">{modelPermissionSnapshot.trustLabel}</div>
+                              )}
+                            </div>
                           </div>
                         )}
 
-                        <div className="mt-2.5 border-t border-slate-100/90 pt-2.5">
-                          <div className="mb-1 px-2 text-right text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                        <div>
+                          <div className="mb-1 px-1 text-right text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                            מודלים
+                          </div>
+                          {availableModels.length === 0 ? (
+                            <div className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-3 text-right text-[11px] text-slate-500">
+                              {isModelCatalogLoading ? 'טוען מודלים...' : 'לא נמצאו מודלים זמינים לפרופיל הזה.'}
+                            </div>
+                          ) : (
+                            <div className="space-y-1">
+                              {availableModels.map((model) => (
+                                <button
+                                  key={model.slug}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedModelSlug(model.slug);
+                                    setSelectedReasoningEffort(
+                                      model.defaultReasoningLevel
+                                      || model.supportedReasoningLevels[0]?.effort
+                                      || null
+                                    );
+                                    setIsReasoningPickerOpen(false);
+                                  }}
+                                  className={cn(
+                                    'flex w-full items-start justify-between gap-2 rounded-[0.85rem] border px-2.5 py-2 text-right transition',
+                                    selectedModelSlug === model.slug
+                                      ? 'border-violet-200/80 bg-violet-50/80 text-violet-800'
+                                      : 'border-slate-100 bg-slate-50/75 text-slate-700 hover:border-slate-200/80 hover:bg-white'
+                                  )}
+                                >
+                                  <div className="min-w-0">
+                                    <div className="flex items-center justify-end gap-1.5">
+                                      {model.isConfiguredDefault && (
+                                        <span className={cn(
+                                          'rounded-full px-1.5 py-0.5 text-[8px] font-semibold',
+                                          selectedModelSlug === model.slug
+                                            ? 'bg-white/90 text-violet-500'
+                                            : 'bg-white/90 text-slate-400'
+                                        )}>
+                                          ברירת מחדל
+                                        </span>
+                                      )}
+                                      <span className="text-[11px] font-semibold">{model.displayName}</span>
+                                    </div>
+                                    <div className={cn(
+                                      'mt-0.5 line-clamp-2 text-[8px] leading-4',
+                                      selectedModelSlug === model.slug ? 'text-violet-600/80' : 'text-slate-500'
+                                    )}>
+                                      {model.description || model.slug}
+                                    </div>
+                                  </div>
+                                  {selectedModelSlug === model.slug && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-500" />}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        <div>
+                          <div className="mb-1 px-1 text-right text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-400">
                             רמת חשיבה
                           </div>
                           {!selectedModelOption || supportedReasoningLevels.length === 0 ? (
-                            <div className="rounded-[0.95rem] bg-slate-50/70 px-3 py-3.5 text-right text-[13px] text-slate-500">
+                            <div className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-3 text-right text-[11px] text-slate-500">
                               בחר מודל עם רמות חשיבה נתמכות כדי לבחור effort.
                             </div>
                           ) : (
@@ -7647,24 +7738,24 @@ export function CodexMobileApp() {
                                     setIsModelPickerOpen(false);
                                   }}
                                   className={cn(
-                                    'flex w-full items-start justify-between gap-2.5 rounded-[0.95rem] border px-3 py-2.25 text-right transition',
+                                    'flex w-full items-start justify-between gap-2 rounded-[0.85rem] border px-2.5 py-2 text-right transition',
                                     selectedReasoningEffort === level.effort
                                       ? 'border-sky-200/80 bg-sky-50/80 text-sky-800'
-                                      : 'border-transparent bg-slate-50/55 text-slate-700 hover:border-slate-200/80 hover:bg-white'
+                                      : 'border-slate-100 bg-slate-50/75 text-slate-700 hover:border-slate-200/80 hover:bg-white'
                                   )}
                                 >
                                   <div className="min-w-0">
-                                    <div className="text-[13px] font-semibold">{getReasoningEffortLabel(level.effort)}</div>
+                                    <div className="text-[11px] font-semibold">{getReasoningEffortLabel(level.effort)}</div>
                                     {level.description && (
                                       <div className={cn(
-                                        'mt-1 text-[10px] leading-4.5',
+                                        'mt-0.5 text-[8px] leading-4',
                                         selectedReasoningEffort === level.effort ? 'text-sky-700/80' : 'text-slate-500'
                                       )}>
                                         {level.description}
                                       </div>
                                     )}
                                   </div>
-                                  {selectedReasoningEffort === level.effort && <Check className="mt-0.5 h-4 w-4 shrink-0 text-sky-500" />}
+                                  {selectedReasoningEffort === level.effort && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-500" />}
                                 </button>
                               ))}
                             </div>
