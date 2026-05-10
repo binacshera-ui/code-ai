@@ -723,6 +723,171 @@ function CopyButton({
   );
 }
 
+function tryParseToolJson(rawText: string): unknown | null {
+  const trimmed = rawText.trim();
+  if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function extractStandaloneCodeFence(rawText: string): { language: string | null; code: string } | null {
+  const match = rawText.trim().match(/^```([a-zA-Z0-9_+-]+)?\n([\s\S]*?)\n```$/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    language: match[1] || null,
+    code: match[2] || '',
+  };
+}
+
+function resolveToolDetailView(entry: CodexTimelineEntry): {
+  mode: 'terminal' | 'code';
+  label: string;
+  badge: string;
+  code: string;
+  language: string | null;
+} {
+  const text = entry.text?.trim() || '';
+  const identity = getToolIdentity(entry);
+  const fenced = extractStandaloneCodeFence(text);
+  const parsedJson = fenced ? null : tryParseToolJson(text);
+
+  if (parsedJson !== null) {
+    return {
+      mode: 'code',
+      label: 'JSON payload',
+      badge: 'JSON',
+      code: JSON.stringify(parsedJson, null, 2),
+      language: 'json',
+    };
+  }
+
+  if (fenced) {
+    const language = fenced.language?.toLowerCase() || null;
+    const isTerminalFence = language === 'bash' || language === 'sh' || language === 'shell' || language === 'zsh';
+    return {
+      mode: isTerminalFence ? 'terminal' : 'code',
+      label: isTerminalFence ? 'Terminal output' : 'Code payload',
+      badge: language ? language.toUpperCase() : 'CODE',
+      code: fenced.code,
+      language,
+    };
+  }
+
+  if (identity.includes('apply patch') || identity.includes('patch')) {
+    return {
+      mode: 'code',
+      label: 'Patch payload',
+      badge: 'DIFF',
+      code: text,
+      language: 'diff',
+    };
+  }
+
+  if (identity.includes('thinking')) {
+    return {
+      mode: 'terminal',
+      label: 'Reasoning trace',
+      badge: 'TRACE',
+      code: text,
+      language: null,
+    };
+  }
+
+  if (identity.includes('exec command') || identity.includes('write stdin') || identity.includes('terminal')) {
+    return {
+      mode: 'terminal',
+      label: 'Terminal output',
+      badge: 'TERM',
+      code: text,
+      language: null,
+    };
+  }
+
+  return {
+    mode: 'terminal',
+    label: 'Tool output',
+    badge: 'TEXT',
+    code: text,
+    language: null,
+  };
+}
+
+function ToolDetailViewer({
+  entry,
+}: {
+  entry: CodexTimelineEntry;
+}) {
+  if (!entry.text?.trim()) {
+    return <div className="text-sm text-slate-500">אין פלט נוסף לכלי הזה.</div>;
+  }
+
+  const detail = resolveToolDetailView(entry);
+
+  if (detail.mode === 'terminal') {
+    return (
+      <div className="overflow-hidden rounded-[1.5rem] border border-slate-800 bg-slate-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+        <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className="h-2.5 w-2.5 rounded-full bg-rose-400/90" />
+            <span className="h-2.5 w-2.5 rounded-full bg-amber-300/90" />
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/90" />
+          </div>
+          <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
+            <span
+              dir="ltr"
+              className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-semibold text-slate-300"
+            >
+              {detail.badge}
+            </span>
+            <span dir="ltr">{detail.label}</span>
+          </div>
+        </div>
+        <pre
+          dir="ltr"
+          className="max-h-[52dvh] overflow-x-auto overflow-y-auto px-4 py-4 font-mono text-[12px] leading-6 text-slate-100"
+        >
+          <code className="block min-w-max whitespace-pre">{detail.code}</code>
+        </pre>
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-hidden rounded-[1.5rem] border border-slate-200 bg-slate-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+      <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full bg-sky-400/90" />
+          <span className="h-2.5 w-2.5 rounded-full bg-violet-400/90" />
+          <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/90" />
+        </div>
+        <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
+          <span
+            dir="ltr"
+            className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-semibold text-slate-200"
+          >
+            {detail.badge}
+          </span>
+          <span dir="ltr">{detail.label}</span>
+        </div>
+      </div>
+      <CodexCodeBlock
+        code={detail.code}
+        language={detail.language}
+        className="max-h-[52dvh] overflow-x-auto overflow-y-auto rounded-none border-0 shadow-none"
+      />
+    </div>
+  );
+}
+
 function buildEditableDraftAttachments(attachments: CodexUploadedAttachment[]): DraftAttachment[] {
   return attachments.map((attachment) => ({
     ...attachment,
@@ -7901,11 +8066,17 @@ export function CodexMobileApp() {
             onClick={() => setActiveToolEntry(null)}
             aria-label="Close tool dialog"
           />
-          <div className="relative z-10 w-full max-w-2xl overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+          <div className="relative z-10 flex max-h-[80dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
             <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
               <div className="flex items-start gap-3">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500">
-                  <Wrench className="h-5 w-5" />
+                <div className={cn(
+                  'flex h-11 w-11 shrink-0 items-center justify-center rounded-full',
+                  getToolEntryTone(activeToolEntry).icon
+                )}>
+                  {(() => {
+                    const Icon = getToolEntryIcon(activeToolEntry);
+                    return <Icon className="h-5 w-5" />;
+                  })()}
                 </div>
                 <div className="min-w-0">
                   <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
@@ -7935,18 +8106,8 @@ export function CodexMobileApp() {
               </div>
             </div>
 
-            <div className="max-h-[70dvh] overflow-y-auto px-5 py-5">
-              {activeToolEntry.text ? (
-                <div className="rounded-[1.5rem] border border-slate-100 bg-slate-50/70 px-4 py-4">
-                  <MessageMarkdown
-                    text={activeToolEntry.text}
-                    isUser={false}
-                    onOpenFilePreview={(rawPath) => void handleOpenFilePreview(rawPath)}
-                  />
-                </div>
-              ) : (
-                <div className="text-sm text-slate-500">אין פלט נוסף לכלי הזה.</div>
-              )}
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+              <ToolDetailViewer entry={activeToolEntry} />
             </div>
           </div>
         </div>
