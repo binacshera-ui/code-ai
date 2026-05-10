@@ -67,6 +67,10 @@ import { CodexCodeBlock } from '@/components/codex/CodexCodeBlock';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import {
+  SUDOKU_CATALOG,
+  type SudokuPuzzleDifficulty,
+} from './sudokuCatalog';
+import {
   installCodexGlobalCrashHandlers,
   recordCodexBreadcrumb,
   reportCodexClientLog,
@@ -5200,7 +5204,7 @@ function GamePickerDialog({
 }: {
   isOpen: boolean;
   onClose: () => void;
-  onStart: (game: 'sky-ace' | 'sunset-sprint') => void;
+  onStart: (game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab') => void;
 }) {
   if (!isOpen) {
     return null;
@@ -5282,6 +5286,28 @@ function GamePickerDialog({
               </div>
               <Play className="h-4 w-4 shrink-0 text-rose-400 transition group-hover:text-rose-600" />
             </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onStart('sudoku-lab')}
+            className="group flex items-center gap-4 rounded-[1.6rem] border border-violet-100 bg-gradient-to-br from-violet-50 via-white to-fuchsia-50 px-4 py-4 text-right shadow-[0_18px_40px_-32px_rgba(168,85,247,0.3)] transition hover:-translate-y-0.5 hover:border-violet-200"
+          >
+            <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[1.35rem] bg-white text-violet-500 shadow-sm">
+              <LayoutGrid className="h-7 w-7" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-semibold text-slate-800">Sudoku Lab</div>
+                <span className="rounded-full bg-violet-100 px-2.5 py-1 text-[10px] font-semibold text-violet-600">
+                  חידות קשות
+                </span>
+              </div>
+              <div className="mt-1 text-xs leading-5 text-slate-500">
+                סודוקו איכותי עם רמות Hard עד Code-AI, בחירת תא, פתקים, שגיאות וסשן אמיתי.
+              </div>
+            </div>
+            <Play className="h-4 w-4 shrink-0 text-violet-400 transition group-hover:text-violet-600" />
           </button>
         </div>
       </div>
@@ -5555,8 +5581,405 @@ function RunnerGameDialog({
               </div>
             </div>
           )}
-          <div className="mt-3 rounded-[1.25rem] border border-rose-100 bg-rose-50/60 px-4 py-3 text-right text-xs leading-5 text-rose-800">
-            נגיעה אחת קופצת. נגיעה באוויר מפעילה דאבל־ג׳אמפ. אסוף מטבעות וג׳מים כדי למלא Fever ולמחוץ מכשולים.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const SUDOKU_DIFFICULTY_META: Record<SudokuPuzzleDifficulty, {
+  label: string;
+  accentClass: string;
+  description: string;
+}> = {
+  hard: {
+    label: 'Hard',
+    accentClass: 'border-amber-200 bg-amber-50 text-amber-700',
+    description: 'פתיחה זורמת עם מספיק מקום לחשיבה.',
+  },
+  expert: {
+    label: 'Expert',
+    accentClass: 'border-sky-200 bg-sky-50 text-sky-700',
+    description: 'כבר דורש קריאה עמוקה של שורות ותיבות.',
+  },
+  fiendish: {
+    label: 'Fiendish',
+    accentClass: 'border-violet-200 bg-violet-50 text-violet-700',
+    description: 'מעט רמזים והרבה החלטות קשות.',
+  },
+  'code-ai': {
+    label: 'Code-AI',
+    accentClass: 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700',
+    description: 'הדרגה הכי חדה בקטלוג המקומי.',
+  },
+};
+
+function decodeSudokuGrid(serialized: string) {
+  return serialized.split('').map((char) => Number(char));
+}
+
+function findFirstEditableSudokuCell(puzzle: number[]) {
+  const firstEmpty = puzzle.findIndex((value) => value === 0);
+  return firstEmpty >= 0 ? firstEmpty : null;
+}
+
+function getSudokuBox(index: number) {
+  const row = Math.floor(index / 9);
+  const col = index % 9;
+  return Math.floor(row / 3) * 3 + Math.floor(col / 3);
+}
+
+function toggleSudokuNote(mask: number, digit: number) {
+  const bit = 1 << digit;
+  return mask & bit ? mask & ~bit : mask | bit;
+}
+
+function formatSudokuElapsed(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}:${String(remainder).padStart(2, '0')}`;
+}
+
+function SudokuDialog({
+  isOpen,
+  onClose,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+}) {
+  const [difficulty, setDifficulty] = useState<SudokuPuzzleDifficulty>('expert');
+  const [puzzleCursorByLevel, setPuzzleCursorByLevel] = useState<Record<SudokuPuzzleDifficulty, number>>({
+    hard: 0,
+    expert: 0,
+    fiendish: 0,
+    'code-ai': 0,
+  });
+  const activePuzzles = SUDOKU_CATALOG[difficulty];
+  const activePuzzle = activePuzzles[puzzleCursorByLevel[difficulty] % activePuzzles.length];
+  const puzzleValues = useMemo(() => decodeSudokuGrid(activePuzzle.puzzle), [activePuzzle]);
+  const solutionValues = useMemo(() => decodeSudokuGrid(activePuzzle.solution), [activePuzzle]);
+  const [board, setBoard] = useState<number[]>(() => decodeSudokuGrid(activePuzzle.puzzle));
+  const [notes, setNotes] = useState<number[]>(() => Array(81).fill(0));
+  const [selectedCell, setSelectedCell] = useState<number | null>(findFirstEditableSudokuCell(decodeSudokuGrid(activePuzzle.puzzle)));
+  const [noteMode, setNoteMode] = useState(false);
+  const [mistakes, setMistakes] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [isSolved, setIsSolved] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const noticeTimerRef = useRef<number | null>(null);
+
+  const solvedEditableCells = useMemo(() => (
+    board.reduce((count, value, index) => (
+      puzzleValues[index] === 0 && value !== 0 && value === solutionValues[index] ? count + 1 : count
+    ), 0)
+  ), [board, puzzleValues, solutionValues]);
+  const editableCells = useMemo(() => 81 - activePuzzle.clueCount, [activePuzzle]);
+  const progressPercent = editableCells > 0 ? (solvedEditableCells / editableCells) * 100 : 100;
+  const selectedValue = selectedCell !== null ? board[selectedCell] || puzzleValues[selectedCell] || null : null;
+
+  const showNotice = useEffectEvent((message: string) => {
+    if (noticeTimerRef.current) {
+      window.clearTimeout(noticeTimerRef.current);
+    }
+    setNotice(message);
+    noticeTimerRef.current = window.setTimeout(() => {
+      setNotice(null);
+      noticeTimerRef.current = null;
+    }, 2200);
+  });
+
+  const resetPuzzle = useEffectEvent(() => {
+    const nextPuzzleValues = decodeSudokuGrid(activePuzzle.puzzle);
+    setBoard(nextPuzzleValues);
+    setNotes(Array(81).fill(0));
+    setSelectedCell(findFirstEditableSudokuCell(nextPuzzleValues));
+    setNoteMode(false);
+    setMistakes(0);
+    setElapsedSeconds(0);
+    setIsSolved(false);
+    setNotice(null);
+  });
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    resetPuzzle();
+  }, [isOpen, activePuzzle.id]);
+
+  useEffect(() => {
+    if (!isOpen || isSolved) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setElapsedSeconds((current) => current + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isOpen, isSolved]);
+
+  useEffect(() => {
+    return () => {
+      if (noticeTimerRef.current) {
+        window.clearTimeout(noticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  const applyDigit = useEffectEvent((digit: number | null) => {
+    if (selectedCell === null || isSolved || puzzleValues[selectedCell] !== 0) {
+      return;
+    }
+
+    if (noteMode && digit !== null) {
+      const nextNotes = [...notes];
+      nextNotes[selectedCell] = toggleSudokuNote(nextNotes[selectedCell], digit);
+      setNotes(nextNotes);
+      return;
+    }
+
+    const nextBoard = [...board];
+    nextBoard[selectedCell] = digit ?? 0;
+    setBoard(nextBoard);
+
+    const nextNotes = [...notes];
+    nextNotes[selectedCell] = 0;
+    setNotes(nextNotes);
+
+    if (digit !== null && digit !== 0 && digit !== solutionValues[selectedCell]) {
+      setMistakes((current) => current + 1);
+      showNotice('זה לא המספר הנכון לתא הזה.');
+      return;
+    }
+
+    if (digit !== null && digit !== 0 && nextBoard.every((value, index) => value === solutionValues[index])) {
+      setIsSolved(true);
+      showNotice('נפתר. זה היה חד.');
+      return;
+    }
+
+    if (digit !== null && digit !== 0) {
+      showNotice('מעולה. ממשיכים.');
+    }
+  });
+
+  const cyclePuzzle = () => {
+    setPuzzleCursorByLevel((current) => ({
+      ...current,
+      [difficulty]: (current[difficulty] + 1) % activePuzzles.length,
+    }));
+  };
+
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[77] flex items-end justify-center bg-slate-950/30 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close sudoku"
+      />
+      <div className="relative z-10 flex w-full max-w-md flex-col overflow-hidden rounded-[2rem] border border-violet-100 bg-white shadow-[0_28px_90px_-36px_rgba(139,92,246,0.3)]">
+        <div className="border-b border-violet-100 bg-gradient-to-b from-violet-50 via-white to-white px-5 py-4 text-right">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-violet-500 shadow-sm">
+              <LayoutGrid className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Sudoku Lab
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">
+                סודוקו בדרגות קושי אמיתיות
+              </div>
+              <div className="mt-1 text-xs leading-5 text-slate-500">
+                {SUDOKU_DIFFICULTY_META[difficulty].description}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={cyclePuzzle}
+                className="rounded-full bg-white p-2 text-slate-700 transition hover:bg-violet-50"
+                title="חידה חדשה"
+              >
+                <RefreshCw className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-full bg-white p-2 text-slate-700 transition hover:bg-violet-50"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 grid grid-cols-4 gap-2 text-xs">
+            <div className="rounded-2xl bg-white px-3 py-2">
+              <div className="text-slate-400">Progress</div>
+              <div className="mt-1 text-base font-semibold">{Math.round(progressPercent)}%</div>
+            </div>
+            <div className="rounded-2xl bg-white px-3 py-2">
+              <div className="text-slate-400">Mistakes</div>
+              <div className="mt-1 text-base font-semibold">{mistakes}</div>
+            </div>
+            <div className="rounded-2xl bg-white px-3 py-2">
+              <div className="text-slate-400">Time</div>
+              <div className="mt-1 text-base font-semibold">{formatSudokuElapsed(elapsedSeconds)}</div>
+            </div>
+            <div className="rounded-2xl bg-white px-3 py-2">
+              <div className="text-slate-400">Clues</div>
+              <div className="mt-1 text-base font-semibold">{activePuzzle.clueCount}</div>
+            </div>
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {(Object.keys(SUDOKU_CATALOG) as SudokuPuzzleDifficulty[]).map((level) => (
+              <button
+                key={level}
+                type="button"
+                onClick={() => setDifficulty(level)}
+                className={cn(
+                  'rounded-full border px-3 py-1.5 text-[11px] font-semibold transition',
+                  difficulty === level
+                    ? SUDOKU_DIFFICULTY_META[level].accentClass
+                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
+                )}
+              >
+                {SUDOKU_DIFFICULTY_META[level].label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="relative px-4 pb-4 pt-4">
+          {notice && (
+            <div className="pointer-events-none absolute left-8 right-8 top-6 z-10 rounded-full bg-violet-500/90 px-4 py-2 text-center text-sm font-semibold text-white shadow-lg">
+              {notice}
+            </div>
+          )}
+
+          <div className="rounded-[1.6rem] border border-violet-100 bg-violet-50/45 p-3">
+            <div dir="ltr" className="grid grid-cols-9 overflow-hidden rounded-[1.2rem] border-2 border-slate-300 bg-slate-300">
+              {board.map((value, index) => {
+                const row = Math.floor(index / 9);
+                const col = index % 9;
+                const fixed = puzzleValues[index] !== 0;
+                const wrong = value !== 0 && value !== solutionValues[index];
+                const isSelected = selectedCell === index;
+                const highlightBand = selectedCell !== null && (
+                  Math.floor(selectedCell / 9) === row
+                  || selectedCell % 9 === col
+                  || getSudokuBox(selectedCell) === getSudokuBox(index)
+                );
+                const sameValue = selectedValue !== null && value !== 0 && value === selectedValue;
+                const noteMask = notes[index];
+
+                return (
+                  <button
+                    key={index}
+                    type="button"
+                    onClick={() => setSelectedCell(index)}
+                    className={cn(
+                      'relative aspect-square bg-white text-center text-[0.92rem] font-semibold text-slate-700 transition',
+                      highlightBand && 'bg-slate-50',
+                      sameValue && 'bg-sky-50',
+                      fixed && 'text-slate-900',
+                      !fixed && !wrong && value !== 0 && 'text-violet-600',
+                      wrong && 'bg-rose-50 text-rose-600',
+                      isSelected && 'bg-violet-100 text-violet-700 ring-2 ring-inset ring-violet-400'
+                    )}
+                    style={{
+                      borderRight: col === 8 ? '0' : col % 3 === 2 ? '2px solid rgb(203 213 225)' : '1px solid rgb(226 232 240)',
+                      borderBottom: row === 8 ? '0' : row % 3 === 2 ? '2px solid rgb(203 213 225)' : '1px solid rgb(226 232 240)',
+                    }}
+                  >
+                    {value !== 0 ? (
+                      <span>{value}</span>
+                    ) : noteMask !== 0 ? (
+                      <span className="grid h-full w-full grid-cols-3 grid-rows-3 p-[2px] text-[9px] font-medium text-slate-400">
+                        {Array.from({ length: 9 }, (_, noteIndex) => {
+                          const digit = noteIndex + 1;
+                          const visible = Boolean(noteMask & (1 << digit));
+                          return (
+                            <span key={digit} className="flex items-center justify-center">
+                              {visible ? digit : ''}
+                            </span>
+                          );
+                        })}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-violet-400 via-sky-400 to-fuchsia-400 transition-[width]"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+
+          <div className="mt-3 grid grid-cols-5 gap-2">
+            {Array.from({ length: 9 }, (_, index) => {
+              const digit = index + 1;
+              return (
+                <button
+                  key={digit}
+                  type="button"
+                  onClick={() => applyDigit(digit)}
+                  className="rounded-[1rem] border border-slate-200 bg-white px-0 py-3 text-base font-semibold text-slate-700 transition hover:border-violet-200 hover:bg-violet-50"
+                >
+                  {digit}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => applyDigit(null)}
+              className="rounded-[1rem] border border-slate-200 bg-white px-3 py-3 text-sm font-semibold text-slate-500 transition hover:border-slate-300 hover:bg-slate-50"
+            >
+              מחק
+            </button>
+            <button
+              type="button"
+              onClick={() => setNoteMode((current) => !current)}
+              className={cn(
+                'rounded-[1rem] border px-3 py-3 text-sm font-semibold transition',
+                noteMode
+                  ? 'border-violet-200 bg-violet-50 text-violet-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50'
+              )}
+            >
+              פתקים
+            </button>
+            <button
+              type="button"
+              onClick={resetPuzzle}
+              className="rounded-[1rem] border border-slate-200 bg-white px-3 py-3 text-sm font-semibold text-slate-500 transition hover:border-slate-300 hover:bg-slate-50"
+            >
+              אפס
+            </button>
+            <button
+              type="button"
+              onClick={cyclePuzzle}
+              className="rounded-[1rem] border border-violet-200 bg-violet-50 px-3 py-3 text-sm font-semibold text-violet-700 transition hover:bg-violet-100"
+            >
+              חידה חדשה
+            </button>
+          </div>
+
+          <div className="mt-3 flex items-center justify-between gap-3 text-[11px] text-slate-400">
+            <span>Rating {activePuzzle.rating}</span>
+            <span>Nodes {activePuzzle.searchNodes}</span>
+            <span>{isSolved ? 'נפתר' : `${solvedEditableCells}/${editableCells} הושלמו`}</span>
           </div>
         </div>
       </div>
@@ -5823,6 +6246,7 @@ export function CodexMobileApp() {
   const [isGamePickerOpen, setIsGamePickerOpen] = useState(false);
   const [isGameOpen, setIsGameOpen] = useState(false);
   const [isRunnerGameOpen, setIsRunnerGameOpen] = useState(false);
+  const [isSudokuOpen, setIsSudokuOpen] = useState(false);
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
@@ -6579,12 +7003,17 @@ export function CodexMobileApp() {
     setIsGamePickerOpen(true);
   }
 
-  function startMiniGame(game: 'sky-ace' | 'sunset-sprint') {
+  function startMiniGame(game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab') {
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
+    setIsSudokuOpen(false);
     if (game === 'sunset-sprint') {
       setIsRunnerGameOpen(true);
+      return;
+    }
+    if (game === 'sudoku-lab') {
+      setIsSudokuOpen(true);
       return;
     }
 
@@ -7120,6 +7549,7 @@ export function CodexMobileApp() {
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
+    setIsSudokuOpen(false);
     setThemeMode(readThemeModeForProfile(nextProfileId));
     folderBackStackRef.current = [];
     folderForwardStackRef.current = [];
@@ -7395,6 +7825,7 @@ export function CodexMobileApp() {
         setIsGamePickerOpen(false);
         setIsGameOpen(false);
         setIsRunnerGameOpen(false);
+        setIsSudokuOpen(false);
         setRateLimitSnapshot(null);
         setAvailableModels([]);
         setModelPermissionSnapshot(null);
@@ -9538,6 +9969,11 @@ export function CodexMobileApp() {
         onClose={() => setIsRunnerGameOpen(false)}
         sessionActiveCount={currentSessionActiveQueueCount}
         sessionCompletionSignal={gameSessionCompletionSignal}
+      />
+
+      <SudokuDialog
+        isOpen={isSudokuOpen}
+        onClose={() => setIsSudokuOpen(false)}
       />
 
       {isFileTreeOpen && (
