@@ -47,7 +47,7 @@ export const useAuthStore = create<AuthState>()(
       logout: () => {
         set({ user: null, token: null, error: null });
         // Clear localStorage
-        localStorage.removeItem('bina-auth-storage');
+        localStorage.removeItem('code-ai-auth-storage');
       },
       
       // Check if user is logged in via shared session (from main site)
@@ -94,7 +94,7 @@ export const useAuthStore = create<AuthState>()(
       })),
     }),
     {
-      name: 'bina-auth-storage',
+      name: 'code-ai-auth-storage',
       partialize: (state) => ({ user: state.user, token: state.token }),
     }
   )

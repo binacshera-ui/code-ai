@@ -51,7 +51,7 @@ const MAX_UPLOAD_FILES = 8;
 const RECURRING_FREQUENCIES = new Set(['daily', 'weekly']);
 const CODEX_CLIENT_LOG_ROOT = path.dirname(CLIENT_CRASH_LOG);
 const CODEX_CLIENT_LOG_FILE = CLIENT_CRASH_LOG;
-const DEVICE_UNLOCK_COOKIE = 'codex_device_unlock';
+const DEVICE_UNLOCK_COOKIE = 'code_ai_device_unlock';
 const FORUM_SESSION_COOKIE = 'forum.session';
 
 function sanitizeFileName(fileName: string): string {

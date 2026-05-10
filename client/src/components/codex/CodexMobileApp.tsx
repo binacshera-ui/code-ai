@@ -6881,11 +6881,11 @@ export function CodexMobileApp() {
     writeThemeModeForProfile(profileId, themeMode);
   }, [profileId, themeMode]);
 
-  const themeClassName = themeMode === 'dark' ? 'codex-theme-dark' : 'codex-theme-light';
+  const themeClassName = themeMode === 'dark' ? 'code-ai-theme-dark' : 'code-ai-theme-light';
 
   if (isBooting) {
     return (
-      <div className={cn('codex-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
+      <div className={cn('code-ai-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
         <div className="w-full max-w-sm rounded-[28px] border border-slate-100 bg-white px-8 py-10 text-center shadow-[0_24px_80px_-56px_rgba(15,23,42,0.35)]">
           <img
             src={APP_ICON_PATH}
@@ -6903,7 +6903,7 @@ export function CodexMobileApp() {
 
   if (!authStatus?.authenticated) {
     return (
-      <div className={cn('codex-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
+      <div className={cn('code-ai-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
         <div className="w-full max-w-lg rounded-[28px] border border-slate-100 bg-white p-8 text-center shadow-[0_24px_80px_-56px_rgba(15,23,42,0.35)]">
           <img
             src={APP_ICON_PATH}
@@ -6960,7 +6960,7 @@ export function CodexMobileApp() {
 
   if (authStatus.deviceUnlocked === false) {
     return (
-      <div className={cn('codex-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
+      <div className={cn('code-ai-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
         <div className="w-full max-w-md rounded-[28px] border border-slate-100 bg-white p-8 text-center shadow-[0_24px_80px_-56px_rgba(15,23,42,0.35)]">
           <img
             src={APPLE_TOUCH_ICON_PATH}
@@ -7050,7 +7050,7 @@ export function CodexMobileApp() {
   );
 
   return (
-    <div className={cn('codex-theme h-dvh w-full overflow-hidden font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
+    <div className={cn('code-ai-theme h-dvh w-full overflow-hidden font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
       <input
         ref={fileInputRef}
         type="file"
