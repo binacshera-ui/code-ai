@@ -691,6 +691,17 @@ function getProviderDisplayLabel(provider: CodexProfile['provider']): string {
   }
 }
 
+function getProviderLogoSrc(provider: CodexProfile['provider']): string {
+  switch (provider) {
+    case 'claude':
+      return '/icons/claude-agent.png';
+    case 'gemini':
+      return '/icons/gemini-agent.png';
+    default:
+      return '/icons/codex-empty-state.png';
+  }
+}
+
 function resolveTransferTargetProfiles(
   profiles: CodexProfile[],
   currentProfile: CodexProfile | null
@@ -7028,7 +7039,16 @@ export function CodexMobileApp() {
 
           <div dir="rtl" className="mx-auto flex min-h-[66px] max-w-[70vw] flex-col items-center justify-center text-center">
             <h1 className="text-lg font-semibold tracking-tight text-slate-800">
-              {currentProfile ? getProviderDisplayLabel(currentProfile.provider) : APP_DISPLAY_NAME}
+              <span className="inline-flex flex-row-reverse items-center gap-2">
+                {currentProfile && (
+                  <img
+                    src={getProviderLogoSrc(currentProfile.provider)}
+                    alt=""
+                    className="h-[1.05em] w-[1.05em] shrink-0 object-contain"
+                  />
+                )}
+                <span>{currentProfile ? getProviderDisplayLabel(currentProfile.provider) : APP_DISPLAY_NAME}</span>
+              </span>
             </h1>
             <div className="mt-1 flex items-center gap-1.5 opacity-60">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
