@@ -3,6 +3,10 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { CODEX_APP_CONFIG } from './config.js';
 
+function isSupportedProvider(value: unknown): value is 'codex' | 'claude' | 'gemini' {
+  return value === 'codex' || value === 'claude' || value === 'gemini';
+}
+
 export interface CodexForkTimelineEntry {
   id: string;
   entryType: 'message' | 'tool' | 'status';
@@ -24,8 +28,8 @@ export interface CodexForkContext {
   sourceCwd: string | null;
   forkEntryId: string;
   timeline: CodexForkTimelineEntry[];
-  transferSourceProvider?: 'codex' | 'claude' | null;
-  transferTargetProvider?: 'codex' | 'claude' | null;
+  transferSourceProvider?: 'codex' | 'claude' | 'gemini' | null;
+  transferTargetProvider?: 'codex' | 'claude' | 'gemini' | null;
 }
 
 export interface CodexForkSessionMetadata extends CodexForkContext {
@@ -132,10 +136,10 @@ function sanitizeForkMetadata(value: any): CodexForkSessionMetadata | null {
     sourceTitle: value.sourceTitle,
     sourceCwd: typeof value.sourceCwd === 'string' && value.sourceCwd.trim() ? value.sourceCwd.trim() : null,
     forkEntryId: value.forkEntryId,
-    transferSourceProvider: value.transferSourceProvider === 'codex' || value.transferSourceProvider === 'claude'
+    transferSourceProvider: isSupportedProvider(value.transferSourceProvider)
       ? value.transferSourceProvider
       : null,
-    transferTargetProvider: value.transferTargetProvider === 'codex' || value.transferTargetProvider === 'claude'
+    transferTargetProvider: isSupportedProvider(value.transferTargetProvider)
       ? value.transferTargetProvider
       : null,
     promptPreview: value.promptPreview.trim(),
@@ -175,10 +179,10 @@ function sanitizeForkDraftSession(value: any): CodexForkDraftSession | null {
     sourceTitle: value.sourceTitle,
     sourceCwd: typeof value.sourceCwd === 'string' && value.sourceCwd.trim() ? value.sourceCwd.trim() : null,
     forkEntryId: value.forkEntryId,
-    transferSourceProvider: value.transferSourceProvider === 'codex' || value.transferSourceProvider === 'claude'
+    transferSourceProvider: isSupportedProvider(value.transferSourceProvider)
       ? value.transferSourceProvider
       : null,
-    transferTargetProvider: value.transferTargetProvider === 'codex' || value.transferTargetProvider === 'claude'
+    transferTargetProvider: isSupportedProvider(value.transferTargetProvider)
       ? value.transferTargetProvider
       : null,
     promptPreview: value.promptPreview.trim(),

@@ -1,10 +1,45 @@
 # ערכת פריסה ל־code-ai
 
-המסמך הזה נועד לאפשר התקנה מהירה, ברורה, וכמה שפחות מתישה של code-ai על מכונה חדשה.
+גרסה באנגלית:
 
-אם אתה רוצה רק "להרים את המערכת מהר", תעתיק את אחת הפקודות הבאות כמו שהן. הסקריפט יכתוב `.env`, יתקין תלויות, יבנה את האפליקציה, ייצור תיקיות storage, ויעלה את PM2 בשבילך.
+- `README.md`
 
-## התקנה הכי מהירה
+`code-ai` היא סביבת עבודה מוביילית לשליטה ב־3 סוכני הקוד המובילים מתוך ממשק אחד:
+
+- Codex
+- Claude Code
+- Gemini CLI
+
+זה כבר לא "ממשק לקודקס". זו שכבת שליטה אחת שמחברת כמה ספקים, תורים, תיזמון, uploads, העברות בין ספקים, והיסטוריית שיחות לפי ה־home האמיתי של כל provider.
+
+## מה חייב להיות מותקן
+
+בסיס:
+
+- Node.js 20 ומעלה
+- npm
+- Git
+
+ספקים:
+
+- Codex CLI אם רוצים לעבוד עם Codex
+- Claude CLI אם רוצים לעבוד עם Claude
+- Gemini CLI אם רוצים לעבוד עם Gemini
+
+מצב authentication / state:
+
+- לפרופילי Codex צריך להיות `.codex` אמיתי
+- לפרופילי Claude צריך להיות `.claude` אמיתי
+- לפרופילי Gemini צריך להיות `.gemini` אמיתי
+
+חשוב:
+
+- אפשר להפעיל את `code-ai` גם עם ספק אחד בלבד.
+- כדי לקבל את כל החוויה הרב-ספקית, כל 3 ה־CLI צריכים להיות מותקנים ומחוברים על השרת.
+
+## ההתקנה הכי מהירה
+
+אם המטרה היא להרים את המערכת נכון מההתחלה, השתמש ב־`profiles-json` מפורש עם 3 הספקים.
 
 ### Linux / macOS
 
@@ -14,8 +49,9 @@ cd code-ai
 ./install.sh \
   --app-name code-ai \
   --port 4000 \
-  --codex-home /home/ubuntu/.codex \
-  --workspace /srv/codex-workspace
+  --profiles-json '[{"id":"codex-main","label":"Codex","provider":"codex","codexHome":"/home/ubuntu/.codex","workspaceCwd":"/srv/workspace","defaultProfile":true},{"id":"claude-main","label":"Claude","provider":"claude","codexHome":"/home/ubuntu/.claude","workspaceCwd":"/srv/workspace"},{"id":"gemini-main","label":"Gemini","provider":"gemini","codexHome":"/home/ubuntu/.gemini","workspaceCwd":"/srv/workspace"}]' \
+  --device-password change-me-now \
+  --session-secret change-me-too
 ```
 
 ### Windows PowerShell
@@ -26,8 +62,9 @@ cd code-ai
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
   --app-name code-ai `
   --port 4000 `
-  --codex-home C:\Users\Administrator\.codex `
-  --workspace D:\codex-workspace
+  --profiles-json '[{"id":"codex-main","label":"Codex","provider":"codex","codexHome":"C:\\Users\\Administrator\\.codex","workspaceCwd":"D:\\workspace","defaultProfile":true},{"id":"claude-main","label":"Claude","provider":"claude","codexHome":"C:\\Users\\Administrator\\.claude","workspaceCwd":"D:\\workspace"},{"id":"gemini-main","label":"Gemini","provider":"gemini","codexHome":"C:\\Users\\Administrator\\.gemini","workspaceCwd":"D:\\workspace"}]' `
+  --device-password change-me-now `
+  --session-secret change-me-too
 ```
 
 ### Windows CMD
@@ -35,141 +72,124 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 `
 ```cmd
 git clone https://github.com/binacshera-ui/code-ai.git
 cd code-ai
-install.cmd --app-name code-ai --port 4000 --codex-home C:\Users\Administrator\.codex --workspace D:\codex-workspace
+install.cmd --app-name code-ai --port 4000 --profiles-json "[{\"id\":\"codex-main\",\"label\":\"Codex\",\"provider\":\"codex\",\"codexHome\":\"C:\\Users\\Administrator\\.codex\",\"workspaceCwd\":\"D:\\workspace\",\"defaultProfile\":true},{\"id\":\"claude-main\",\"label\":\"Claude\",\"provider\":\"claude\",\"codexHome\":\"C:\\Users\\Administrator\\.claude\",\"workspaceCwd\":\"D:\\workspace\"},{\"id\":\"gemini-main\",\"label\":\"Gemini\",\"provider\":\"gemini\",\"codexHome\":\"C:\\Users\\Administrator\\.gemini\",\"workspaceCwd\":\"D:\\workspace\"}]" --device-password change-me-now --session-secret change-me-too
 ```
-
-## מה צריך לפני שמריצים
-
-חובה:
-
-- Node.js 20 ומעלה
-- npm
-- Codex CLI מותקן ועובד ב־`PATH`
-
-מה שחייבים לדעת מראש:
-
-- `codexHome`
-- `workspace`
-
-### מה זה `codexHome`
-
-זה הבית האמיתי של Codex עבור הפרופיל. זה הנתיב שבו Codex שומר את ההיסטוריה האמיתית של הסשנים.
-
-הוא אמור לכלול:
-
-- `session_index.jsonl`
-- `sessions/`
-- לפעמים גם `archived_sessions/`
-- בדרך כלל גם `config.toml`
-
-אם המשתמש אומר "הצ'אטים הישנים לא הופיעו", ברוב המקרים זו הבעיה.
-
-### מה זה `workspace`
-
-זו תיקיית העבודה הדיפולטיבית שתופיע ב־UI לשיחות חדשות.
-
-דוגמאות:
-
-- Linux:
-  `--codex-home /home/ubuntu/.codex`
-  `--workspace /srv/codex-workspace`
-- Windows:
-  `--codex-home C:\Users\Administrator\.codex`
-  `--workspace D:\codex-workspace`
-
-אם `codex` לא זמין ב־`PATH`, הוסף:
-
-- `--codex-bin /full/path/to/codex`
 
 ## מה המתקין עושה בפועל
 
-המתקין הראשי הוא:
+המתקין הראשי:
 
 - `deploy/code-ai/install.mjs`
 
+ה־wrappers:
+
+- `install.sh`
+- `install.ps1`
+- `install.cmd`
+
 הוא:
 
-- יוצר `.env`
+- כותב `.env`
 - כותב `CODEX_PROFILES_JSON`
-- יוצר תיקיות uploads, queue ו־logs
+- יוצר storage
 - מריץ `npm install --include=dev`
 - מריץ `npm run build`
-- מעלה או מרענן את האפליקציה דרך PM2
+- מעלה או מרענן PM2 דרך `ecosystem.config.cjs`
 
-כלומר אין צורך ידני:
+אין צורך ידני:
 
 - לכתוב `.env`
 - להתקין PM2 גלובלית
-- לבנות client/server בנפרד
-- ליצור storage ידנית
+- ליצור תיקיות queue/uploads/logs
+- לבנות client ו־server בנפרד
 
-## ההתקנה הכי קטנה שעובדת
+## שני מושגי הנתיב שחייבים להבין
 
-```bash
-./install.sh --codex-home /home/ubuntu/.codex --workspace /srv/codex-workspace
-```
+### `workspaceCwd`
 
-ברירות המחדל במקרה הזה:
+זו תיקיית העבודה הדיפולטיבית שתופיע ב־UI לשיחות חדשות.
 
-- app name: `code-ai-app`
-- port: `4000`
-- open access: `true`
-- allow any paths: `true`
+### `codexHome`
 
-## התקנה מומלצת לפרודקשן
+זה שם legacy, אבל בתוך `code-ai` הכוונה היא:
 
-```bash
-./install.sh \
-  --app-name code-ai \
-  --port 4000 \
-  --codex-home /home/ubuntu/.codex \
-  --workspace /srv/codex-workspace \
-  --storage-root /srv/code-ai-data \
-  --device-password change-me-now \
-  --session-secret change-me-too
-```
+- תיקיית הנתונים האמיתית של אותו provider
 
-## התקנה עם כמה פרופילים
+דוגמאות:
 
-אם אתה רוצה יותר מפרופיל אחד, השתמש ב־`--profiles-json`.
+- Codex -> `/home/ubuntu/.codex`
+- Claude -> `/home/ubuntu/.claude`
+- Gemini -> `/home/ubuntu/.gemini`
 
-```bash
-./install.sh \
-  --app-name code-ai \
-  --port 4000 \
-  --profiles-json '[{"id":"default","label":"Default","codexHome":"/home/ubuntu/.codex","workspaceCwd":"/srv/codex-workspace","defaultProfile":true},{"id":"ops","label":"Ops","codexHome":"/srv/codex/ops-home","workspaceCwd":"/srv/ops-workspace"}]'
-```
+השדה לא שונה בשם כדי לא לשבור התקנות קיימות, queue state ישן, ו־JSON schema ישן.
 
-## איך מוודאים שההתקנה הצליחה
+## נתיבי הבינארים של הספקים
 
-```bash
-npx pm2 describe code-ai
-npx pm2 logs code-ai
-```
+אם הפקודות כבר ב־`PATH`, לרוב לא צריך להגדיר כלום.
 
-ואז לפתוח:
+- `CODEX_BIN`
+- `CLAUDE_BIN`
+- `GEMINI_BIN`
 
-- `http://SERVER_IP:4000`
+דוגמאות:
 
-סימנים טובים:
+- `CODEX_BIN=/usr/local/bin/codex`
+- `CLAUDE_BIN=/usr/local/bin/claude`
+- `GEMINI_BIN=/home/ubuntu/.local/bin/gemini`
 
-- ה־UI נפתח
-- הפרופילים נטענים
-- צ'אטים ישנים מופיעים
-- שליחת הודעה יוצרת או ממשיכה session אמיתי של Codex
+## מבנה הריפו
 
-## איפה נמצאים הקבצים החשובים
+- `client/` — ה־UI של המובייל
+- `server/` — ה־API, ה־queue, והאורקסטרציה
+- `deploy/code-ai/` — מתקין, exporter ותבנית nginx
+- `ecosystem.config.cjs` — הגדרת PM2
+- `.env.example` — מבנה הסביבה
 
-### בתוך הריפו
+## קבצי ההיגיון הראשיים
 
-- `.env`
-- `ecosystem.config.cjs`
-- `AGENT.md`
-- `AGENT.he.md`
+אלה הקבצים שבאמת מגדירים את ההתנהגות של `code-ai`:
 
-### בתוך storage של האפליקציה
+- `server/config.ts`
+  מגדיר profiles, providers, נתיבים ו־storage roots
+- `server/agentService.ts`
+  שכבת הניתוב הראשית בין Codex / Claude / Gemini
+- `server/codexService.ts`
+  parsing והרצה של Codex
+- `server/claudeService.ts`
+  parsing והרצה של Claude
+- `server/geminiService.ts`
+  parsing והרצה של Gemini
+- `server/codexQueue.ts`
+  queue משותף, scheduling, retries, fork/transfer execution
+- `server/codexForkSessions.ts`
+  draft forks ומטא־דאטה של העברות בין ספקים
+- `server/codexRoutes.ts`
+  שכבת ה־HTTP שהלקוח צורך
+- `client/src/components/codex/CodexMobileApp.tsx`
+  ממשק המשתמש הראשי
 
-ברירת מחדל תחת `CODEX_STORAGE_ROOT`:
+## למה עדיין יש כל כך הרבה שמות עם "codex"
+
+בגלל תאימות לאחור.
+
+לדוגמה:
+
+- `/api/codex/*`
+- `CODEX_PROFILES_JSON`
+- `server/codexRoutes.ts`
+- `server/codexQueue.ts`
+- `server/codexService.ts`
+- `client/src/components/codex/...`
+
+במערכת הנוכחית, השמות האלה כבר לא אומרים "Codex בלבד". אלה שמות legacy בתוך `code-ai`.
+
+## מה נמצא ב־storage של האפליקציה
+
+שורש ברירת מחדל:
+
+- `CODEX_STORAGE_ROOT`
+
+קבצים נפוצים:
 
 - `uploads/`
 - `queue/state.json`
@@ -182,26 +202,52 @@ npx pm2 logs code-ai
 - `logs/server-crashes.jsonl`
 - `logs/file-access.jsonl`
 
-### איפה באמת נמצאים הצ'אטים
+## איפה השיחות האמיתיות נשמרות
 
-לא תחת `CODEX_STORAGE_ROOT`.
+לא בתוך `.code-ai`.
 
-היסטוריית הצ'אטים האמיתית של Codex נמצאת בתוך כל `codexHome`:
+כל provider שומר את ההיסטוריה במקום שלו:
+
+Codex:
 
 - `session_index.jsonl`
 - `sessions/`
 - `archived_sessions/`
 
-## הטעות הכי נפוצה
+Claude:
 
-המערכת עולה, אבל לא רואים שיחות ישנות, כי `--codex-home` מצביע למקום הלא נכון.
+- `projects/<workspace-hash-or-name>/*.jsonl`
+- `projects/<workspace>/memory/`
+- `projects/<workspace>/<session>/subagents/`
 
-לפני שמחפשים באג, ודא שהנתיב באמת מכיל:
+Gemini:
 
-- `session_index.jsonl`
-- `sessions/`
+- `projects.json`
+- `tmp/<project-id>/chats/*.jsonl`
 
-## איך מעדכנים את המערכת
+אם משתמש אומר "הצ'אטים הישנים נעלמו", בודקים קודם את תיקיית הספק, לא את storage של האפליקציה.
+
+## איך בודקים שההתקנה הצליחה
+
+```bash
+npx pm2 describe code-ai
+npx pm2 logs code-ai
+```
+
+ואז פותחים:
+
+- `http://SERVER_IP:4000`
+
+סימנים טובים:
+
+- ה־UI נפתח
+- בחירת providers מופיעה
+- profiles נטענים
+- שיחות ישנות מופיעות עבור הספקים שמותקנים
+- שליחת הודעה מייצרת או ממשיכה session אמיתי
+- העברה בין ספקים יוצרת handoff draft וממשיכה טבעית
+
+## איך מעדכנים התקנה קיימת
 
 ```bash
 git pull
@@ -210,47 +256,7 @@ npm run build
 npx pm2 restart code-ai --update-env
 ```
 
-אם ה־PM2 app name שלך עדיין ברירת המחדל, החלף ל־`code-ai-app`.
-
-## דגלים שימושיים של המתקין
-
-- `--app-name NAME`
-- `--port PORT`
-- `--codex-home PATH`
-- `--workspace PATH`
-- `--profile-id ID`
-- `--profile-label LABEL`
-- `--profiles-json JSON`
-- `--storage-root PATH`
-- `--public-hosts CSV`
-- `--open-access true|false`
-- `--allow-any-paths true|false`
-- `--extra-readable-roots /srv/shared,/mnt/data`
-- `--database-url postgresql://...`
-- `--session-secret VALUE`
-- `--cookie-domain VALUE`
-- `--device-password VALUE`
-- `--codex-bin PATH`
-- `--skip-npm-install`
-- `--skip-build`
-- `--skip-pm2`
-
-עזרה מלאה:
-
-```bash
-./install.sh --help
-node deploy/code-ai/install.mjs --help
-```
-
-## Reverse Proxy
-
-המתקין לא נוגע ב־DNS או nginx.
-
-השתמש ב:
-
-- `deploy/code-ai/nginx-site.conf.template`
-
-ותפנה אותו לפורט שבחרת.
+אם שם ה־PM2 עדיין `code-ai-app`, השתמש בו במקום `code-ai`.
 
 ## ייצוא כריפו standalone
 
@@ -258,13 +264,7 @@ node deploy/code-ai/install.mjs --help
 node deploy/code-ai/export-standalone.mjs /tmp/code-ai-standalone --git-init
 ```
 
-PowerShell:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\deploy\code-ai\export-standalone.ps1 C:\temp\code-ai-standalone --git-init
-```
-
-הייצוא כולל:
+הייצוא כולל בכוונה:
 
 - `README.md`
 - `README.he.md`
@@ -277,11 +277,16 @@ powershell -ExecutionPolicy Bypass -File .\deploy\code-ai\export-standalone.ps1 
 - `install.*`
 - `export-standalone.*`
 
-## אם אתה רוצה מסלול הכי פחות שביר
+אל תמחק את הקבצים האלה. הם חלק מחבילת ההעברה.
 
-1. ודא ש־`codex --help` עובד.
-2. ודא ש־`codexHome` האמיתי כולל `sessions/`.
-3. הרץ התקנה עם `--codex-home` ו־`--workspace` מפורשים.
-4. קבע `--device-password` ו־`--session-secret` משלך.
+## צ'קליסט קצר לתקלות
+
+1. ודא שהפקודה של הספק הרלוונטי קיימת:
+   - `codex --help`
+   - `claude --help`
+   - `gemini --help`
+2. ודא ש־`CODEX_PROFILES_JSON` מצביע ל־homes אמיתיים וקריאים.
+3. ודא שלתיקיות ה־storage יש הרשאות כתיבה.
+4. הרץ `npm run build`.
 5. בדוק `npx pm2 logs <app-name>`.
-6. פתח את ה־UI וודא שהשיחות הישנות נראות לפני עלייה לפרודקשן.
+6. אם שיחות חסרות, בדוק את תיקיית הספק הרלוונטית, לא את `.code-ai`.

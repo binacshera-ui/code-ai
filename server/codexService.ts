@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { createReadStream, promises as fs } from 'fs';
 import path from 'path';
 import readline from 'readline';
-import { CODEX_APP_CONFIG } from './config.js';
+import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
 import {
   getForkDraftSession,
   getForkSessionMetadata,
@@ -18,7 +18,7 @@ import { getSessionTopicMap } from './codexSessionTopics.js';
 export interface CodexProfile {
   id: string;
   label: string;
-  provider: 'codex' | 'claude';
+  provider: AppProvider;
   codexHome: string;
   workspaceCwd: string;
   defaultProfile?: boolean;
@@ -258,17 +258,25 @@ const modelCatalogCache = new Map<string, {
   models: CodexAvailableModel[];
 }>();
 
-function getProviderDisplayLabel(provider: 'codex' | 'claude'): string {
-  return provider === 'claude' ? 'Claude' : 'Codex';
+function getProviderDisplayLabel(provider: AppProvider): string {
+  if (provider === 'claude') {
+    return 'Claude';
+  }
+
+  if (provider === 'gemini') {
+    return 'Gemini';
+  }
+
+  return 'Codex';
 }
 
-function buildStartedTaskTitle(provider: 'codex' | 'claude'): string {
+function buildStartedTaskTitle(provider: AppProvider): string {
   return `${getProviderDisplayLabel(provider)} התחיל את המשימה`;
 }
 
 function isTransferForkMetadata(metadata: CodexForkSessionMetadata | null | undefined): metadata is CodexForkSessionMetadata & {
-  transferSourceProvider: 'codex' | 'claude';
-  transferTargetProvider: 'codex' | 'claude';
+  transferSourceProvider: AppProvider;
+  transferTargetProvider: AppProvider;
 } {
   return Boolean(
     metadata
@@ -279,8 +287,8 @@ function isTransferForkMetadata(metadata: CodexForkSessionMetadata | null | unde
 
 function buildTransferDisplayText(
   metadata: CodexForkSessionMetadata & {
-    transferSourceProvider: 'codex' | 'claude';
-    transferTargetProvider: 'codex' | 'claude';
+    transferSourceProvider: AppProvider;
+    transferTargetProvider: AppProvider;
   }
 ): string {
   const sourceProviderLabel = getProviderDisplayLabel(metadata.transferSourceProvider);
@@ -711,17 +719,6 @@ function buildRecoveredQueueParsedSession(
 
     if (!derivedTitle) {
       derivedTitle = trimPreview(item.prompt, 72);
-    }
-
-    if (item.status === 'scheduled' && item.scheduledAt) {
-      pushStatus(
-        item.scheduledAt,
-        item.scheduleMode === 'recurring' ? 'משימה מחזורית מתוזמנת' : 'משימה מתוזמנת',
-        'scheduled',
-        item.recurringFrequency ? `תדירות ${item.recurringFrequency}` : null
-      );
-    } else if (item.status === 'queued') {
-      pushStatus(item.updatedAt, 'המשימה ממתינה בתור', 'queued');
     }
 
     if (item.startedAt) {

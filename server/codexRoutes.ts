@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
+import type { AppProvider } from './config.js';
 import {
   CodexExecutionConfig,
   CodexSessionDetail,
@@ -479,8 +480,16 @@ async function copySessionSidebarMetadataToForkSession(
   };
 }
 
-function getProviderDisplayLabel(provider: 'codex' | 'claude'): string {
-  return provider === 'claude' ? 'Claude' : 'Codex';
+function getProviderDisplayLabel(provider: AppProvider): string {
+  if (provider === 'claude') {
+    return 'Claude';
+  }
+
+  if (provider === 'gemini') {
+    return 'Gemini';
+  }
+
+  return 'Codex';
 }
 
 function clipTransferText(text: string, limit = 6_000): string {
@@ -1120,7 +1129,7 @@ router.post('/sessions/:sessionId/transfer', requireCodexAccess, async (req, res
     }
 
     if (sourceProfile.provider === targetProfile.provider) {
-      res.status(400).json({ error: 'העברה נתמכת רק בין Codex ל-Claude.' });
+      res.status(400).json({ error: 'בחר יעד מספק אחר.' });
       return;
     }
 

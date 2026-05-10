@@ -29,6 +29,18 @@ import {
   runClaudePrompt,
   ClaudeRunCancelledError,
 } from './claudeService.js';
+import {
+  cancelGeminiRun,
+  createGeminiForkSession,
+  getAvailableGeminiProfiles,
+  getGeminiModelCatalog,
+  getGeminiRateLimitSnapshot,
+  getGeminiSessionDetail,
+  listGeminiSessions,
+  resolveGeminiProfile,
+  runGeminiPrompt,
+  GeminiRunCancelledError,
+} from './geminiService.js';
 import { CodexRunCancelledError } from './codexService.js';
 
 export type AgentProfile = CodexProfile;
@@ -55,6 +67,9 @@ export function resolveAgentProfile(profileId?: string): AgentProfile {
   if (profile.provider === 'claude') {
     return resolveClaudeProfile(profile.id);
   }
+  if (profile.provider === 'gemini') {
+    return resolveGeminiProfile(profile.id);
+  }
 
   return resolveCodexProfile(profile.id);
 }
@@ -64,12 +79,13 @@ export function getProviderForProfile(profileId?: string): AppProvider {
 }
 
 export async function getAvailableProfiles(): Promise<AgentProfile[]> {
-  const [codexProfiles, claudeProfiles] = await Promise.all([
+  const [codexProfiles, claudeProfiles, geminiProfiles] = await Promise.all([
     getAvailableCodexProfiles(),
     getAvailableClaudeProfiles(),
+    getAvailableGeminiProfiles(),
   ]);
 
-  return [...codexProfiles, ...claudeProfiles];
+  return [...codexProfiles, ...claudeProfiles, ...geminiProfiles];
 }
 
 export async function listAgentSessions(
@@ -80,6 +96,9 @@ export async function listAgentSessions(
   const profile = resolveProfile(profileId);
   if (profile.provider === 'claude') {
     return listClaudeSessions(profile.id, query, limit);
+  }
+  if (profile.provider === 'gemini') {
+    return listGeminiSessions(profile.id, query, limit);
   }
 
   return listCodexSessions(profile.id, query, limit);
@@ -98,6 +117,9 @@ export async function getAgentSessionDetail(
   if (profile.provider === 'claude') {
     return getClaudeSessionDetail(sessionId, profile.id, options);
   }
+  if (profile.provider === 'gemini') {
+    return getGeminiSessionDetail(sessionId, profile.id, options);
+  }
 
   return getCodexSessionDetail(sessionId, profile.id, options);
 }
@@ -106,6 +128,9 @@ export async function getAgentModelCatalog(profileId?: string): Promise<CodexMod
   const profile = resolveProfile(profileId);
   if (profile.provider === 'claude') {
     return getClaudeModelCatalog(profile.id);
+  }
+  if (profile.provider === 'gemini') {
+    return getGeminiModelCatalog(profile.id);
   }
 
   return getCodexModelCatalog(profile.id);
@@ -118,6 +143,9 @@ export async function getAgentRateLimitSnapshot(
   const profile = resolveProfile(profileId);
   if (profile.provider === 'claude') {
     return getClaudeRateLimitSnapshot(profile.id, sessionId);
+  }
+  if (profile.provider === 'gemini') {
+    return getGeminiRateLimitSnapshot(profile.id, sessionId);
   }
 
   return getCodexRateLimitSnapshot(profile.id, sessionId);
@@ -139,6 +167,9 @@ export async function runAgentPrompt(
   if (profile.provider === 'claude') {
     return runClaudePrompt(prompt, sessionId, profile.id, attachments, options);
   }
+  if (profile.provider === 'gemini') {
+    return runGeminiPrompt(prompt, sessionId, profile.id, attachments, options);
+  }
 
   return runCodexPrompt(prompt, sessionId, profile.id, attachments, options);
 }
@@ -155,6 +186,9 @@ export async function createAgentForkSession(
   if (profile.provider === 'claude') {
     return createClaudeForkSession(sourceSessionId, forkEntryId, profile.id);
   }
+  if (profile.provider === 'gemini') {
+    return createGeminiForkSession(sourceSessionId, forkEntryId, profile.id);
+  }
 
   return createCodexForkSession(sourceSessionId, forkEntryId, profile.id);
 }
@@ -164,10 +198,15 @@ export function cancelAgentRun(runId: string, profileId?: string): boolean {
   if (profile.provider === 'claude') {
     return cancelClaudeRun(runId);
   }
+  if (profile.provider === 'gemini') {
+    return cancelGeminiRun(runId);
+  }
 
   return cancelCodexRun(runId);
 }
 
 export function isAgentRunCancelledError(error: unknown): boolean {
-  return error instanceof CodexRunCancelledError || error instanceof ClaudeRunCancelledError;
+  return error instanceof CodexRunCancelledError
+    || error instanceof ClaudeRunCancelledError
+    || error instanceof GeminiRunCancelledError;
 }

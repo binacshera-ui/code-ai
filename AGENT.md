@@ -4,20 +4,71 @@ Hebrew version:
 
 - `AGENT.he.md`
 
-This is the standalone code-ai repository. This file is the source-of-truth handoff for human or AI operators who need to install it, update it, debug it, or recover data.
+This file is the operator handoff for `code-ai`.
 
-If you are in a hurry, read only:
+`code-ai` is a shared mobile workspace for 3 provider CLIs:
+
+- Codex
+- Claude Code
+- Gemini CLI
+
+Use this file when you need to install, update, debug, recover data, or explain the system to another agent or operator.
+
+## Read These First
+
+If you only have a minute, read:
 
 1. `README.md`
 2. `deploy/code-ai/install.mjs`
 3. `server/config.ts`
-4. `server/codexService.ts`
+4. `server/agentService.ts`
+5. `client/src/components/codex/CodexMobileApp.tsx`
 
-## What This Repo Is
+## What This Repo Actually Is
 
-- Mobile-first Codex control surface.
-- Frontend + backend for browsing Codex sessions and sending work to the Codex CLI.
-- Supports multiple profiles, queueing, scheduling, uploads, per-session instructions, session titles, topics, visibility, and file preview.
+- A mobile-first multi-provider coding workspace
+- Frontend + backend
+- Shared queue, scheduling, uploads, titles, topics, hidden/archive state
+- Cross-provider transfers between Codex, Claude, and Gemini
+- Provider-specific session parsing from each CLI's real local storage
+
+## The Naming Rule You Must Understand
+
+Many internal names still say `codex`:
+
+- `/api/codex/*`
+- `CODEX_PROFILES_JSON`
+- `server/codexRoutes.ts`
+- `server/codexQueue.ts`
+- `server/codexService.ts`
+- `client/src/components/codex/...`
+
+Those names are legacy compatibility names.
+
+In the current product, they are part of `code-ai`, not proof that the system is Codex-only.
+
+## Core Runtime Files
+
+The real logic is split like this:
+
+- `server/config.ts`
+  app config, profile config, paths, storage roots
+- `server/agentService.ts`
+  provider router used by the rest of the system
+- `server/codexService.ts`
+  Codex session parsing + execution
+- `server/claudeService.ts`
+  Claude session parsing + execution
+- `server/geminiService.ts`
+  Gemini session parsing + execution
+- `server/codexQueue.ts`
+  shared queue, scheduling, retries, run orchestration
+- `server/codexForkSessions.ts`
+  draft sessions, fork metadata, transfer metadata
+- `server/codexRoutes.ts`
+  HTTP API used by the mobile client
+- `client/src/components/codex/CodexMobileApp.tsx`
+  main UI shell
 
 ## The Fastest Safe Install
 
@@ -29,8 +80,7 @@ cd code-ai
 ./install.sh \
   --app-name code-ai \
   --port 4000 \
-  --codex-home /home/ubuntu/.codex \
-  --workspace /srv/codex-workspace \
+  --profiles-json '[{"id":"codex-main","label":"Codex","provider":"codex","codexHome":"/home/ubuntu/.codex","workspaceCwd":"/srv/workspace","defaultProfile":true},{"id":"claude-main","label":"Claude","provider":"claude","codexHome":"/home/ubuntu/.claude","workspaceCwd":"/srv/workspace"},{"id":"gemini-main","label":"Gemini","provider":"gemini","codexHome":"/home/ubuntu/.gemini","workspaceCwd":"/srv/workspace"}]' \
   --device-password change-me-now \
   --session-secret change-me-too
 ```
@@ -43,77 +93,73 @@ cd code-ai
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
   --app-name code-ai `
   --port 4000 `
-  --codex-home C:\Users\Administrator\.codex `
-  --workspace D:\codex-workspace `
+  --profiles-json '[{"id":"codex-main","label":"Codex","provider":"codex","codexHome":"C:\\Users\\Administrator\\.codex","workspaceCwd":"D:\\workspace","defaultProfile":true},{"id":"claude-main","label":"Claude","provider":"claude","codexHome":"C:\\Users\\Administrator\\.claude","workspaceCwd":"D:\\workspace"},{"id":"gemini-main","label":"Gemini","provider":"gemini","codexHome":"C:\\Users\\Administrator\\.gemini","workspaceCwd":"D:\\workspace"}]' `
   --device-password change-me-now `
   --session-secret change-me-too
 ```
 
-What this does:
+## What Must Exist On The Host
 
-- writes `.env`
-- installs dependencies
-- builds client and server
-- creates storage folders
-- starts or restarts PM2
+Base:
 
-## The 2 Paths You Must Get Right
+- Node.js 20+
+- npm
+- Git
 
-Every broken install usually comes from one of these:
+Provider binaries:
 
-- `codexHome`
-- `workspace`
+- `codex` for Codex
+- `claude` for Claude
+- `gemini` for Gemini
+
+Optional explicit binary envs:
+
+- `CODEX_BIN`
+- `CLAUDE_BIN`
+- `GEMINI_BIN`
+
+Provider homes:
+
+- Codex -> real `.codex`
+- Claude -> real `.claude`
+- Gemini -> real `.gemini`
+
+Important:
+
+- The field name in profile JSON is still `codexHome`.
+- In `code-ai`, that field means "provider home", not "Codex only".
+
+## The 2 Path Concepts That Break Installs
+
+### `workspaceCwd`
+
+Default working directory used by new chats.
 
 ### `codexHome`
 
-This is the real Codex data home for a profile.
+Legacy field name for provider data home.
 
-It should contain:
+Examples:
 
-- `session_index.jsonl`
-- `sessions/`
-- sometimes `archived_sessions/`
-- usually `config.toml`
+- Codex: `/home/ubuntu/.codex`
+- Claude: `/home/ubuntu/.claude`
+- Gemini: `/home/ubuntu/.gemini`
 
-If users say "my old chats are missing", the first thing to verify is that `--codex-home` points to the right place.
-
-### `workspace`
-
-This is the default working directory shown in the mobile UI and used for new conversations unless the user changes it.
-
-## First Files To Read
-
-- `README.md` — installation and update instructions
-- `deploy/code-ai/install.mjs` — canonical installer and `.env` writer
-- `server/config.ts` — how env vars become real paths and runtime config
-- `server/index.ts` — Express boot, session store, queue startup
-- `server/codexRoutes.ts` — HTTP API surface
-- `server/codexService.ts` — Codex session parsing and CLI execution
-- `server/codexQueue.ts` — queue persistence and worker behavior
-- `client/src/components/codex/CodexMobileApp.tsx` — main mobile UI
+If users say "my old chats are missing", verify this first.
 
 ## Repo Layout
 
-- `client/` — Vite client and mobile UI
-- `server/` — Express server and Codex orchestration
-- `deploy/code-ai/` — installer, exporter, nginx template
-- `ecosystem.config.cjs` — PM2 process definition
-- `.env.example` — reference env template
+- `client/` — Vite app and UI
+- `server/` — API + orchestration
+- `deploy/code-ai/` — install/export/nginx assets
+- `ecosystem.config.cjs` — PM2 config
+- `.env.example` — environment reference
 
-## Runtime Layout
+## App-managed Storage
 
-### Repo Root
+Defaults come from `CODEX_STORAGE_ROOT`.
 
-Important files:
-
-- `.env`
-- `package.json`
-- `ecosystem.config.cjs`
-- `AGENT.md`
-
-### App-managed storage
-
-Defaults live under `CODEX_STORAGE_ROOT`:
+Expected files:
 
 - `uploads/`
 - `queue/state.json`
@@ -126,25 +172,30 @@ Defaults live under `CODEX_STORAGE_ROOT`:
 - `logs/server-crashes.jsonl`
 - `logs/file-access.jsonl`
 
-### Real Codex chat history
+## Where Real Sessions Live
 
-Actual chat transcripts are not stored in `CODEX_STORAGE_ROOT`.
+Not in `.code-ai`.
 
-They live in each profile's `codexHome`:
+Check the selected provider home.
+
+Codex:
 
 - `session_index.jsonl`
 - `sessions/`
 - `archived_sessions/`
 
-When a user asks:
+Claude:
 
-- "where are the chats"
-- "why is this old conversation missing"
-- "why do I see no history"
+- `projects/<workspace>/*.jsonl`
+- `projects/<workspace>/memory/`
+- `projects/<workspace>/<session>/subagents/`
 
-check the selected profile's `codexHome` first.
+Gemini:
 
-## The Exact Symptoms -> First Place To Inspect
+- `projects.json`
+- `tmp/<project-id>/chats/*.jsonl`
+
+## First Place To Inspect For Each Symptom
 
 ### "Old chats are missing"
 
@@ -152,9 +203,8 @@ Check:
 
 - `.env`
 - `CODEX_PROFILES_JSON`
-- active profile `codexHome`
-- `codexHome/session_index.jsonl`
-- `codexHome/sessions/`
+- active provider profile home
+- provider session files in that home
 - `session-visibility.json`
 
 ### "Scheduled task disappeared"
@@ -165,7 +215,16 @@ Check:
 - `server/codexQueue.ts`
 - PM2 logs
 
-### "Uploaded file is gone"
+### "Transfer between providers looks wrong"
+
+Check:
+
+- `server/codexForkSessions.ts`
+- `server/codexQueue.ts`
+- `server/agentService.ts`
+- provider-specific service of the target provider
+
+### "Uploads vanished"
 
 Check:
 
@@ -173,60 +232,16 @@ Check:
 - `/api/codex/uploads`
 - `logs/file-access.jsonl`
 
-### "Custom title / topic / hidden state vanished"
-
-Check:
-
-- `session-titles.json`
-- `session-topics.json`
-- `session-visibility.json`
-
-### "Session instruction vanished"
-
-Check:
-
-- `session-instructions.json`
-
 ### "UI opens but nothing works"
 
 Check:
 
-- `npx pm2 logs <app-name>`
 - `.env`
-- `CODEX_BIN`
 - `CODEX_PROFILES_JSON`
-- whether `codex --help` works on that host
+- provider binaries on PATH
+- `npx pm2 logs <app-name>`
 
-## Install, Build, Run
-
-### Fresh install
-
-```bash
-./install.sh \
-  --app-name code-ai \
-  --port 4000 \
-  --codex-home /home/ubuntu/.codex \
-  --workspace /srv/codex-workspace
-```
-
-### Manual developer install
-
-```bash
-npm install --include=dev
-npm run build
-node deploy/code-ai/install.mjs --skip-npm-install --skip-build --skip-pm2
-```
-
-### Restart after code changes
-
-```bash
-npm run build
-npx pm2 restart code-ai --update-env
-```
-
-If the PM2 app still uses the default name, use `code-ai-app` instead.
-
-## Commands Agents Will Actually Need
+## Commands Operators Actually Need
 
 ```bash
 ./install.sh --help
@@ -247,8 +262,6 @@ node deploy/code-ai/export-standalone.mjs --help
 
 ## Update Workflow
 
-If the repo is already installed and you want the latest code:
-
 ```bash
 git pull
 npm install --include=dev
@@ -256,9 +269,9 @@ npm run build
 npx pm2 restart code-ai --update-env
 ```
 
-## Export Workflow
+If PM2 still uses the default name, use `code-ai-app`.
 
-From the source app repo:
+## Export Workflow
 
 ```bash
 npm run export:standalone
@@ -270,21 +283,25 @@ Or directly:
 node deploy/code-ai/export-standalone.mjs /tmp/code-ai-standalone --git-init
 ```
 
-That export intentionally includes handoff files:
+That export intentionally keeps:
 
 - `README.md`
+- `README.he.md`
 - `AGENT.md`
+- `AGENT.he.md`
 - `.env.example`
 - `install.*`
 - `export-standalone.*`
 
-Those files are not noise. Keep them.
+Do not delete them.
 
 ## Environment Variables That Matter Most
 
 - `PORT`
 - `PM2_APP_NAME`
 - `CODEX_BIN`
+- `CLAUDE_BIN`
+- `GEMINI_BIN`
 - `CODEX_PROFILES_JSON`
 - `CODEX_STORAGE_ROOT`
 - `CODEX_UPLOAD_ROOT`
@@ -299,29 +316,21 @@ Those files are not noise. Keep them.
 
 ## What Not To Waste Time On
 
-- Editing `dist/` directly
+- Editing `dist/` manually
 - Looking for transcript history under `.code-ai/`
-- Treating `CODEX_STORAGE_ROOT` as the real chat history location
-- Debugging reverse proxy or DNS from inside this repo
+- Assuming `CODEX_STORAGE_ROOT` is the real chat history
+- Debugging DNS/nginx from inside this repo before basic local validation
 
-## If You Need To Debug A Broken Install
+## Minimum Broken-Install Checklist
 
 1. Open `.env`.
-2. Verify `CODEX_PROFILES_JSON` paths are real and readable on the target machine.
-3. Verify `CODEX_STORAGE_ROOT`, `CODEX_UPLOAD_ROOT`, `CODEX_QUEUE_ROOT`, and `CODEX_LOG_ROOT` exist and are writable.
-4. Run `codex --help` or verify the path from `CODEX_BIN`.
+2. Verify `CODEX_PROFILES_JSON` paths are real and readable.
+3. Verify storage roots are writable.
+4. Verify the relevant provider binary works:
+   - `codex --help`
+   - `claude --help`
+   - `gemini --help`
 5. Run `npm run build`.
 6. Run `npx pm2 describe <app-name>`.
 7. Run `npx pm2 logs <app-name>`.
-8. If sessions are missing, inspect `codexHome/session_index.jsonl` and `codexHome/sessions/`.
-
-## If You Need The Least-Fragile Production Shape
-
-- explicit `--app-name`
-- explicit `--storage-root`
-- explicit `--device-password`
-- explicit `--session-secret`
-- explicit `--codex-home`
-- explicit `--workspace`
-
-That removes almost all ambiguity from later support and recovery work.
+8. If sessions are missing, inspect the provider home directly.

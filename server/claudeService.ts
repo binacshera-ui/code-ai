@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'child_process';
 import { existsSync, createReadStream, promises as fs } from 'fs';
 import path from 'path';
 import readline from 'readline';
-import { CODEX_APP_CONFIG } from './config.js';
+import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
 import {
   createForkDraftSession,
   getForkDraftSession,
@@ -139,17 +139,25 @@ let authStatusCache: {
 let runtimeStateLoadPromise: Promise<void> | null = null;
 let runtimeStatePersistTail: Promise<void> = Promise.resolve();
 
-function getProviderDisplayLabel(provider: 'codex' | 'claude'): string {
-  return provider === 'claude' ? 'Claude' : 'Codex';
+function getProviderDisplayLabel(provider: AppProvider): string {
+  if (provider === 'claude') {
+    return 'Claude';
+  }
+
+  if (provider === 'gemini') {
+    return 'Gemini';
+  }
+
+  return 'Codex';
 }
 
-function buildStartedTaskTitle(provider: 'codex' | 'claude'): string {
+function buildStartedTaskTitle(provider: AppProvider): string {
   return `${getProviderDisplayLabel(provider)} התחיל את המשימה`;
 }
 
 function isTransferForkMetadata(metadata: CodexForkSessionMetadata | null | undefined): metadata is CodexForkSessionMetadata & {
-  transferSourceProvider: 'codex' | 'claude';
-  transferTargetProvider: 'codex' | 'claude';
+  transferSourceProvider: AppProvider;
+  transferTargetProvider: AppProvider;
 } {
   return Boolean(
     metadata
@@ -160,8 +168,8 @@ function isTransferForkMetadata(metadata: CodexForkSessionMetadata | null | unde
 
 function buildTransferDisplayText(
   metadata: CodexForkSessionMetadata & {
-    transferSourceProvider: 'codex' | 'claude';
-    transferTargetProvider: 'codex' | 'claude';
+    transferSourceProvider: AppProvider;
+    transferTargetProvider: AppProvider;
   }
 ): string {
   const sourceProviderLabel = getProviderDisplayLabel(metadata.transferSourceProvider);
@@ -901,16 +909,7 @@ async function parseClaudeSessionFile(filePath: string, sessionId: string): Prom
 
       if (row.type === 'queue-operation') {
         const operation = normalizeString(row.operation);
-        if (operation === 'enqueue') {
-          timeline.push({
-            id: `${sessionId}-status-queue-${timeline.length}`,
-            entryType: 'status',
-            timestamp,
-            title: 'המשימה נוספה לתור Claude',
-            subtitle: normalizeString(row.content),
-            status: 'queued',
-          });
-        } else if (operation === 'dequeue') {
+        if (operation === 'dequeue') {
           timeline.push({
             id: `${sessionId}-status-dequeue-${timeline.length}`,
             entryType: 'status',
@@ -1185,7 +1184,6 @@ function buildPromptWithAttachments(
 }
 
 function collectClaudeArgs(
-  prompt: string,
   sessionId: string | undefined,
   executionConfig: CodexExecutionConfig | null | undefined,
   additionalDirectories: string[]
@@ -1215,7 +1213,6 @@ function collectClaudeArgs(
     args.push('--resume', sessionId);
   }
 
-  args.push('--', prompt);
   return args;
 }
 
@@ -1731,7 +1728,6 @@ export async function runClaudePrompt(
   return queueBySessionKey(queueKey, async () => {
     const previousSession = sessionId ? await resolveClaudeSessionRecord(profile, sessionId) : null;
     const args = collectClaudeArgs(
-      promptText,
       sessionId,
       executionConfig,
       Array.from(new Set([
@@ -1745,9 +1741,14 @@ export async function runClaudePrompt(
       const child = spawn(CLAUDE_BIN, args, {
         cwd: runCwd,
         env: buildClaudeProcessEnv(profile),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
       const activeRunId = options.runId;
+
+      child.stdin.on('error', () => {
+        // Ignore EPIPE if Claude exits before consuming all stdin input.
+      });
+      child.stdin.end(promptText);
 
       if (activeRunId) {
         activeClaudeRuns.set(activeRunId, {

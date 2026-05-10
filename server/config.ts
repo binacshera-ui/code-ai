@@ -1,7 +1,7 @@
 import { existsSync } from 'fs';
 import path from 'path';
 
-export type AppProvider = 'codex' | 'claude';
+export type AppProvider = 'codex' | 'claude' | 'gemini';
 
 export interface CodexProfileConfig {
   id: string;
@@ -129,6 +129,20 @@ function getDefaultProfiles(appRoot: string): CodexProfileConfig[] {
       label: 'Developer 2',
       provider: 'claude',
       codexHome: '/home/developer2/.claude',
+      workspaceCwd: workspaceRoot,
+    },
+    {
+      id: 'gemini-developer',
+      label: 'Developer',
+      provider: 'gemini',
+      codexHome: '/home/developer/.gemini',
+      workspaceCwd: workspaceRoot,
+    },
+    {
+      id: 'gemini-developer2',
+      label: 'Developer 2',
+      provider: 'gemini',
+      codexHome: '/home/developer2/.gemini',
       workspaceCwd: workspaceRoot,
     },
   ];

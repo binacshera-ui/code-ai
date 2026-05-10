@@ -4,11 +4,42 @@ Hebrew version:
 
 - `README.he.md`
 
-This repo is meant to be easy to install on a clean machine with as little manual work as possible.
+`code-ai` is a mobile-first workspace for operating the 3 leading terminal coding agents from one UI:
 
-If all you want is "get code-ai running fast", use one of the copy-paste commands below. The installer writes `.env`, installs dependencies, builds the app, creates storage folders, and starts PM2 for you.
+- Codex
+- Claude Code
+- Gemini CLI
 
-## Fastest Install
+This repo is not "a Codex skin" anymore. It is a unified control plane for multiple provider CLIs, shared sessions UI, queueing, scheduling, uploads, transfers between providers, and provider-specific profile homes.
+
+## What Must Be Installed
+
+Base requirements:
+
+- Node.js 20+
+- npm
+- Git
+
+Provider CLIs:
+
+- Codex CLI, if you want Codex sessions and execution
+- Claude CLI, if you want Claude sessions and execution
+- Gemini CLI, if you want Gemini sessions and execution
+
+Authentication / provider state:
+
+- Codex profiles must have a real `.codex` home
+- Claude profiles must have a real `.claude` home
+- Gemini profiles must have a real `.gemini` home
+
+Important:
+
+- You can run `code-ai` with only one provider installed.
+- You get the full multi-provider experience only when all 3 CLIs are installed and authenticated on the host.
+
+## The Fastest Install
+
+If you only want the app running fast, install with explicit profiles JSON from day one.
 
 ### Linux / macOS
 
@@ -18,8 +49,9 @@ cd code-ai
 ./install.sh \
   --app-name code-ai \
   --port 4000 \
-  --codex-home /home/ubuntu/.codex \
-  --workspace /srv/codex-workspace
+  --profiles-json '[{"id":"codex-main","label":"Codex","provider":"codex","codexHome":"/home/ubuntu/.codex","workspaceCwd":"/srv/workspace","defaultProfile":true},{"id":"claude-main","label":"Claude","provider":"claude","codexHome":"/home/ubuntu/.claude","workspaceCwd":"/srv/workspace"},{"id":"gemini-main","label":"Gemini","provider":"gemini","codexHome":"/home/ubuntu/.gemini","workspaceCwd":"/srv/workspace"}]' \
+  --device-password change-me-now \
+  --session-secret change-me-too
 ```
 
 ### Windows PowerShell
@@ -30,8 +62,9 @@ cd code-ai
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
   --app-name code-ai `
   --port 4000 `
-  --codex-home C:\Users\Administrator\.codex `
-  --workspace D:\codex-workspace
+  --profiles-json '[{"id":"codex-main","label":"Codex","provider":"codex","codexHome":"C:\\Users\\Administrator\\.codex","workspaceCwd":"D:\\workspace","defaultProfile":true},{"id":"claude-main","label":"Claude","provider":"claude","codexHome":"C:\\Users\\Administrator\\.claude","workspaceCwd":"D:\\workspace"},{"id":"gemini-main","label":"Gemini","provider":"gemini","codexHome":"C:\\Users\\Administrator\\.gemini","workspaceCwd":"D:\\workspace"}]' `
+  --device-password change-me-now `
+  --session-secret change-me-too
 ```
 
 ### Windows CMD
@@ -39,130 +72,124 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 `
 ```cmd
 git clone https://github.com/binacshera-ui/code-ai.git
 cd code-ai
-install.cmd --app-name code-ai --port 4000 --codex-home C:\Users\Administrator\.codex --workspace D:\codex-workspace
+install.cmd --app-name code-ai --port 4000 --profiles-json "[{\"id\":\"codex-main\",\"label\":\"Codex\",\"provider\":\"codex\",\"codexHome\":\"C:\\Users\\Administrator\\.codex\",\"workspaceCwd\":\"D:\\workspace\",\"defaultProfile\":true},{\"id\":\"claude-main\",\"label\":\"Claude\",\"provider\":\"claude\",\"codexHome\":\"C:\\Users\\Administrator\\.claude\",\"workspaceCwd\":\"D:\\workspace\"},{\"id\":\"gemini-main\",\"label\":\"Gemini\",\"provider\":\"gemini\",\"codexHome\":\"C:\\Users\\Administrator\\.gemini\",\"workspaceCwd\":\"D:\\workspace\"}]" --device-password change-me-now --session-secret change-me-too
 ```
 
-## What You Need Before Running It
+## What The Installer Actually Does
 
-Required:
+Canonical installer:
 
-- Node.js 20+
-- npm
-- Codex CLI installed and available in `PATH`
+- `deploy/code-ai/install.mjs`
 
-You only need to know 2 paths:
+Wrappers:
 
-- `codexHome`:
-  the real Codex profile folder that already contains `session_index.jsonl`, `sessions/`, and usually `.codex/config.toml`
-- `workspace`:
-  the folder users should work from by default
+- `install.sh`
+- `install.ps1`
+- `install.cmd`
 
-Example Linux values:
+The installer will:
 
-- `--codex-home /home/ubuntu/.codex`
-- `--workspace /srv/codex-workspace`
-
-Example Windows values:
-
-- `--codex-home C:\Users\Administrator\.codex`
-- `--workspace D:\codex-workspace`
-
-If `codex` is not in `PATH`, add:
-
-- `--codex-bin /full/path/to/codex`
-
-## What The Installer Does
-
-The installer is `deploy/code-ai/install.mjs`. The shell and PowerShell wrappers call it for you.
-
-It will:
-
-- create `.env`
+- write `.env`
 - write `CODEX_PROFILES_JSON`
-- create storage folders for uploads, queue state, and logs
+- create app-managed storage folders
 - run `npm install --include=dev`
 - run `npm run build`
-- start or restart the app with PM2 through `ecosystem.config.cjs`
+- start or restart PM2 through `ecosystem.config.cjs`
 
 You do not need to manually:
 
 - create `.env`
 - install PM2 globally
-- create the queue or upload folders
-- build the client or server by hand
+- create queue/upload/log folders
+- build client and server separately
 
-## The Smallest Valid Install
+## The 2 Path Concepts You Must Understand
 
-If you want the fewest flags possible, this is the baseline:
+### `workspaceCwd`
 
-```bash
-./install.sh --codex-home /home/ubuntu/.codex --workspace /srv/codex-workspace
-```
+This is the default working directory shown in the UI for new conversations.
 
-That will use defaults:
+### `codexHome`
 
-- app name: `code-ai-app`
-- port: `4000`
-- open access: `true`
-- allow any paths: `true`
+The field name is legacy, but in `code-ai` it means:
 
-## Recommended Production Install
+- provider data home for that profile
 
-Use this when you want a cleaner final setup name and a fixed storage location:
+Examples:
 
-```bash
-./install.sh \
-  --app-name code-ai \
-  --port 4000 \
-  --codex-home /home/ubuntu/.codex \
-  --workspace /srv/codex-workspace \
-  --storage-root /srv/code-ai-data \
-  --device-password change-me-now \
-  --session-secret change-me-too
-```
+- Codex profile -> `/home/ubuntu/.codex`
+- Claude profile -> `/home/ubuntu/.claude`
+- Gemini profile -> `/home/ubuntu/.gemini`
 
-## Multi-Profile Install
+The field was intentionally not renamed in env / storage / JSON schema to avoid breaking old installs and old queue/session metadata.
 
-If you want more than one Codex profile, pass `--profiles-json` and do not rely on the single-profile flags.
+## Provider Binary Settings
 
-Linux example:
+If binaries are already in `PATH`, you usually do not need these.
 
-```bash
-./install.sh \
-  --app-name code-ai \
-  --port 4000 \
-  --profiles-json '[{"id":"default","label":"Default","codexHome":"/home/ubuntu/.codex","workspaceCwd":"/srv/codex-workspace","defaultProfile":true},{"id":"ops","label":"Ops","codexHome":"/srv/codex/ops-home","workspaceCwd":"/srv/ops-workspace"}]'
-```
+- `CODEX_BIN`
+- `CLAUDE_BIN`
+- `GEMINI_BIN`
 
-## Verify The Install
+Examples:
 
-After install, run:
+- `CODEX_BIN=/usr/local/bin/codex`
+- `CLAUDE_BIN=/usr/local/bin/claude`
+- `GEMINI_BIN=/home/ubuntu/.local/bin/gemini`
 
-```bash
-npx pm2 describe code-ai
-npx pm2 logs code-ai
-```
+## Repo Structure
 
-Open:
+- `client/` — Vite mobile UI
+- `server/` — API, parsing, queue, orchestration
+- `deploy/code-ai/` — installer, exporter, nginx template
+- `ecosystem.config.cjs` — PM2 definition
+- `.env.example` — reference env shape
 
-- `http://SERVER_IP:4000`
+## The Main Logic Files
 
-What success looks like:
+These are the files that define the real behavior of `code-ai`:
 
-- the UI opens
-- profiles load
-- old Codex sessions appear
-- sending a message creates or continues a Codex session
+- `server/config.ts`
+  provider/profile runtime config, paths, storage roots
+- `server/agentService.ts`
+  top-level provider router for Codex / Claude / Gemini
+- `server/codexService.ts`
+  Codex-specific session parsing and execution
+- `server/claudeService.ts`
+  Claude-specific session parsing and execution
+- `server/geminiService.ts`
+  Gemini-specific session parsing and execution
+- `server/codexQueue.ts`
+  shared queue, worker, scheduling, retries, fork/transfer execution
+- `server/codexForkSessions.ts`
+  draft fork sessions and cross-provider transfer metadata
+- `server/codexRoutes.ts`
+  HTTP surface used by the client
+- `client/src/components/codex/CodexMobileApp.tsx`
+  main application UI
 
-## The Important Runtime Files
+## Why So Many Files Still Say "codex"
 
-Repo root:
+For backward compatibility.
 
-- `.env`
-- `ecosystem.config.cjs`
-- `AGENT.md`
+Examples:
 
-Storage root, by default under `CODEX_STORAGE_ROOT`:
+- `/api/codex/*`
+- `CODEX_PROFILES_JSON`
+- `server/codexRoutes.ts`
+- `server/codexQueue.ts`
+- `server/codexService.ts`
+- `client/src/components/codex/...`
+
+In the current system, those names no longer mean "Codex only". They are historical integration names inside `code-ai`.
+
+## What Lives In App Storage
+
+Default root:
+
+- `CODEX_STORAGE_ROOT`
+
+Typical contents:
 
 - `uploads/`
 - `queue/state.json`
@@ -175,28 +202,54 @@ Storage root, by default under `CODEX_STORAGE_ROOT`:
 - `logs/server-crashes.jsonl`
 - `logs/file-access.jsonl`
 
-Actual Codex chat history is not stored there.
+## Where Real Sessions Live
 
-Real chat history lives in each Codex profile home:
+Not in `.code-ai`.
+
+Provider transcript/history locations come from each profile home.
+
+Codex:
 
 - `session_index.jsonl`
 - `sessions/`
 - `archived_sessions/`
 
-## The Most Common Mistake
+Claude:
 
-The app can boot correctly while the chats still look empty if you pointed `--codex-home` at the wrong place.
+- `projects/<workspace-hash-or-name>/*.jsonl`
+- `projects/<workspace>/memory/`
+- `projects/<workspace>/<session>/subagents/`
 
-Before assuming the app is broken, verify that the target `codexHome` really contains:
+Gemini:
 
-- `session_index.jsonl`
-- `sessions/`
+- `projects.json`
+- `tmp/<project-id>/chats/*.jsonl`
 
-If those files are somewhere else, reinstall with the real `--codex-home`.
+If a user says "my old chats are missing", inspect the selected provider home first, not the app storage root.
 
-## Update The App Later
+## Verify The Install
 
-If the repo already exists and you just want the latest version:
+After install, run:
+
+```bash
+npx pm2 describe code-ai
+npx pm2 logs code-ai
+```
+
+Then open:
+
+- `http://SERVER_IP:4000`
+
+Success looks like:
+
+- the UI opens
+- provider switcher appears
+- profiles load
+- old sessions appear for installed providers
+- sending a message creates or resumes a real provider session
+- transfers between providers create draft handoffs and continue naturally
+
+## Update Workflow
 
 ```bash
 git pull
@@ -205,92 +258,37 @@ npm run build
 npx pm2 restart code-ai --update-env
 ```
 
-If your PM2 app name is still the default, replace `code-ai` with `code-ai-app`.
-
-## Useful Installer Flags
-
-- `--app-name NAME`
-- `--port PORT`
-- `--codex-home PATH`
-- `--workspace PATH`
-- `--profile-id ID`
-- `--profile-label LABEL`
-- `--profiles-json JSON`
-- `--storage-root PATH`
-- `--public-hosts CSV`
-- `--open-access true|false`
-- `--allow-any-paths true|false`
-- `--extra-readable-roots /srv/shared,/mnt/data`
-- `--database-url postgresql://...`
-- `--session-secret VALUE`
-- `--cookie-domain VALUE`
-- `--device-password VALUE`
-- `--codex-bin PATH`
-- `--skip-npm-install`
-- `--skip-build`
-- `--skip-pm2`
-
-Full help:
-
-```bash
-./install.sh --help
-node deploy/code-ai/install.mjs --help
-```
-
-## Reverse Proxy
-
-The installer does not configure DNS or your web server.
-
-Use:
-
-- `deploy/code-ai/nginx-site.conf.template`
-
-Point it to the port you installed on.
+If your PM2 app still uses the installer default, replace `code-ai` with `code-ai-app`.
 
 ## Export As Standalone Repo
-
-To generate a clean export from the source app repo:
 
 ```bash
 node deploy/code-ai/export-standalone.mjs /tmp/code-ai-standalone --git-init
 ```
 
-Windows PowerShell:
+That export intentionally includes:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\deploy\code-ai\export-standalone.ps1 C:\temp\code-ai-standalone --git-init
-```
-
-The export includes:
-
+- `README.md`
+- `README.he.md`
 - `AGENT.md`
+- `AGENT.he.md`
 - `.env.example`
 - `client/`
 - `server/`
-- `package.json`
-- `package-lock.json`
-- `vite.config.ts`
-- `tsconfig.json`
-- `ecosystem.config.cjs`
 - `deploy/code-ai/*`
-- `install.sh`, `install.ps1`, `install.cmd`
-- `export-standalone.sh`, `export-standalone.ps1`, `export-standalone.cmd`
+- `install.*`
+- `export-standalone.*`
 
-## If You Want The Least-Fragile Setup
+Keep those files. They are part of the deployment handoff, not noise.
 
-Use this checklist:
+## Minimal Troubleshooting Checklist
 
-1. Install Codex CLI first and verify `codex --help` works.
-2. Verify the real Codex home path contains `sessions/`.
-3. Run `./install.sh` with explicit `--codex-home` and `--workspace`.
-4. Set your own `--device-password` and `--session-secret`.
-5. Confirm PM2 is healthy with `npx pm2 logs <app-name>`.
-6. Open the UI and confirm old chats are visible before going live.
-
-## Runtime Model
-
-- Default mode is open-access control surface.
-- Postgres is optional.
-- If `DATABASE_URL` is missing, browser sessions are in memory.
-- Profiles and storage roots are fully env-driven.
-- Device unlock password comes from `CODEX_DEVICE_ADMIN_PASSWORD`.
+1. Verify the wanted provider CLI exists:
+   - `codex --help`
+   - `claude --help`
+   - `gemini --help`
+2. Verify the provider homes in `CODEX_PROFILES_JSON` are real and readable.
+3. Verify storage roots are writable.
+4. Run `npm run build`.
+5. Check `npx pm2 logs <app-name>`.
+6. If sessions are missing, inspect the provider-specific home, not `.code-ai`.

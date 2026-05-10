@@ -86,7 +86,7 @@ interface AuthStatus {
 interface CodexProfile {
   id: string;
   label: string;
-  provider: 'codex' | 'claude';
+  provider: 'codex' | 'claude' | 'gemini';
   codexHome: string;
   workspaceCwd: string;
   defaultProfile?: boolean;
@@ -249,11 +249,17 @@ interface ForkDraftContext {
   sourceTitle: string;
   sourceCwd: string | null;
   forkEntryId: string;
-  transferSourceProvider?: 'codex' | 'claude' | null;
-  transferTargetProvider?: 'codex' | 'claude' | null;
+  transferSourceProvider?: 'codex' | 'claude' | 'gemini' | null;
+  transferTargetProvider?: 'codex' | 'claude' | 'gemini' | null;
   forkedAt: string;
   timeline: CodexTimelineEntry[];
   promptPrefix: string;
+}
+
+interface TransferTargetOption {
+  profileId: string;
+  provider: CodexProfile['provider'];
+  label: string;
 }
 
 interface CodexQueueItemsResponse {
@@ -405,6 +411,8 @@ const APP_ICON_PATH = '/icons/code-ai-512.png';
 const APPLE_TOUCH_ICON_PATH = '/icons/apple-touch-icon.png';
 const CODEX_EMPTY_STATE_ICON_PATH = '/icons/codex-empty-state.png';
 const CLAUDE_EMPTY_STATE_ICON_PATH = '/icons/claude-agent.png';
+const GEMINI_EMPTY_STATE_ICON_PATH = '/icons/gemini-agent.png';
+const PROVIDER_DISPLAY_ORDER: CodexProfile['provider'][] = ['codex', 'claude', 'gemini'];
 
 function formatTimestamp(value: string | null): string {
   if (!value) return 'ללא זמן';
@@ -624,32 +632,43 @@ function getReasoningEffortLabel(effort: string | null): string {
 }
 
 function getProviderDisplayLabel(provider: CodexProfile['provider']): string {
-  return provider === 'claude' ? 'Claude' : 'Codex';
+  switch (provider) {
+    case 'claude':
+      return 'Claude';
+    case 'gemini':
+      return 'Gemini';
+    default:
+      return 'Codex';
+  }
 }
 
-function resolveTransferTargetProfile(
+function resolveTransferTargetProfiles(
   profiles: CodexProfile[],
   currentProfile: CodexProfile | null
-): CodexProfile | null {
+): CodexProfile[] {
   if (!currentProfile) {
-    return null;
-  }
-
-  const targetProvider: CodexProfile['provider'] = currentProfile.provider === 'codex' ? 'claude' : 'codex';
-  const providerProfiles = profiles.filter((profile) => profile.provider === targetProvider);
-
-  if (providerProfiles.length === 0) {
-    return null;
+    return [];
   }
 
   const normalizedLabel = currentProfile.label.trim().toLowerCase();
+  const targets = PROVIDER_DISPLAY_ORDER
+    .filter((provider) => provider !== currentProfile.provider)
+    .map((provider) => {
+      const providerProfiles = profiles.filter((profile) => profile.provider === provider);
+      if (providerProfiles.length === 0) {
+        return null;
+      }
 
-  return (
-    providerProfiles.find((profile) => profile.label.trim().toLowerCase() === normalizedLabel)
-    || providerProfiles.find((profile) => profile.workspaceCwd === currentProfile.workspaceCwd)
-    || providerProfiles.find((profile) => profile.defaultProfile)
-    || providerProfiles[0]
-  );
+      return (
+        providerProfiles.find((profile) => profile.label.trim().toLowerCase() === normalizedLabel)
+        || providerProfiles.find((profile) => profile.workspaceCwd === currentProfile.workspaceCwd)
+        || providerProfiles.find((profile) => profile.defaultProfile)
+        || providerProfiles[0]
+      );
+    })
+    .filter((profile): profile is CodexProfile => Boolean(profile));
+
+  return targets;
 }
 
 function mapForkDraftServerContext(
@@ -1752,12 +1771,71 @@ function ToolGroupCard({
   );
 }
 
+function QueueSummaryButton({
+  count,
+  statusSummary,
+  collapsed,
+  onToggle,
+  attached = false,
+}: {
+  count: number;
+  statusSummary: Array<{ status: CodexQueueServerItem['status']; count: number; label: string }>;
+  collapsed: boolean;
+  onToggle: () => void;
+  attached?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      dir="rtl"
+      className={cn(
+        'flex w-full items-center justify-between gap-3 border border-slate-200/80 bg-white px-4 py-3 text-right shadow-[0_2px_15px_rgba(0,0,0,0.02)] transition-colors hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800/70',
+        attached ? 'rounded-[2rem] rounded-b-none border-b-0' : 'rounded-[2rem]'
+      )}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+            כל המשימות בתור
+          </div>
+          <span
+            dir="ltr"
+            className="inline-flex min-w-8 items-center justify-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold tabular-nums text-slate-700 dark:bg-slate-800 dark:text-slate-100"
+          >
+            {count}
+          </span>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {statusSummary.map((entry) => (
+            <span
+              key={entry.status}
+              className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+            >
+              <span>{entry.label}</span>
+              <span dir="ltr" className="font-semibold tabular-nums text-slate-800 dark:text-slate-50">
+                {entry.count}
+              </span>
+            </span>
+          ))}
+        </div>
+      </div>
+      <ChevronDown
+        className={cn(
+          'h-4 w-4 shrink-0 text-slate-500 transition-transform dark:text-slate-300',
+          !collapsed && 'rotate-180'
+        )}
+      />
+    </button>
+  );
+}
+
 function MessageBubble({
   entry,
   onOpenFilePreview,
   onFork,
   onTransfer,
-  transferLabel,
+  transferOptions,
   isTransfering = false,
   assistantLabel = 'Codex',
   commentaryLabel = 'Codex עובד',
@@ -1765,19 +1843,21 @@ function MessageBubble({
   entry: CodexTimelineEntry;
   onOpenFilePreview: (rawPath: string) => void;
   onFork?: (entryId: string) => void;
-  onTransfer?: (entryId: string) => void;
-  transferLabel?: string;
+  onTransfer?: (entryId: string, targetProfileId: string) => void;
+  transferOptions?: TransferTargetOption[];
   isTransfering?: boolean;
   assistantLabel?: string;
   commentaryLabel?: string;
 }) {
+  const [isTransferMenuOpen, setIsTransferMenuOpen] = useState(false);
   const isUser = entry.role === 'user';
   const isCommentary = entry.kind === 'commentary';
   const isTransfer = entry.kind === 'transfer';
   const senderLabel = isTransfer ? 'העברה' : isUser ? 'אתה' : isCommentary ? commentaryLabel : assistantLabel;
   const messageText = entry.text || '';
   const showForkAction = Boolean(onFork) && !isTransfer;
-  const showTransferAction = Boolean(onTransfer && transferLabel) && !isTransfer;
+  const showTransferAction = Boolean(onTransfer && transferOptions?.length) && !isTransfer;
+  const hasMultipleTransferTargets = (transferOptions?.length || 0) > 1;
 
   return (
     <div className="flex w-full">
@@ -1850,19 +1930,55 @@ function MessageBubble({
               </button>
             )}
             {showTransferAction && (
-              <button
-                type="button"
-                onClick={() => onTransfer?.(entry.id)}
-                disabled={isTransfering}
-                className={cn(
-                  'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
-                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!transferOptions?.length) {
+                      return;
+                    }
+
+                    if (transferOptions.length === 1) {
+                      onTransfer?.(entry.id, transferOptions[0].profileId);
+                      return;
+                    }
+
+                    setIsTransferMenuOpen((current) => !current);
+                  }}
+                  disabled={isTransfering}
+                  className={cn(
+                    'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
+                    isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                  )}
+                  title={transferOptions?.length === 1 ? `העבר ל-${transferOptions[0].label}` : 'העבר לספק אחר'}
+                  aria-label={transferOptions?.length === 1 ? `העבר ל-${transferOptions[0].label}` : 'העבר לספק אחר'}
+                >
+                  {isTransfering ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Repeat className="h-3.5 w-3.5" />}
+                </button>
+                {hasMultipleTransferTargets && isTransferMenuOpen && (
+                  <div className="absolute bottom-full left-0 z-10 mb-2 min-w-[10rem] rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_16px_35px_-24px_rgba(15,23,42,0.24)]">
+                    <div className="mb-1 px-2 text-right text-[10px] font-semibold tracking-[0.16em] text-slate-400">
+                      העבר ל
+                    </div>
+                    <div className="space-y-1">
+                      {transferOptions?.map((option) => (
+                        <button
+                          key={option.profileId}
+                          type="button"
+                          onClick={() => {
+                            setIsTransferMenuOpen(false);
+                            onTransfer?.(entry.id, option.profileId);
+                          }}
+                          className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-right text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50"
+                        >
+                          <Repeat className="h-3.5 w-3.5 text-slate-400" />
+                          <span>{option.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 )}
-                title={transferLabel}
-                aria-label={transferLabel}
-              >
-                {isTransfering ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Repeat className="h-3.5 w-3.5" />}
-              </button>
+              </div>
             )}
           </div>
         </div>
@@ -2232,7 +2348,7 @@ function SidebarPanel({
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
   const collapsedFoldersStorageKey = `${SIDEBAR_COLLAPSED_FOLDERS_STORAGE_PREFIX}:${profileId}`;
   const collapsedTopicsStorageKey = `${SIDEBAR_COLLAPSED_TOPICS_STORAGE_PREFIX}:${profileId}`;
-  const providerOptions = Array.from(new Set(profiles.map((profile) => profile.provider)));
+  const providerOptions = PROVIDER_DISPLAY_ORDER.filter((provider) => profiles.some((profile) => profile.provider === provider));
   const providerProfiles = profiles.filter((profile) => profile.provider === selectedProvider);
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>(() => readBooleanMapFromStorage(collapsedFoldersStorageKey));
   const [collapsedTopics, setCollapsedTopics] = useState<Record<string, boolean>>(() => readBooleanMapFromStorage(collapsedTopicsStorageKey));
@@ -2431,7 +2547,7 @@ function SidebarPanel({
             <div className="text-[11px] font-semibold tracking-[0.18em] text-slate-500">
               שירות
             </div>
-            <div className="mt-2 grid grid-cols-2 gap-2">
+            <div className={cn('mt-2 grid gap-2', providerOptions.length >= 3 ? 'grid-cols-3' : 'grid-cols-2')}>
               {providerOptions.map((provider) => (
                 <button
                   key={provider}
@@ -5556,13 +5672,14 @@ export function CodexMobileApp() {
     }
   }
 
-  async function transferFromTimelineEntry(entryId: string) {
+  async function transferFromTimelineEntry(entryId: string, targetProfileId: string) {
     if (!selectedSession || !currentProfile) {
       setError('לא נמצאה שיחה פעילה להעברה.');
       return;
     }
 
-    if (!transferTargetProfile) {
+    const targetProfile = profiles.find((profile) => profile.id === targetProfileId) || null;
+    if (!targetProfile) {
       setError('לא נמצא פרופיל יעד תואם להעברה.');
       return;
     }
@@ -5579,7 +5696,7 @@ export function CodexMobileApp() {
           },
           body: JSON.stringify({
             profileId,
-            targetProfileId: transferTargetProfile.id,
+            targetProfileId,
             transferEntryId: entryId,
             clientRequestId: buildQueueId(),
           }),
@@ -5598,7 +5715,7 @@ export function CodexMobileApp() {
       recordCodexBreadcrumb('session-transfer-created', {
         sourceSessionId: selectedSession.id,
         transferEntryId: entryId,
-        targetProfileId: data.targetProfileId,
+        targetProfileId,
         targetSessionId: data.sessionId,
       });
 
@@ -5623,7 +5740,7 @@ export function CodexMobileApp() {
         setIsDraftConversation(true);
         setDraftConversationKey(data.session.id);
         setForkDraftContext(nextForkDraftContext);
-        setDraftCwd(data.session.cwd || nextForkDraftContext.sourceCwd || transferTargetProfile.workspaceCwd || null);
+        setDraftCwd(data.session.cwd || nextForkDraftContext.sourceCwd || targetProfile.workspaceCwd || null);
         setSessions([data.session]);
         setQueueItems([data.item]);
         setPrompt('');
@@ -6363,13 +6480,18 @@ export function CodexMobileApp() {
     'from-indigo-400 via-violet-300 to-sky-300',
   ][thinkingPulseIndex % 3];
   const isCurrentConversationRunning = currentSessionActiveQueueCount > 0;
-  const transferTargetProfile = useMemo(
-    () => resolveTransferTargetProfile(profiles, currentProfile),
+  const transferTargetProfiles = useMemo(
+    () => resolveTransferTargetProfiles(profiles, currentProfile),
     [currentProfile, profiles]
   );
-  const transferTargetLabel = transferTargetProfile
-    ? `העבר ל-${getProviderDisplayLabel(transferTargetProfile.provider)}`
-    : null;
+  const transferTargetOptions = useMemo<TransferTargetOption[]>(
+    () => transferTargetProfiles.map((profile) => ({
+      profileId: profile.id,
+      provider: profile.provider,
+      label: getProviderDisplayLabel(profile.provider),
+    })),
+    [transferTargetProfiles]
+  );
   const assistantMessageLabel = selectedProviderLabel;
   const commentaryMessageLabel = `${selectedProviderLabel} עובד`;
   const selectedModelOption = useMemo(
@@ -6906,6 +7028,13 @@ export function CodexMobileApp() {
                   aria-hidden="true"
                   className="pointer-events-none h-24 w-24 select-none object-contain opacity-80 [image-rendering:pixelated] sm:h-28 sm:w-28"
                 />
+              ) : selectedProvider === 'gemini' ? (
+                <img
+                  src={GEMINI_EMPTY_STATE_ICON_PATH}
+                  alt=""
+                  aria-hidden="true"
+                  className="pointer-events-none h-28 w-28 select-none object-contain opacity-90 drop-shadow-[0_10px_24px_rgba(59,130,246,0.08)] sm:h-32 sm:w-32"
+                />
               ) : (
                 <img
                   src={CODEX_EMPTY_STATE_ICON_PATH}
@@ -6953,8 +7082,10 @@ export function CodexMobileApp() {
                 entry={block.entry}
                 onOpenFilePreview={(rawPath) => void handleOpenFilePreview(rawPath)}
                 onFork={selectedSession ? (entryId) => forkFromTimelineEntry(entryId) : undefined}
-                onTransfer={selectedSession && transferTargetProfile ? (entryId) => void transferFromTimelineEntry(entryId) : undefined}
-                transferLabel={transferTargetLabel || undefined}
+                onTransfer={selectedSession && transferTargetOptions.length > 0
+                  ? (entryId, targetProfileId) => void transferFromTimelineEntry(entryId, targetProfileId)
+                  : undefined}
+                transferOptions={selectedSession ? transferTargetOptions : undefined}
                 isTransfering={transferringEntryId === block.entry.id}
                 assistantLabel={assistantMessageLabel}
                 commentaryLabel={commentaryMessageLabel}
@@ -6988,65 +7119,6 @@ export function CodexMobileApp() {
                   </div>
                 </div>
               </div>
-            </div>
-          )}
-
-          {collapsedQueueItems.length > 0 && (
-            <div className="w-full">
-              <button
-                type="button"
-                onClick={() => setIsPendingQueueSectionCollapsed((current) => !current)}
-                dir="rtl"
-                className="flex w-full items-center justify-between gap-3 rounded-[1.25rem] border border-slate-200 bg-white px-4 py-3 text-right shadow-sm transition-colors hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800/70"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                      כל המשימות בתור
-                    </div>
-                    <span
-                      dir="ltr"
-                      className="inline-flex min-w-8 items-center justify-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold tabular-nums text-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                    >
-                      {collapsedQueueItems.length}
-                    </span>
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    {collapsedQueueStatusSummary.map((entry) => (
-                      <span
-                        key={entry.status}
-                        className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
-                      >
-                        <span>{entry.label}</span>
-                        <span dir="ltr" className="font-semibold tabular-nums text-slate-800 dark:text-slate-50">
-                          {entry.count}
-                        </span>
-                      </span>
-                    ))}
-                  </div>
-                </div>
-                <ChevronDown
-                  className={cn(
-                    'h-4 w-4 shrink-0 text-slate-500 transition-transform dark:text-slate-300',
-                    !isPendingQueueSectionCollapsed && 'rotate-180'
-                  )}
-                />
-              </button>
-
-              {!isPendingQueueSectionCollapsed && (
-                <div className="mt-3 flex flex-col gap-3">
-                  {collapsedQueueItems.map((item) => (
-                    <QueueItemCard
-                      key={item.id}
-                      item={item}
-                      onCancel={(itemId) => void cancelQueueItem(itemId)}
-                      onDelete={(itemId) => void deleteQueueItem(itemId)}
-                      onEdit={(queueItem) => void editQueueItem(queueItem)}
-                      onRetry={(itemId) => void retryQueueItem(itemId)}
-                    />
-                  ))}
-                </div>
-              )}
             </div>
           )}
 
@@ -7216,7 +7288,22 @@ export function CodexMobileApp() {
             )}
 
             <div ref={composerControlsRef} className="relative">
-              <div className="pointer-events-none absolute bottom-full left-3 z-10 mb-2 flex flex-col gap-1.5">
+              {!isPendingQueueSectionCollapsed && collapsedQueueItems.length > 0 && (
+                <div className="absolute bottom-full left-0 right-0 z-20 mb-3 flex max-h-[40vh] flex-col gap-3 overflow-y-auto">
+                  {collapsedQueueItems.map((item) => (
+                    <QueueItemCard
+                      key={item.id}
+                      item={item}
+                      onCancel={(itemId) => void cancelQueueItem(itemId)}
+                      onDelete={(itemId) => void deleteQueueItem(itemId)}
+                      onEdit={(queueItem) => void editQueueItem(queueItem)}
+                      onRetry={(itemId) => void retryQueueItem(itemId)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              <div className="pointer-events-none absolute bottom-full -left-9 z-10 mb-2 flex flex-col gap-1.5">
                 <button
                   type="button"
                   onClick={scrollTranscriptToTop}
@@ -7237,7 +7324,23 @@ export function CodexMobileApp() {
                 </button>
               </div>
 
-              <div dir="rtl" className="flex items-end rounded-[2rem] border border-slate-200/80 bg-white p-1.5 shadow-[0_2px_15px_rgba(0,0,0,0.02)] transition-all duration-300 focus-within:border-indigo-200 focus-within:ring-4 focus-within:ring-indigo-50/50">
+              {collapsedQueueItems.length > 0 && (
+                <QueueSummaryButton
+                  count={collapsedQueueItems.length}
+                  statusSummary={collapsedQueueStatusSummary}
+                  collapsed={isPendingQueueSectionCollapsed}
+                  onToggle={() => setIsPendingQueueSectionCollapsed((current) => !current)}
+                  attached
+                />
+              )}
+
+              <div
+                dir="rtl"
+                className={cn(
+                  'flex items-end border border-slate-200/80 bg-white p-1.5 shadow-[0_2px_15px_rgba(0,0,0,0.02)] transition-all duration-300 focus-within:border-indigo-200 focus-within:ring-4 focus-within:ring-indigo-50/50',
+                  collapsedQueueItems.length > 0 ? 'rounded-[2rem] rounded-t-none border-t-0' : 'rounded-[2rem]'
+                )}
+              >
                 <div className="relative mr-1 flex shrink-0 flex-col items-center justify-end gap-1 self-stretch">
                   <button
                     type="button"

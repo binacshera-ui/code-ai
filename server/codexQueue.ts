@@ -208,10 +208,14 @@ function normalizeForkContext(value: unknown): CodexForkContext | null {
       ? candidate.sourceCwd.trim()
       : null,
     forkEntryId: candidate.forkEntryId.trim(),
-    transferSourceProvider: candidate.transferSourceProvider === 'codex' || candidate.transferSourceProvider === 'claude'
+    transferSourceProvider: candidate.transferSourceProvider === 'codex'
+      || candidate.transferSourceProvider === 'claude'
+      || candidate.transferSourceProvider === 'gemini'
       ? candidate.transferSourceProvider
       : null,
-    transferTargetProvider: candidate.transferTargetProvider === 'codex' || candidate.transferTargetProvider === 'claude'
+    transferTargetProvider: candidate.transferTargetProvider === 'codex'
+      || candidate.transferTargetProvider === 'claude'
+      || candidate.transferTargetProvider === 'gemini'
       ? candidate.transferTargetProvider
       : null,
     timeline,
