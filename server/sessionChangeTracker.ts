@@ -627,9 +627,47 @@ export async function readSessionChangeRecord(
   sessionId: string,
   entryId: string
 ): Promise<SessionChangeRecord | null> {
+  const sessionDir = path.join(SESSION_CHANGE_ROOT, sanitizeFileToken(sessionId));
+
   try {
     const raw = await fs.readFile(buildSessionChangeRecordPath(sessionId, entryId), 'utf8');
     return JSON.parse(raw) as SessionChangeRecord;
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  try {
+    const entries = await fs.readdir(sessionDir);
+    const candidatePaths = entries
+      .filter((name) => name.endsWith('.json'))
+      .map((name) => path.join(sessionDir, name));
+    const candidateRecords: SessionChangeRecord[] = [];
+
+    for (const candidatePath of candidatePaths) {
+      try {
+        const raw = await fs.readFile(candidatePath, 'utf8');
+        const parsed = JSON.parse(raw) as SessionChangeRecord;
+        if (parsed.sessionId === sessionId) {
+          candidateRecords.push(parsed);
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (candidateRecords.length === 0) {
+      return null;
+    }
+
+    const exactBySuffix = candidateRecords.find((record) => record.entryId.endsWith(entryId));
+    if (exactBySuffix) {
+      return exactBySuffix;
+    }
+
+    const sortedRecords = candidateRecords.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    return sortedRecords[0] || null;
   } catch (error: any) {
     if (error?.code === 'ENOENT') {
       return null;

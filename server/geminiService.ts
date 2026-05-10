@@ -509,14 +509,36 @@ async function readFileHead(filePath: string, maxBytes = 24 * 1024): Promise<str
   return chunk.split('\n');
 }
 
-async function readGeminiProjectRoots(profile: CodexProfile): Promise<string[]> {
+async function readGeminiProjectRoots(
+  profile: CodexProfile,
+  options: {
+    includeAllProjects?: boolean;
+  } = {}
+): Promise<string[]> {
   const tmpRoot = getGeminiProjectTempRoot(profile);
   if (!(await pathExists(tmpRoot))) {
     return [];
   }
 
-  const workspacePath = path.resolve(profile.workspaceCwd);
   const roots = new Set<string>();
+  const workspacePath = path.resolve(profile.workspaceCwd);
+
+  if (options.includeAllProjects) {
+    const entries = await fs.readdir(tmpRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const projectRoot = path.join(tmpRoot, entry.name);
+      const chatsRoot = path.join(projectRoot, 'chats');
+      if (!(await pathExists(chatsRoot))) {
+        continue;
+      }
+      roots.add(projectRoot);
+    }
+    return [...roots];
+  }
 
   try {
     const projectsJsonPath = path.join(profile.codexHome, 'projects.json');
@@ -560,8 +582,13 @@ async function readGeminiProjectRoots(profile: CodexProfile): Promise<string[]> 
   return [...roots];
 }
 
-async function scanGeminiSessionFiles(profile: CodexProfile): Promise<GeminiSessionScanRecord[]> {
-  const projectRoots = await readGeminiProjectRoots(profile);
+async function scanGeminiSessionFiles(
+  profile: CodexProfile,
+  options: {
+    includeAllProjects?: boolean;
+  } = {}
+): Promise<GeminiSessionScanRecord[]> {
+  const projectRoots = await readGeminiProjectRoots(profile, options);
   const rows: GeminiSessionScanRecord[] = [];
 
   for (const projectRoot of projectRoots) {
@@ -643,8 +670,14 @@ async function readGeminiSessionHeader(filePath: string): Promise<{
 }
 
 async function resolveGeminiSessionRecord(profile: CodexProfile, sessionId: string): Promise<GeminiSessionScanRecord | null> {
-  const sessionFiles = await scanGeminiSessionFiles(profile);
-  return sessionFiles.find((row) => row.id === sessionId) || null;
+  const workspaceScoped = await scanGeminiSessionFiles(profile);
+  const exactWorkspaceMatch = workspaceScoped.find((row) => row.id === sessionId) || null;
+  if (exactWorkspaceMatch) {
+    return exactWorkspaceMatch;
+  }
+
+  const globalScoped = await scanGeminiSessionFiles(profile, { includeAllProjects: true });
+  return globalScoped.find((row) => row.id === sessionId) || null;
 }
 
 function extractGeminiUserPromptText(content: unknown): string {

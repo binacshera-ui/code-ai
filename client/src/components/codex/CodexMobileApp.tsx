@@ -2067,7 +2067,9 @@ function SessionChangeDetailViewer({
   if (!record) {
     return (
       <div className="flex min-h-[16rem] items-center justify-center rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50/80 px-6 text-center text-sm leading-7 text-slate-500">
-        אין עדיין נתוני שינויים עבור התשובה הזאת.
+        אין נתוני שינויים שמורים עבור התשובה הזאת.
+        <br />
+        זה קורה אם ההודעה נוצרה לפני שהמעקב הופעל, או אם הריצה לא תועדה עד הסוף.
       </div>
     );
   }
