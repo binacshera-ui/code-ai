@@ -5595,22 +5595,22 @@ const SUDOKU_DIFFICULTY_META: Record<SudokuPuzzleDifficulty, {
   hard: {
     label: 'Hard',
     accentClass: 'border-amber-200 bg-amber-50 text-amber-700',
-    description: 'פתיחה זורמת עם מספיק מקום לחשיבה.',
+    description: 'מאוזן וקשה.',
   },
   expert: {
     label: 'Expert',
     accentClass: 'border-sky-200 bg-sky-50 text-sky-700',
-    description: 'כבר דורש קריאה עמוקה של שורות ותיבות.',
+    description: 'חד ומדויק.',
   },
   fiendish: {
     label: 'Fiendish',
     accentClass: 'border-violet-200 bg-violet-50 text-violet-700',
-    description: 'מעט רמזים והרבה החלטות קשות.',
+    description: 'מעט רמזים.',
   },
   'code-ai': {
     label: 'Code-AI',
     accentClass: 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700',
-    description: 'הדרגה הכי חדה בקטלוג המקומי.',
+    description: 'הכי קיצוני.',
   },
 };
 
@@ -5783,20 +5783,20 @@ function SudokuDialog({
         onClick={onClose}
         aria-label="Close sudoku"
       />
-      <div className="relative z-10 flex w-full max-w-md flex-col overflow-hidden rounded-[2rem] border border-violet-100 bg-white shadow-[0_28px_90px_-36px_rgba(139,92,246,0.3)]">
-        <div className="border-b border-violet-100 bg-gradient-to-b from-violet-50 via-white to-white px-5 py-4 text-right">
+      <div className="relative z-10 flex max-h-[90dvh] w-full max-w-[23rem] flex-col overflow-y-auto rounded-[1.8rem] border border-violet-100 bg-white shadow-[0_28px_90px_-36px_rgba(139,92,246,0.3)]">
+        <div className="border-b border-violet-100 bg-gradient-to-b from-violet-50 via-white to-white px-4 py-3 text-right">
           <div className="flex items-start justify-between gap-4">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-violet-500 shadow-sm">
-              <LayoutGrid className="h-5 w-5" />
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white text-violet-500 shadow-sm">
+              <LayoutGrid className="h-4.5 w-4.5" />
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                 Sudoku Lab
               </div>
-              <div className="mt-1 text-lg font-semibold text-slate-800">
+              <div className="mt-0.5 text-base font-semibold text-slate-800">
                 סודוקו בדרגות קושי אמיתיות
               </div>
-              <div className="mt-1 text-xs leading-5 text-slate-500">
+              <div className="mt-0.5 text-[11px] text-slate-500">
                 {SUDOKU_DIFFICULTY_META[difficulty].description}
               </div>
             </div>
@@ -5819,33 +5819,33 @@ function SudokuDialog({
             </div>
           </div>
 
-          <div className="mt-4 grid grid-cols-4 gap-2 text-xs">
-            <div className="rounded-2xl bg-white px-3 py-2">
+          <div className="mt-3 grid grid-cols-4 gap-2 text-[11px]">
+            <div className="rounded-[1rem] bg-white px-2.5 py-2">
               <div className="text-slate-400">Progress</div>
-              <div className="mt-1 text-base font-semibold">{Math.round(progressPercent)}%</div>
+              <div className="mt-0.5 text-sm font-semibold">{Math.round(progressPercent)}%</div>
             </div>
-            <div className="rounded-2xl bg-white px-3 py-2">
+            <div className="rounded-[1rem] bg-white px-2.5 py-2">
               <div className="text-slate-400">Mistakes</div>
-              <div className="mt-1 text-base font-semibold">{mistakes}</div>
+              <div className="mt-0.5 text-sm font-semibold">{mistakes}</div>
             </div>
-            <div className="rounded-2xl bg-white px-3 py-2">
+            <div className="rounded-[1rem] bg-white px-2.5 py-2">
               <div className="text-slate-400">Time</div>
-              <div className="mt-1 text-base font-semibold">{formatSudokuElapsed(elapsedSeconds)}</div>
+              <div className="mt-0.5 text-sm font-semibold">{formatSudokuElapsed(elapsedSeconds)}</div>
             </div>
-            <div className="rounded-2xl bg-white px-3 py-2">
+            <div className="rounded-[1rem] bg-white px-2.5 py-2">
               <div className="text-slate-400">Clues</div>
-              <div className="mt-1 text-base font-semibold">{activePuzzle.clueCount}</div>
+              <div className="mt-0.5 text-sm font-semibold">{activePuzzle.clueCount}</div>
             </div>
           </div>
 
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div className="mt-2.5 flex flex-wrap gap-1.5">
             {(Object.keys(SUDOKU_CATALOG) as SudokuPuzzleDifficulty[]).map((level) => (
               <button
                 key={level}
                 type="button"
                 onClick={() => setDifficulty(level)}
                 className={cn(
-                  'rounded-full border px-3 py-1.5 text-[11px] font-semibold transition',
+                  'rounded-full border px-2.5 py-1 text-[10px] font-semibold transition',
                   difficulty === level
                     ? SUDOKU_DIFFICULTY_META[level].accentClass
                     : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
@@ -5857,14 +5857,14 @@ function SudokuDialog({
           </div>
         </div>
 
-        <div className="relative px-4 pb-4 pt-4">
+        <div className="relative px-3.5 pb-3.5 pt-3.5">
           {notice && (
-            <div className="pointer-events-none absolute left-8 right-8 top-6 z-10 rounded-full bg-violet-500/90 px-4 py-2 text-center text-sm font-semibold text-white shadow-lg">
+            <div className="pointer-events-none absolute left-7 right-7 top-4 z-10 rounded-full bg-violet-500/90 px-3 py-1.5 text-center text-xs font-semibold text-white shadow-lg">
               {notice}
             </div>
           )}
 
-          <div className="rounded-[1.6rem] border border-violet-100 bg-violet-50/45 p-3">
+          <div className="rounded-[1.35rem] border border-violet-100 bg-violet-50/45 p-2.5">
             <div dir="ltr" className="grid grid-cols-9 overflow-hidden rounded-[1.2rem] border-2 border-slate-300 bg-slate-300">
               {board.map((value, index) => {
                 const row = Math.floor(index / 9);
@@ -5886,7 +5886,7 @@ function SudokuDialog({
                     type="button"
                     onClick={() => setSelectedCell(index)}
                     className={cn(
-                      'relative aspect-square bg-white text-center text-[0.92rem] font-semibold text-slate-700 transition',
+                      'relative aspect-square bg-white text-center text-[0.78rem] font-semibold text-slate-700 transition',
                       highlightBand && 'bg-slate-50',
                       sameValue && 'bg-sky-50',
                       fixed && 'text-slate-900',
@@ -5902,7 +5902,7 @@ function SudokuDialog({
                     {value !== 0 ? (
                       <span>{value}</span>
                     ) : noteMask !== 0 ? (
-                      <span className="grid h-full w-full grid-cols-3 grid-rows-3 p-[2px] text-[9px] font-medium text-slate-400">
+                      <span className="grid h-full w-full grid-cols-3 grid-rows-3 p-[1px] text-[7px] font-medium text-slate-400">
                         {Array.from({ length: 9 }, (_, noteIndex) => {
                           const digit = noteIndex + 1;
                           const visible = Boolean(noteMask & (1 << digit));
@@ -5927,7 +5927,7 @@ function SudokuDialog({
             />
           </div>
 
-          <div className="mt-3 grid grid-cols-5 gap-2">
+          <div className="mt-2.5 grid grid-cols-5 gap-1.5">
             {Array.from({ length: 9 }, (_, index) => {
               const digit = index + 1;
               return (
@@ -5935,7 +5935,7 @@ function SudokuDialog({
                   key={digit}
                   type="button"
                   onClick={() => applyDigit(digit)}
-                  className="rounded-[1rem] border border-slate-200 bg-white px-0 py-3 text-base font-semibold text-slate-700 transition hover:border-violet-200 hover:bg-violet-50"
+                  className="rounded-[0.9rem] border border-slate-200 bg-white px-0 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-violet-200 hover:bg-violet-50"
                 >
                   {digit}
                 </button>
@@ -5944,7 +5944,7 @@ function SudokuDialog({
             <button
               type="button"
               onClick={() => applyDigit(null)}
-              className="rounded-[1rem] border border-slate-200 bg-white px-3 py-3 text-sm font-semibold text-slate-500 transition hover:border-slate-300 hover:bg-slate-50"
+              className="rounded-[0.9rem] border border-slate-200 bg-white px-2 py-2.5 text-[11px] font-semibold text-slate-500 transition hover:border-slate-300 hover:bg-slate-50"
             >
               מחק
             </button>
@@ -5952,7 +5952,7 @@ function SudokuDialog({
               type="button"
               onClick={() => setNoteMode((current) => !current)}
               className={cn(
-                'rounded-[1rem] border px-3 py-3 text-sm font-semibold transition',
+                'rounded-[0.9rem] border px-2 py-2.5 text-[11px] font-semibold transition',
                 noteMode
                   ? 'border-violet-200 bg-violet-50 text-violet-700'
                   : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50'
@@ -5963,22 +5963,22 @@ function SudokuDialog({
             <button
               type="button"
               onClick={resetPuzzle}
-              className="rounded-[1rem] border border-slate-200 bg-white px-3 py-3 text-sm font-semibold text-slate-500 transition hover:border-slate-300 hover:bg-slate-50"
+              className="rounded-[0.9rem] border border-slate-200 bg-white px-2 py-2.5 text-[11px] font-semibold text-slate-500 transition hover:border-slate-300 hover:bg-slate-50"
             >
               אפס
             </button>
             <button
               type="button"
               onClick={cyclePuzzle}
-              className="rounded-[1rem] border border-violet-200 bg-violet-50 px-3 py-3 text-sm font-semibold text-violet-700 transition hover:bg-violet-100"
+              className="rounded-[0.9rem] border border-violet-200 bg-violet-50 px-2 py-2.5 text-[11px] font-semibold text-violet-700 transition hover:bg-violet-100"
             >
               חידה חדשה
             </button>
           </div>
 
-          <div className="mt-3 flex items-center justify-between gap-3 text-[11px] text-slate-400">
-            <span>Rating {activePuzzle.rating}</span>
-            <span>Nodes {activePuzzle.searchNodes}</span>
+          <div className="mt-2.5 flex items-center justify-between gap-3 text-[10px] text-slate-400">
+            <span>R {activePuzzle.rating}</span>
+            <span>N {activePuzzle.searchNodes}</span>
             <span>{isSolved ? 'נפתר' : `${solvedEditableCells}/${editableCells} הושלמו`}</span>
           </div>
         </div>
