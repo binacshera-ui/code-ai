@@ -575,7 +575,28 @@ function cloneRateLimitWindow(window: CodexRateLimitWindow | null): CodexRateLim
 }
 
 function cloneContextSnapshot(context: CodexContextUsageSnapshot | null): CodexContextUsageSnapshot | null {
-  return context ? { ...context } : null;
+  if (!context) {
+    return null;
+  }
+
+  const totalInputTokens = (
+    context.inputTokens !== null
+    || context.cachedInputTokens !== null
+  )
+    ? (context.inputTokens || 0) + (context.cachedInputTokens || 0)
+    : null;
+  const usagePercent = (
+    context.modelContextWindow !== null
+    && context.modelContextWindow > 0
+    && totalInputTokens !== null
+  )
+    ? Math.min(100, Math.max(0, (totalInputTokens / context.modelContextWindow) * 100))
+    : context.usagePercent;
+
+  return {
+    ...context,
+    usagePercent,
+  };
 }
 
 function cloneRuntimeSnapshot(snapshot: ClaudeRuntimeSnapshot | null): ClaudeRuntimeSnapshot | null {
@@ -723,13 +744,24 @@ async function fetchClaudeUsageWindows(
     tokens = await refreshClaudeOauthTokens(profile, tokens) || tokens;
   }
 
-  const response = await fetch(CLAUDE_USAGE_URL, {
-    headers: {
-      Authorization: `Bearer ${tokens.accessToken}`,
-      'Content-Type': 'application/json',
-      'anthropic-version': '2023-06-01',
-    },
-  });
+  async function requestUsage(accessToken: string) {
+    return fetch(CLAUDE_USAGE_URL, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+      },
+    });
+  }
+
+  let response = await requestUsage(tokens.accessToken);
+  if ((response.status === 401 || response.status === 403) && normalizeString(tokens.refreshToken)) {
+    const refreshed = await refreshClaudeOauthTokens(profile, tokens);
+    if (refreshed?.accessToken) {
+      tokens = refreshed;
+      response = await requestUsage(tokens.accessToken);
+    }
+  }
 
   if (!response.ok) {
     usageCache.set(profile.id, { expiresAt: Date.now() + CLAUDE_USAGE_CACHE_TTL_MS, value: null });
@@ -759,6 +791,8 @@ async function readClaudeAuthStatus(profile: CodexProfile): Promise<ClaudeAuthSt
     encoding: 'utf-8',
     env: buildClaudeProcessEnv(profile),
     maxBuffer: 1024 * 1024,
+    timeout: 10_000,
+    killSignal: 'SIGKILL',
   });
 
   if (result.error || result.status !== 0) {
