@@ -73,8 +73,10 @@ import {
   type SudokuPuzzleDifficulty,
 } from './sudokuCatalog';
 import { BiomeSnakeDialog } from './BiomeSnakeDialog';
+import { IronDesertDialog } from './IronDesertDialog';
 import { RailHeistDialog } from './RailHeistDialog';
 import { TempleGemQuestDialog } from './TempleGemQuestDialog';
+import { VaultRunnerDialog } from './VaultRunnerDialog';
 import {
   installCodexGlobalCrashHandlers,
   recordCodexBreadcrumb,
@@ -5237,7 +5239,7 @@ function GamePickerDialog({
 }: {
   isOpen: boolean;
   onClose: () => void;
-  onStart: (game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake' | 'rail-heist') => void;
+  onStart: (game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake' | 'rail-heist' | 'iron-desert' | 'vault-runner') => void;
 }) {
   if (!isOpen) {
     return null;
@@ -5279,6 +5281,56 @@ function GamePickerDialog({
         </div>
 
         <div className="grid gap-3 p-4">
+          <button
+            type="button"
+            onClick={() => onStart('iron-desert')}
+            className="group relative overflow-hidden rounded-[1.75rem] border border-rose-100 bg-gradient-to-br from-rose-50 via-amber-50 to-orange-50 px-4 py-4 text-right shadow-[0_24px_48px_-34px_rgba(251,113,133,0.4)] transition hover:-translate-y-0.5 hover:border-rose-200"
+          >
+            <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-r from-rose-200/35 via-amber-200/35 to-orange-200/35 blur-2xl" />
+            <div className="relative flex items-center gap-4">
+              <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[1.35rem] bg-white/90 text-rose-500 shadow-sm backdrop-blur">
+                <ShieldCheck className="h-7 w-7" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-slate-800">Iron Desert</div>
+                  <span className="rounded-full bg-white/85 px-2.5 py-1 text-[10px] font-semibold text-rose-500 shadow-sm">
+                    טנקים
+                  </span>
+                </div>
+                <div className="mt-1 text-xs leading-5 text-slate-500">
+                  קמפיין שריון כבד עם זירות, גלי אויבים, ירי אוטומטי ותמרון מדויק בתוך אבק, מלח ולילה בוער.
+                </div>
+              </div>
+              <Play className="h-4 w-4 shrink-0 text-rose-400 transition group-hover:text-rose-600" />
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onStart('vault-runner')}
+            className="group relative overflow-hidden rounded-[1.75rem] border border-sky-100 bg-gradient-to-br from-sky-50 via-violet-50 to-cyan-50 px-4 py-4 text-right shadow-[0_24px_48px_-34px_rgba(56,189,248,0.34)] transition hover:-translate-y-0.5 hover:border-sky-200"
+          >
+            <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-r from-sky-200/35 via-violet-200/35 to-cyan-200/35 blur-2xl" />
+            <div className="relative flex items-center gap-4">
+              <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[1.35rem] bg-white/90 text-sky-600 shadow-sm backdrop-blur">
+                <Eye className="h-7 w-7" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-slate-800">Vault Runner</div>
+                  <span className="rounded-full bg-white/85 px-2.5 py-1 text-[10px] font-semibold text-sky-600 shadow-sm">
+                    חדירה
+                  </span>
+                </div>
+                <div className="mt-1 text-xs leading-5 text-slate-500">
+                  מבצע כספות עם מצלמות, לייזרים, כרטיסי גישה וליבות מידע שצריך לאסוף לפני היציאה.
+                </div>
+              </div>
+              <Play className="h-4 w-4 shrink-0 text-sky-400 transition group-hover:text-sky-600" />
+            </div>
+          </button>
+
           <button
             type="button"
             onClick={() => onStart('rail-heist')}
@@ -6358,6 +6410,8 @@ export function CodexMobileApp() {
   const [isTempleGemQuestOpen, setIsTempleGemQuestOpen] = useState(false);
   const [isBiomeSnakeOpen, setIsBiomeSnakeOpen] = useState(false);
   const [isRailHeistOpen, setIsRailHeistOpen] = useState(false);
+  const [isIronDesertOpen, setIsIronDesertOpen] = useState(false);
+  const [isVaultRunnerOpen, setIsVaultRunnerOpen] = useState(false);
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
@@ -7119,7 +7173,7 @@ export function CodexMobileApp() {
     setIsGamePickerOpen(true);
   }
 
-  function startMiniGame(game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake' | 'rail-heist') {
+  function startMiniGame(game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake' | 'rail-heist' | 'iron-desert' | 'vault-runner') {
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
@@ -7127,6 +7181,8 @@ export function CodexMobileApp() {
     setIsTempleGemQuestOpen(false);
     setIsBiomeSnakeOpen(false);
     setIsRailHeistOpen(false);
+    setIsIronDesertOpen(false);
+    setIsVaultRunnerOpen(false);
     if (game === 'sunset-sprint') {
       setIsRunnerGameOpen(true);
       return;
@@ -7145,6 +7201,14 @@ export function CodexMobileApp() {
     }
     if (game === 'rail-heist') {
       setIsRailHeistOpen(true);
+      return;
+    }
+    if (game === 'iron-desert') {
+      setIsIronDesertOpen(true);
+      return;
+    }
+    if (game === 'vault-runner') {
+      setIsVaultRunnerOpen(true);
       return;
     }
 
@@ -10247,6 +10311,18 @@ export function CodexMobileApp() {
         onClose={() => setIsRailHeistOpen(false)}
         sessionActiveCount={currentSessionActiveQueueCount}
         sessionCompletionSignal={gameSessionCompletionSignal}
+      />
+
+      <IronDesertDialog
+        isOpen={isIronDesertOpen}
+        onClose={() => setIsIronDesertOpen(false)}
+        sessionActiveCount={currentSessionActiveQueueCount}
+        sessionCompletionSignal={gameSessionCompletionSignal}
+      />
+
+      <VaultRunnerDialog
+        isOpen={isVaultRunnerOpen}
+        onClose={() => setIsVaultRunnerOpen(false)}
       />
 
       {isFileTreeOpen && (
