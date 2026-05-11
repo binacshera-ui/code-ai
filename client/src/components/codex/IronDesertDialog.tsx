@@ -1,4 +1,4 @@
-import { memo, useEffect, useEffectEvent, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from 'react';
+import { useEffect, useEffectEvent, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import {
   ChevronDown,
   ChevronLeft,
@@ -437,7 +437,7 @@ function drawBurst(context: CanvasRenderingContext2D, burst: DesertBurst) {
   context.restore();
 }
 
-export const IronDesertDialog = memo(function IronDesertDialog({
+export function IronDesertDialog({
   isOpen,
   onClose,
 }: {
@@ -937,4 +937,4 @@ export const IronDesertDialog = memo(function IronDesertDialog({
       </div>
     </div>
   );
-});
+}

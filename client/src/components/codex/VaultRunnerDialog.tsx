@@ -1,4 +1,4 @@
-import { memo, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import {
   ChevronDown,
   ChevronLeft,
@@ -475,7 +475,7 @@ function drawVaultState(context: CanvasRenderingContext2D, state: VaultState, le
   context.fill();
 }
 
-export const VaultRunnerDialog = memo(function VaultRunnerDialog({
+export function VaultRunnerDialog({
   isOpen,
   onClose,
 }: {
@@ -604,6 +604,20 @@ export const VaultRunnerDialog = memo(function VaultRunnerDialog({
     return null;
   }
 
+  const triggerMove = (direction: VaultDirection) => {
+    performMove(direction);
+  };
+
+  const handleMovePointerDown = (direction: VaultDirection, event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    triggerMove(direction);
+  };
+
+  const handleMoveTouchStart = (direction: VaultDirection, event: ReactTouchEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    triggerMove(direction);
+  };
+
   return (
     <div className="fixed inset-0 z-[77] flex items-end justify-center bg-slate-950/30 p-4 backdrop-blur-sm sm:items-center">
       <button
@@ -660,7 +674,7 @@ export const VaultRunnerDialog = memo(function VaultRunnerDialog({
               ref={canvasRef}
               width={VAULT_WIDTH}
               height={VAULT_HEIGHT}
-              className="block h-auto w-full bg-slate-950"
+              className="block h-auto w-full touch-none bg-slate-950"
             />
           </div>
 
@@ -682,16 +696,30 @@ export const VaultRunnerDialog = memo(function VaultRunnerDialog({
             <div />
             <button
               type="button"
-              onClick={() => performMove('up')}
-              className="flex h-11 items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              onPointerDown={(event) => handleMovePointerDown('up', event)}
+              onTouchStart={(event) => handleMoveTouchStart('up', event)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  triggerMove('up');
+                }
+              }}
+              className="flex h-11 touch-none items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
             >
               <ChevronUp className="h-4 w-4" />
             </button>
             <div />
             <button
               type="button"
-              onClick={() => performMove('left')}
-              className="flex h-11 items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              onPointerDown={(event) => handleMovePointerDown('left', event)}
+              onTouchStart={(event) => handleMoveTouchStart('left', event)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  triggerMove('left');
+                }
+              }}
+              className="flex h-11 touch-none items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
@@ -704,16 +732,30 @@ export const VaultRunnerDialog = memo(function VaultRunnerDialog({
             </button>
             <button
               type="button"
-              onClick={() => performMove('right')}
-              className="flex h-11 items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              onPointerDown={(event) => handleMovePointerDown('right', event)}
+              onTouchStart={(event) => handleMoveTouchStart('right', event)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  triggerMove('right');
+                }
+              }}
+              className="flex h-11 touch-none items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
             >
               <ChevronRight className="h-4 w-4" />
             </button>
             <div />
             <button
               type="button"
-              onClick={() => performMove('down')}
-              className="flex h-11 items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              onPointerDown={(event) => handleMovePointerDown('down', event)}
+              onTouchStart={(event) => handleMoveTouchStart('down', event)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  triggerMove('down');
+                }
+              }}
+              className="flex h-11 touch-none items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
             >
               <ChevronDown className="h-4 w-4" />
             </button>
@@ -750,4 +792,4 @@ export const VaultRunnerDialog = memo(function VaultRunnerDialog({
       </div>
     </div>
   );
-});
+}

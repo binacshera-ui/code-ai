@@ -1,4 +1,4 @@
-import { memo, useEffect, useEffectEvent, useMemo, useRef, useState, type PointerEvent } from 'react';
+import { useEffect, useEffectEvent, useMemo, useRef, useState, type PointerEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import {
   Pause,
   Play,
@@ -716,7 +716,7 @@ function stepRailGame(
   };
 }
 
-export const RailHeistDialog = memo(function RailHeistDialog({
+export function RailHeistDialog({
   isOpen,
   onClose,
 }: {
@@ -914,7 +914,7 @@ export const RailHeistDialog = memo(function RailHeistDialog({
     return null;
   }
 
-  const handleCanvasPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
+  const handleCanvasTap = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
     if (!canvas) {
       return;
@@ -922,12 +922,26 @@ export const RailHeistDialog = memo(function RailHeistDialog({
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    const x = (event.clientX - rect.left) * scaleX;
-    const y = (event.clientY - rect.top) * scaleY;
+    const x = (clientX - rect.left) * scaleX;
+    const y = (clientY - rect.top) * scaleY;
     const junction = junctions.find((node) => distance(node.x, node.y, x, y) <= 20);
     if (junction) {
       toggleJunction(junction.id);
     }
+  };
+
+  const handleCanvasPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
+    event.preventDefault();
+    handleCanvasTap(event.clientX, event.clientY);
+  };
+
+  const handleCanvasTouchStart = (event: ReactTouchEvent<HTMLCanvasElement>) => {
+    const primaryTouch = event.touches[0];
+    if (!primaryTouch) {
+      return;
+    }
+    event.preventDefault();
+    handleCanvasTap(primaryTouch.clientX, primaryTouch.clientY);
   };
 
   return (
@@ -989,6 +1003,7 @@ export const RailHeistDialog = memo(function RailHeistDialog({
               width={RAIL_WIDTH}
               height={RAIL_HEIGHT}
               onPointerDown={handleCanvasPointerDown}
+              onTouchStart={handleCanvasTouchStart}
               className="block h-auto w-full touch-none bg-slate-950"
             />
           </div>
@@ -1014,8 +1029,21 @@ export const RailHeistDialog = memo(function RailHeistDialog({
                 <button
                   key={junction.id}
                   type="button"
-                  onClick={() => toggleJunction(junction.id)}
-                  className="rounded-[1.35rem] border border-slate-100 bg-gradient-to-br from-white via-slate-50 to-sky-50 px-3 py-3 text-right shadow-[0_18px_42px_-36px_rgba(15,23,42,0.28)] transition hover:-translate-y-0.5 hover:border-sky-200"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    toggleJunction(junction.id);
+                  }}
+                  onTouchStart={(event) => {
+                    event.preventDefault();
+                    toggleJunction(junction.id);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      toggleJunction(junction.id);
+                    }
+                  }}
+                  className="touch-none rounded-[1.35rem] border border-slate-100 bg-gradient-to-br from-white via-slate-50 to-sky-50 px-3 py-3 text-right shadow-[0_18px_42px_-36px_rgba(15,23,42,0.28)] transition hover:-translate-y-0.5 hover:border-sky-200"
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-sm font-semibold text-slate-800">סוויץ׳ {index + 1} · {junction.label}</div>
@@ -1086,4 +1114,4 @@ export const RailHeistDialog = memo(function RailHeistDialog({
       </div>
     </div>
   );
-});
+}
