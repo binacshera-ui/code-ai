@@ -1,4 +1,4 @@
-import { memo, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useEffectEvent, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import {
   ChevronDown,
   ChevronLeft,
@@ -728,6 +728,45 @@ export const IronDesertDialog = memo(function IronDesertDialog({
     controlsRef.current[direction] = active;
   };
 
+  const nudgePlayer = (direction: TankDirection) => {
+    const snapshot = stateRef.current;
+    if (isPaused || isGameOver || isCampaignComplete) {
+      return;
+    }
+
+    const currentStage = DESERT_STAGES[snapshot.stageIndex];
+    const step = 16;
+    let nextX = snapshot.player.x;
+    let nextY = snapshot.player.y;
+
+    if (direction === 'up') nextY -= step;
+    if (direction === 'down') nextY += step;
+    if (direction === 'left') nextX -= step;
+    if (direction === 'right') nextX += step;
+
+    nextX = clampTank(nextX, 18, TANK_WIDTH - 18);
+    nextY = clampTank(nextY, 18, TANK_HEIGHT - 18);
+    if (!intersectsObstacle(nextX, nextY, 14, currentStage.obstacles)) {
+      snapshot.player.x = nextX;
+      snapshot.player.y = nextY;
+      snapshot.player.dir = direction;
+      drawFrame();
+    }
+  };
+
+  const handleControlPointerDown = (direction: TankDirection, event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setControl(direction, true);
+    nudgePlayer(direction);
+  };
+
+  const handleControlTouchStart = (direction: TankDirection, event: ReactTouchEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    setControl(direction, true);
+    nudgePlayer(direction);
+  };
+
   return (
     <div className="fixed inset-0 z-[77] flex items-end justify-center bg-slate-950/30 p-4 backdrop-blur-sm sm:items-center">
       <button
@@ -806,22 +845,28 @@ export const IronDesertDialog = memo(function IronDesertDialog({
             <div />
             <button
               type="button"
-              onPointerDown={() => setControl('up', true)}
+              onPointerDown={(event) => handleControlPointerDown('up', event)}
               onPointerUp={() => setControl('up', false)}
               onPointerLeave={() => setControl('up', false)}
               onPointerCancel={() => setControl('up', false)}
-              className="flex h-11 items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              onTouchStart={(event) => handleControlTouchStart('up', event)}
+              onTouchEnd={() => setControl('up', false)}
+              onTouchCancel={() => setControl('up', false)}
+              className="flex h-11 touch-none items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
             >
               <ChevronUp className="h-4 w-4" />
             </button>
             <div />
             <button
               type="button"
-              onPointerDown={() => setControl('left', true)}
+              onPointerDown={(event) => handleControlPointerDown('left', event)}
               onPointerUp={() => setControl('left', false)}
               onPointerLeave={() => setControl('left', false)}
               onPointerCancel={() => setControl('left', false)}
-              className="flex h-11 items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              onTouchStart={(event) => handleControlTouchStart('left', event)}
+              onTouchEnd={() => setControl('left', false)}
+              onTouchCancel={() => setControl('left', false)}
+              className="flex h-11 touch-none items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
@@ -834,22 +879,28 @@ export const IronDesertDialog = memo(function IronDesertDialog({
             </button>
             <button
               type="button"
-              onPointerDown={() => setControl('right', true)}
+              onPointerDown={(event) => handleControlPointerDown('right', event)}
               onPointerUp={() => setControl('right', false)}
               onPointerLeave={() => setControl('right', false)}
               onPointerCancel={() => setControl('right', false)}
-              className="flex h-11 items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              onTouchStart={(event) => handleControlTouchStart('right', event)}
+              onTouchEnd={() => setControl('right', false)}
+              onTouchCancel={() => setControl('right', false)}
+              className="flex h-11 touch-none items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
             >
               <ChevronRight className="h-4 w-4" />
             </button>
             <div />
             <button
               type="button"
-              onPointerDown={() => setControl('down', true)}
+              onPointerDown={(event) => handleControlPointerDown('down', event)}
               onPointerUp={() => setControl('down', false)}
               onPointerLeave={() => setControl('down', false)}
               onPointerCancel={() => setControl('down', false)}
-              className="flex h-11 items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              onTouchStart={(event) => handleControlTouchStart('down', event)}
+              onTouchEnd={() => setControl('down', false)}
+              onTouchCancel={() => setControl('down', false)}
+              className="flex h-11 touch-none items-center justify-center rounded-[1rem] border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
             >
               <ChevronDown className="h-4 w-4" />
             </button>
