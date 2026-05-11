@@ -160,6 +160,28 @@ const VAULT_LEVELS: VaultLevelDefinition[] = [
   },
 ];
 
+function drawRoundedRectPath(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+) {
+  const safeRadius = Math.max(0, Math.min(radius, Math.abs(width) / 2, Math.abs(height) / 2));
+  context.beginPath();
+  context.moveTo(x + safeRadius, y);
+  context.lineTo(x + width - safeRadius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + safeRadius);
+  context.lineTo(x + width, y + height - safeRadius);
+  context.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height);
+  context.lineTo(x + safeRadius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - safeRadius);
+  context.lineTo(x, y + safeRadius);
+  context.quadraticCurveTo(x, y, x + safeRadius, y);
+  context.closePath();
+}
+
 function createVaultState(levelIndex: number, alerts = 0): VaultState {
   const level = VAULT_LEVELS[levelIndex];
   const grid: VaultTile[][] = [];
@@ -397,8 +419,7 @@ function drawVaultState(context: CanvasRenderingContext2D, state: VaultState, le
 
       if (tile === 'data') {
         context.fillStyle = level.accent;
-        context.beginPath();
-        context.roundRect(cellX + 9, cellY + 7, 10, 14, 4);
+        drawRoundedRectPath(context, cellX + 9, cellY + 7, 10, 14, 4);
         context.fill();
       }
 
@@ -412,16 +433,14 @@ function drawVaultState(context: CanvasRenderingContext2D, state: VaultState, le
 
       if (tile === 'door') {
         context.fillStyle = '#1D4ED8';
-        context.beginPath();
-        context.roundRect(cellX + 7, cellY + 4, 14, 20, 4);
+        drawRoundedRectPath(context, cellX + 7, cellY + 4, 14, 20, 4);
         context.fill();
       }
 
       if (tile === 'exit') {
         context.strokeStyle = '#10B981';
         context.lineWidth = 3;
-        context.beginPath();
-        context.roundRect(cellX + 4, cellY + 4, 20, 20, 6);
+        drawRoundedRectPath(context, cellX + 4, cellY + 4, 20, 20, 6);
         context.stroke();
       }
 
@@ -448,8 +467,7 @@ function drawVaultState(context: CanvasRenderingContext2D, state: VaultState, le
   const playerCenterX = state.playerX * VAULT_CELL + VAULT_CELL / 2;
   const playerCenterY = state.playerY * VAULT_CELL + VAULT_CELL / 2;
   context.fillStyle = '#0F766E';
-  context.beginPath();
-  context.roundRect(playerCenterX - 9, playerCenterY - 9, 18, 18, 6);
+  drawRoundedRectPath(context, playerCenterX - 9, playerCenterY - 9, 18, 18, 6);
   context.fill();
   context.fillStyle = '#CCFBF1';
   context.beginPath();
@@ -559,6 +577,7 @@ export const VaultRunnerDialog = memo(function VaultRunnerDialog({
       return undefined;
     }
     resetCampaign();
+    redraw();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === ' ') {
         event.preventDefault();
@@ -579,7 +598,7 @@ export const VaultRunnerDialog = memo(function VaultRunnerDialog({
         animationRef.current = null;
       }
     };
-  }, [animate, isOpen, performMove, resetCampaign]);
+  }, [animate, isOpen, performMove, redraw, resetCampaign]);
 
   if (!isOpen) {
     return null;

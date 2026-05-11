@@ -103,6 +103,28 @@ interface RailGameState {
 const LOOT_COLOR = '#F59E0B';
 const RESCUE_COLOR = '#22D3EE';
 
+function drawRoundedRectPath(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+) {
+  const safeRadius = Math.max(0, Math.min(radius, Math.abs(width) / 2, Math.abs(height) / 2));
+  context.beginPath();
+  context.moveTo(x + safeRadius, y);
+  context.lineTo(x + width - safeRadius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + safeRadius);
+  context.lineTo(x + width, y + height - safeRadius);
+  context.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height);
+  context.lineTo(x + safeRadius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - safeRadius);
+  context.lineTo(x, y + safeRadius);
+  context.quadraticCurveTo(x, y, x + safeRadius, y);
+  context.closePath();
+}
+
 const RAIL_STAGES: RailStageDefinition[] = [
   {
     id: 'aurora-switchyard',
@@ -537,8 +559,7 @@ function drawRailNodes(
     context.fillStyle = 'rgba(255,255,255,0.92)';
     context.strokeStyle = 'rgba(148,163,184,0.35)';
     context.lineWidth = 1;
-    context.beginPath();
-    context.roundRect(node.x - labelWidth / 2, node.y + 13, labelWidth, 18, 9);
+    drawRoundedRectPath(context, node.x - labelWidth / 2, node.y + 13, labelWidth, 18, 9);
     context.fill();
     context.stroke();
     context.fillStyle = '#334155';
@@ -561,14 +582,12 @@ function drawRailTrain(context: CanvasRenderingContext2D, train: RailTrain, node
   context.shadowColor = `${baseColor}66`;
   context.shadowBlur = 14;
   context.fillStyle = baseColor;
-  context.beginPath();
-  context.roundRect(-18, -9, 36, 18, 8);
+  drawRoundedRectPath(context, -18, -9, 36, 18, 8);
   context.fill();
 
   context.shadowBlur = 0;
   context.fillStyle = bodyColor;
-  context.beginPath();
-  context.roundRect(-12, -6, 18, 12, 5);
+  drawRoundedRectPath(context, -12, -6, 18, 12, 5);
   context.fill();
 
   context.fillStyle = '#0F172A';
@@ -852,6 +871,7 @@ export const RailHeistDialog = memo(function RailHeistDialog({
     }
 
     resetCampaign();
+    drawFrame();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === ' ') {
         event.preventDefault();
@@ -881,7 +901,7 @@ export const RailHeistDialog = memo(function RailHeistDialog({
       }
       lastFrameRef.current = null;
     };
-  }, [animate, isOpen, resetCampaign, toggleJunction]);
+  }, [animate, drawFrame, isOpen, resetCampaign, toggleJunction]);
 
   useEffect(() => {
     if (!isOpen) {

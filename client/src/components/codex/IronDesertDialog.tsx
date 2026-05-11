@@ -186,6 +186,28 @@ const DESERT_STAGES: DesertStageDefinition[] = [
   },
 ];
 
+function drawRoundedRectPath(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+) {
+  const safeRadius = Math.max(0, Math.min(radius, Math.abs(width) / 2, Math.abs(height) / 2));
+  context.beginPath();
+  context.moveTo(x + safeRadius, y);
+  context.lineTo(x + width - safeRadius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + safeRadius);
+  context.lineTo(x + width, y + height - safeRadius);
+  context.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height);
+  context.lineTo(x + safeRadius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - safeRadius);
+  context.lineTo(x, y + safeRadius);
+  context.quadraticCurveTo(x, y, x + safeRadius, y);
+  context.closePath();
+}
+
 function desertDistance(aX: number, aY: number, bX: number, bY: number) {
   return Math.hypot(bX - aX, bY - aY);
 }
@@ -373,8 +395,7 @@ function drawTank(
   context.shadowColor = glowColor;
   context.shadowBlur = 12;
   context.fillStyle = bodyColor;
-  context.beginPath();
-  context.roundRect(-14, -10, 28, 20, 8);
+  drawRoundedRectPath(context, -14, -10, 28, 20, 8);
   context.fill();
   context.shadowBlur = 0;
   context.strokeStyle = 'rgba(15,23,42,0.16)';
@@ -382,8 +403,7 @@ function drawTank(
   context.stroke();
 
   context.fillStyle = turretColor;
-  context.beginPath();
-  context.roundRect(-7, -7, 14, 14, 6);
+  drawRoundedRectPath(context, -7, -7, 14, 14, 6);
   context.fill();
   context.fillRect(4, -2, 13, 4);
 
@@ -503,8 +523,7 @@ export const IronDesertDialog = memo(function IronDesertDialog({
       context.fillStyle = stage.obstacleFill;
       context.strokeStyle = stage.obstacleStroke;
       context.lineWidth = 2;
-      context.beginPath();
-      context.roundRect(obstacle.x, obstacle.y, obstacle.w, obstacle.h, 10);
+      drawRoundedRectPath(context, obstacle.x, obstacle.y, obstacle.w, obstacle.h, 10);
       context.fill();
       context.stroke();
     });
@@ -660,6 +679,7 @@ export const IronDesertDialog = memo(function IronDesertDialog({
     }
 
     resetCampaign();
+    drawFrame();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === ' ') {
         event.preventDefault();
@@ -691,7 +711,7 @@ export const IronDesertDialog = memo(function IronDesertDialog({
       frameRef.current = null;
       controlsRef.current = { up: false, down: false, left: false, right: false };
     };
-  }, [animate, isOpen, resetCampaign]);
+  }, [animate, drawFrame, isOpen, resetCampaign]);
 
   useEffect(() => {
     if (!isOpen) {
