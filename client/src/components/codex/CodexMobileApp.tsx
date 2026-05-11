@@ -10044,7 +10044,7 @@ export function CodexMobileApp() {
                   onClick={() => void enqueueCurrentPrompt()}
                   disabled={isUploading || isSending || (!prompt.trim() && draftAttachments.length === 0)}
                   className={cn(
-                    'shrink-0 rounded-full border border-white/80 bg-gradient-to-br from-rose-200 via-amber-100 to-sky-200 p-[0.56rem] text-slate-700 shadow-[0_12px_26px_-16px_rgba(99,102,241,0.5)] transition-all active:scale-95',
+                    'mb-[3px] ml-[3px] shrink-0 rounded-full border border-white/80 bg-gradient-to-br from-rose-200 via-amber-100 to-sky-200 p-[0.56rem] text-slate-700 shadow-[0_12px_26px_-16px_rgba(99,102,241,0.5)] transition-all active:scale-95',
                     'hover:from-rose-200 hover:via-amber-100 hover:to-sky-200 hover:text-slate-800',
                     'disabled:border-slate-100 disabled:bg-slate-100 disabled:text-slate-400 disabled:shadow-none disabled:opacity-35'
                   )}
