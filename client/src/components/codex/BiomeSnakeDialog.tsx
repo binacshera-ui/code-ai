@@ -628,7 +628,7 @@ export function BiomeSnakeDialog({
         onClick={onClose}
         aria-label="Close biome snake"
       />
-      <div className="relative z-10 flex w-full max-w-sm flex-col overflow-hidden rounded-[2rem] border border-sky-100 bg-white text-slate-800 shadow-[0_30px_100px_-40px_rgba(59,130,246,0.35)]">
+      <div className="relative z-10 flex max-h-[90dvh] w-full max-w-sm flex-col overflow-y-auto rounded-[2rem] border border-sky-100 bg-white text-slate-800 shadow-[0_30px_100px_-40px_rgba(59,130,246,0.35)]">
         <div className="border-b border-sky-100 bg-gradient-to-b from-sky-50 via-cyan-50 to-white px-5 py-4">
           <div className="flex items-start justify-between gap-4">
             <div

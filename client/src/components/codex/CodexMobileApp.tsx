@@ -5104,7 +5104,7 @@ function MiniGameDialog({
         onClick={onClose}
         aria-label="Close mini game"
       />
-      <div className="relative z-10 flex w-full max-w-sm flex-col overflow-hidden rounded-[2rem] border border-sky-100 bg-white text-slate-800 shadow-[0_28px_90px_-36px_rgba(56,189,248,0.28)]">
+      <div className="relative z-10 flex max-h-[90dvh] w-full max-w-sm flex-col overflow-y-auto rounded-[2rem] border border-sky-100 bg-white text-slate-800 shadow-[0_28px_90px_-36px_rgba(56,189,248,0.28)]">
         <div className="border-b border-sky-100 bg-gradient-to-b from-sky-50 via-cyan-50 to-white px-5 py-4">
           <div className="flex items-start justify-between gap-4">
             <div
@@ -5220,7 +5220,7 @@ function GamePickerDialog({
         onClick={onClose}
         aria-label="Close game picker"
       />
-      <div className="relative z-10 flex w-full max-w-md flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.32)]">
+      <div className="relative z-10 flex max-h-[90dvh] w-full max-w-md flex-col overflow-y-auto rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.32)]">
         <div className="border-b border-slate-100 bg-gradient-to-b from-cyan-50/70 via-white to-white px-5 py-5 text-right">
           <div className="flex items-start justify-between gap-4">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-cyan-50 text-cyan-600 shadow-sm">
@@ -5543,7 +5543,7 @@ function RunnerGameDialog({
         onClick={onClose}
         aria-label="Close runner game"
       />
-      <div className="relative z-10 flex w-full max-w-sm flex-col overflow-hidden rounded-[2rem] border border-rose-100 bg-white text-slate-800 shadow-[0_30px_100px_-40px_rgba(244,114,182,0.38)]">
+      <div className="relative z-10 flex max-h-[90dvh] w-full max-w-sm flex-col overflow-y-auto rounded-[2rem] border border-rose-100 bg-white text-slate-800 shadow-[0_30px_100px_-40px_rgba(244,114,182,0.38)]">
         <div className="border-b border-rose-100 bg-gradient-to-b from-rose-50 via-amber-50 to-white px-5 py-4">
           <div className="flex items-start justify-between gap-4">
             <div
