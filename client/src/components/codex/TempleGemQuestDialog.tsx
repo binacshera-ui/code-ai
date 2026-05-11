@@ -1104,7 +1104,7 @@ export function TempleGemQuestDialog({
         </div>
 
         <div className="grid gap-3 border-t border-amber-100 bg-gradient-to-b from-white to-amber-50/40 px-4 pb-4 pt-3">
-          <div className="mx-auto grid w-full max-w-[12rem] grid-cols-3 gap-2">
+          <div dir="ltr" className="mx-auto grid w-full max-w-[12rem] grid-cols-3 gap-2">
             <div />
             <button
               type="button"

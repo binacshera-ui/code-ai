@@ -70,6 +70,7 @@ import {
   SUDOKU_CATALOG,
   type SudokuPuzzleDifficulty,
 } from './sudokuCatalog';
+import { BiomeSnakeDialog } from './BiomeSnakeDialog';
 import { TempleGemQuestDialog } from './TempleGemQuestDialog';
 import {
   installCodexGlobalCrashHandlers,
@@ -5205,7 +5206,7 @@ function GamePickerDialog({
 }: {
   isOpen: boolean;
   onClose: () => void;
-  onStart: (game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest') => void;
+  onStart: (game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake') => void;
 }) {
   if (!isOpen) {
     return null;
@@ -5247,6 +5248,31 @@ function GamePickerDialog({
         </div>
 
         <div className="grid gap-3 p-4">
+          <button
+            type="button"
+            onClick={() => onStart('biome-snake')}
+            className="group relative overflow-hidden rounded-[1.75rem] border border-sky-100 bg-gradient-to-br from-sky-50 via-white to-cyan-50 px-4 py-4 text-right shadow-[0_22px_46px_-34px_rgba(59,130,246,0.34)] transition hover:-translate-y-0.5 hover:border-sky-200"
+          >
+            <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-r from-sky-200/30 via-cyan-200/30 to-emerald-200/30 blur-2xl" />
+            <div className="relative flex items-center gap-4">
+              <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[1.35rem] bg-white/90 text-sky-600 shadow-sm backdrop-blur">
+                <Zap className="h-7 w-7" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-slate-800">Biome Snake</div>
+                  <span className="rounded-full bg-white/85 px-2.5 py-1 text-[10px] font-semibold text-sky-600 shadow-sm">
+                    שלבים
+                  </span>
+                </div>
+                <div className="mt-1 text-xs leading-5 text-slate-500">
+                  סנייק עם רקעים שונים בכל שלב: שלג, מדבר, ג׳ונגל ואובסידיאן, עם קצב עולה ומכשולים.
+                </div>
+              </div>
+              <Play className="h-4 w-4 shrink-0 text-sky-400 transition group-hover:text-sky-600" />
+            </div>
+          </button>
+
           <button
             type="button"
             onClick={() => onStart('temple-gem-quest')}
@@ -6274,6 +6300,7 @@ export function CodexMobileApp() {
   const [isRunnerGameOpen, setIsRunnerGameOpen] = useState(false);
   const [isSudokuOpen, setIsSudokuOpen] = useState(false);
   const [isTempleGemQuestOpen, setIsTempleGemQuestOpen] = useState(false);
+  const [isBiomeSnakeOpen, setIsBiomeSnakeOpen] = useState(false);
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
@@ -7030,12 +7057,13 @@ export function CodexMobileApp() {
     setIsGamePickerOpen(true);
   }
 
-  function startMiniGame(game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest') {
+  function startMiniGame(game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake') {
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
     setIsSudokuOpen(false);
     setIsTempleGemQuestOpen(false);
+    setIsBiomeSnakeOpen(false);
     if (game === 'sunset-sprint') {
       setIsRunnerGameOpen(true);
       return;
@@ -7046,6 +7074,10 @@ export function CodexMobileApp() {
     }
     if (game === 'temple-gem-quest') {
       setIsTempleGemQuestOpen(true);
+      return;
+    }
+    if (game === 'biome-snake') {
+      setIsBiomeSnakeOpen(true);
       return;
     }
 
@@ -7583,6 +7615,7 @@ export function CodexMobileApp() {
     setIsRunnerGameOpen(false);
     setIsSudokuOpen(false);
     setIsTempleGemQuestOpen(false);
+    setIsBiomeSnakeOpen(false);
     setThemeMode(readThemeModeForProfile(nextProfileId));
     folderBackStackRef.current = [];
     folderForwardStackRef.current = [];
@@ -7860,6 +7893,7 @@ export function CodexMobileApp() {
         setIsRunnerGameOpen(false);
         setIsSudokuOpen(false);
         setIsTempleGemQuestOpen(false);
+        setIsBiomeSnakeOpen(false);
         setRateLimitSnapshot(null);
         setAvailableModels([]);
         setModelPermissionSnapshot(null);
@@ -10013,6 +10047,13 @@ export function CodexMobileApp() {
       <TempleGemQuestDialog
         isOpen={isTempleGemQuestOpen}
         onClose={() => setIsTempleGemQuestOpen(false)}
+        sessionActiveCount={currentSessionActiveQueueCount}
+        sessionCompletionSignal={gameSessionCompletionSignal}
+      />
+
+      <BiomeSnakeDialog
+        isOpen={isBiomeSnakeOpen}
+        onClose={() => setIsBiomeSnakeOpen(false)}
         sessionActiveCount={currentSessionActiveQueueCount}
         sessionCompletionSignal={gameSessionCompletionSignal}
       />
