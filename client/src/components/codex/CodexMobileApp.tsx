@@ -58,6 +58,7 @@ import {
   Tag,
   Sun,
   User,
+  Trash2,
   Wrench,
   X,
   Zap,
@@ -340,6 +341,14 @@ interface CodexTransferCreateResponse {
   autoPrompt: string;
   session: CodexSessionDetail;
   item: CodexQueueServerItem;
+}
+
+interface CodexDeleteTurnResponse {
+  sessionId: string;
+  deletedUserEntryId: string;
+  deletedAssistantEntryId: string | null;
+  cancelledQueueItemIds: string[];
+  session: CodexSessionDetail;
 }
 
 interface CodexSessionInstructionResponse {
@@ -2307,10 +2316,12 @@ function MessageBubble({
   onOpenFilePreview,
   onOpenChanges,
   onFork,
+  onDelete,
   onTransfer,
   transferOptions,
   isTransfering = false,
   isChangeLoading = false,
+  isDeleting = false,
   assistantLabel = 'Codex',
   commentaryLabel = 'Codex עובד',
 }: {
@@ -2318,10 +2329,12 @@ function MessageBubble({
   onOpenFilePreview: (rawPath: string) => void;
   onOpenChanges?: (entryId: string) => void;
   onFork?: (entryId: string) => void;
+  onDelete?: (entryId: string) => void;
   onTransfer?: (entryId: string, targetProfileId: string) => void;
   transferOptions?: TransferTargetOption[];
   isTransfering?: boolean;
   isChangeLoading?: boolean;
+  isDeleting?: boolean;
   assistantLabel?: string;
   commentaryLabel?: string;
 }) {
@@ -2333,6 +2346,7 @@ function MessageBubble({
   const messageText = entry.text || '';
   const showChangesAction = Boolean(onOpenChanges) && !isUser && !isCommentary && !isTransfer && entry.kind === 'final';
   const showForkAction = Boolean(onFork) && !isTransfer;
+  const showDeleteAction = Boolean(onDelete) && (isUser || (!isCommentary && !isTransfer && entry.kind === 'final'));
   const showTransferAction = Boolean(onTransfer && transferOptions?.length) && !isTransfer;
   const hasMultipleTransferTargets = (transferOptions?.length || 0) > 1;
 
@@ -2419,6 +2433,21 @@ function MessageBubble({
                 aria-label="מזלג מהודעה זו"
               >
                 <GitBranch className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {showDeleteAction && (
+              <button
+                type="button"
+                onClick={() => onDelete?.(entry.id)}
+                disabled={isDeleting}
+                className={cn(
+                  'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
+                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80' : 'bg-slate-50 text-rose-500 hover:bg-rose-50'
+                )}
+                title="מחק את זוג ההודעות הזה"
+                aria-label="מחק את זוג ההודעות הזה"
+              >
+                {isDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
               </button>
             )}
             {showTransferAction && (
@@ -6334,6 +6363,7 @@ export function CodexMobileApp() {
   const [customSessionTitle, setCustomSessionTitle] = useState('');
   const [isSavingSessionTitle, setIsSavingSessionTitle] = useState(false);
   const [transferringEntryId, setTransferringEntryId] = useState<string | null>(null);
+  const [deletingEntryId, setDeletingEntryId] = useState<string | null>(null);
   const [newTopicName, setNewTopicName] = useState('');
   const [newTopicIcon, setNewTopicIcon] = useState(TOPIC_ICON_PRESETS[0]);
   const [newTopicColorKey, setNewTopicColorKey] = useState<keyof typeof TOPIC_COLOR_PRESETS>('sky');
@@ -7802,6 +7832,107 @@ export function CodexMobileApp() {
     }
   }
 
+  async function deleteTurnFromTimelineEntry(entryId: string) {
+    const activeProfileId = currentProfile?.id || selectedSession?.profileId || profileId || null;
+    const activeSessionKey = selectedSessionId || (isDraftConversation ? draftConversationKey : null);
+
+    if (!activeProfileId || !activeSessionKey) {
+      setError('לא נמצאה שיחה פעילה למחיקה.');
+      return;
+    }
+
+    const shouldStopRunningTurn = currentSessionActiveQueueCount > 0;
+    const confirmed = window.confirm(
+      shouldStopRunningTurn
+        ? 'המחיקה תעצור את הסבב הפעיל, תמחק את הודעת המשתמש ואת תשובת ה-AI של אותו סבב, ותמשיך משיחה נקייה. להמשיך?'
+        : 'המחיקה תסיר את הודעת המשתמש ואת תשובת ה-AI של אותו סבב מהמשך השיחה. להמשיך?'
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setDeletingEntryId(entryId);
+      setError(null);
+      const data = await fetchJson<CodexDeleteTurnResponse>(
+        `/api/codex/sessions/${encodeURIComponent(activeSessionKey)}/delete-turn`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            profileId: activeProfileId,
+            entryId,
+          }),
+        }
+      );
+
+      if (!data.session.forkDraftContext) {
+        throw new Error('השיחה הנקייה לא נוצרה כראוי.');
+      }
+
+      const nextForkDraftContext = mapForkDraftServerContext(
+        data.session.forkDraftContext,
+        data.session.updatedAt
+      );
+
+      latestSessionLoadTokenRef.current += 1;
+      cancelFullTimelineLoading();
+      activeProfileRef.current = activeProfileId;
+      activeSelectedSessionIdRef.current = null;
+      closeFilePreview();
+      setActiveToolEntry(null);
+      setActiveSessionChangeRecord(null);
+      setActiveSessionChangeEntryId(null);
+      setActiveSessionChangeFileId(null);
+      setIsSessionChangeDialogOpen(false);
+
+      startTransition(() => {
+        setSelectedSessionId(null);
+        setSelectedSession(null);
+        setIsDraftConversation(true);
+        setDraftConversationKey(data.session.id);
+        setForkDraftContext(nextForkDraftContext);
+        setDraftCwd(data.session.cwd || nextForkDraftContext.sourceCwd || currentProfile?.workspaceCwd || selectedProfileWorkspaceCwd || null);
+        setSessions((current) => [
+          data.session,
+          ...current
+            .filter((session) => session.id !== data.session.id && session.id !== activeSessionKey)
+            .map((session) => (
+              session.id === activeSessionKey
+                ? { ...session, hidden: true }
+                : session
+            )),
+        ]);
+        setQueueItems((current) => current.filter((item) => !data.cancelledQueueItemIds.includes(item.id)));
+        setPrompt('');
+        setIsSidebarOpen(false);
+        setIsHeaderActionsOpen(false);
+        setSessionWindowSize(Math.max(INITIAL_TIMELINE_WINDOW_SIZE, data.session.timeline.length));
+        setIsFullTimelineLoaded(true);
+      });
+
+      recordCodexBreadcrumb('session-turn-deleted', {
+        sessionId: activeSessionKey,
+        nextSessionId: data.sessionId,
+        entryId,
+        deletedUserEntryId: data.deletedUserEntryId,
+        deletedAssistantEntryId: data.deletedAssistantEntryId,
+        cancelledQueueItemIds: data.cancelledQueueItemIds,
+      });
+
+      void loadSessionsOnly(activeProfileId, { silent: true });
+      void loadQueueItems(activeProfileId, { silent: true });
+      void loadCurrentSessionInstruction(activeProfileId, data.session.id);
+    } catch (deleteError: any) {
+      setError(deleteError.message || 'לא ניתן היה למחוק את זוג ההודעות שנבחר.');
+    } finally {
+      setDeletingEntryId(null);
+    }
+  }
+
   async function transferFromTimelineEntry(entryId: string, targetProfileId: string) {
     if (!selectedSession || !currentProfile) {
       setError('לא נמצאה שיחה פעילה להעברה.');
@@ -9241,12 +9372,14 @@ export function CodexMobileApp() {
                 onOpenFilePreview={(rawPath) => void handleOpenFilePreview(rawPath)}
                 onOpenChanges={selectedSession ? (entryId) => void openSessionChangesForEntry(entryId) : undefined}
                 onFork={selectedSession ? (entryId) => forkFromTimelineEntry(entryId) : undefined}
+                onDelete={selectedConversationId ? (entryId) => void deleteTurnFromTimelineEntry(entryId) : undefined}
                 onTransfer={selectedSession && transferTargetOptions.length > 0
                   ? (entryId, targetProfileId) => void transferFromTimelineEntry(entryId, targetProfileId)
                   : undefined}
                 transferOptions={selectedSession ? transferTargetOptions : undefined}
                 isTransfering={transferringEntryId === block.entry.id}
                 isChangeLoading={isSessionChangeLoading && activeSessionChangeEntryId === block.entry.id}
+                isDeleting={deletingEntryId === block.entry.id}
                 assistantLabel={assistantMessageLabel}
                 commentaryLabel={commentaryMessageLabel}
               />

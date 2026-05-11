@@ -557,6 +557,96 @@ function buildTransferAutoPrompt(lastEntry: CodexSessionDetail['timeline'][numbe
   return 'המשך עכשיו מאותה נקודה בצורה טבעית, בלי לסכם את השיחה.';
 }
 
+function isUserTimelineMessage(entry: CodexSessionDetail['timeline'][number] | undefined): boolean {
+  return Boolean(entry && entry.entryType === 'message' && entry.role === 'user');
+}
+
+function isAssistantFinalTimelineMessage(entry: CodexSessionDetail['timeline'][number] | undefined): boolean {
+  return Boolean(entry && entry.entryType === 'message' && entry.role === 'assistant' && entry.kind === 'final');
+}
+
+function resolveDeletedTurnRange(
+  timeline: CodexSessionDetail['timeline'],
+  selectedEntryId: string
+): {
+  startIndex: number;
+  endExclusive: number;
+  selectedEntry: CodexSessionDetail['timeline'][number];
+  turnEntries: CodexSessionDetail['timeline'];
+  deletedUserEntryId: string;
+  deletedAssistantEntryId: string | null;
+} {
+  const selectedIndex = timeline.findIndex((entry) => entry.id === selectedEntryId);
+  if (selectedIndex === -1) {
+    throw new Error('לא ניתן לאתר את זוג ההודעות שנבחר למחיקה.');
+  }
+
+  const selectedEntry = timeline[selectedIndex]!;
+  let startIndex = selectedIndex;
+
+  if (!isUserTimelineMessage(selectedEntry)) {
+    startIndex = -1;
+    for (let index = selectedIndex; index >= 0; index -= 1) {
+      if (isUserTimelineMessage(timeline[index])) {
+        startIndex = index;
+        break;
+      }
+    }
+  }
+
+  if (startIndex < 0 || !isUserTimelineMessage(timeline[startIndex])) {
+    throw new Error('אפשר למחוק רק זוג שמתחיל בהודעת משתמש.');
+  }
+
+  let endExclusive = timeline.length;
+  for (let index = startIndex + 1; index < timeline.length; index += 1) {
+    if (isUserTimelineMessage(timeline[index])) {
+      endExclusive = index;
+      break;
+    }
+  }
+
+  const turnEntries = timeline.slice(startIndex, endExclusive).map((entry) => ({ ...entry }));
+  const deletedAssistantEntry = [...turnEntries].reverse().find((entry) => isAssistantFinalTimelineMessage(entry)) || null;
+
+  return {
+    startIndex,
+    endExclusive,
+    selectedEntry,
+    turnEntries,
+    deletedUserEntryId: timeline[startIndex]!.id,
+    deletedAssistantEntryId: deletedAssistantEntry?.id || null,
+  };
+}
+
+function buildDeletedTurnPromptPrefix(
+  sourceSession: CodexSessionDetail,
+  sourceProviderLabel: string,
+  timeline: CodexSessionDetail['timeline']
+): string {
+  if (timeline.length === 0) {
+    return [
+      `הקשר משוחזר מתוך שיחה קיימת עם ${sourceProviderLabel}, אחרי מחיקת הודעות מהשיחה.`,
+      sourceSession.cwd ? `התיקייה הפעילה: ${sourceSession.cwd}` : '',
+      'אין כרגע היסטוריה קודמת תקפה בתוך השיחה. המשך מכאן רק לפי ההודעה החדשה שתגיע אחר כך.',
+    ].filter(Boolean).join('\n\n');
+  }
+
+  const transcript = timeline
+    .map((entry) => renderTransferTimelineEntry(entry, sourceProviderLabel))
+    .filter((value): value is string => Boolean(value))
+    .join('\n\n');
+
+  return [
+    `הקשר משוחזר מתוך שיחה קיימת עם ${sourceProviderLabel}, אחרי מחיקת הודעות מהשיחה.`,
+    `כותרת השיחה: ${sourceSession.title}`,
+    sourceSession.cwd ? `התיקייה הפעילה: ${sourceSession.cwd}` : '',
+    'להלן ההיסטוריה התקפה היחידה של השיחה, לפי סדר כרונולוגי:',
+    transcript,
+    'הודעות שנמחקו אינן חלק מהשיחה יותר. אסור להתייחס אליהן, לצטט אותן, או להמשיך מהן. המשך רק מההיסטוריה התקפה למעלה ומההודעה החדשה שתגיע אחר כך.',
+  ].filter(Boolean).join('\n\n');
+}
+
 router.get('/auth/status', (req, res) => {
   res.json(readAuthenticatedUser(req));
 });
@@ -1039,6 +1129,126 @@ router.get('/sessions/:sessionId/changes/:entryId', requireCodexAccess, async (r
     res.json({ record });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load session change record' });
+  }
+});
+
+router.post('/sessions/:sessionId/delete-turn', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const entryId = typeof req.body?.entryId === 'string' && req.body.entryId.trim()
+      ? req.body.entryId.trim()
+      : undefined;
+
+    if (!profileId || !entryId) {
+      res.status(400).json({ error: 'Profile id and entry id are required' });
+      return;
+    }
+
+    const sourceSession = await getAgentSessionDetail(sessionId, profileId, {
+      full: true,
+    });
+    const profile = CODEX_APP_CONFIG.profiles.find((candidate) => candidate.id === profileId);
+    if (!profile) {
+      res.status(404).json({ error: 'הפרופיל שנבחר לא קיים.' });
+      return;
+    }
+
+    const {
+      startIndex,
+      endExclusive,
+      turnEntries,
+      deletedUserEntryId,
+      deletedAssistantEntryId,
+    } = resolveDeletedTurnRange(sourceSession.timeline, entryId);
+
+    const filteredTimeline = [
+      ...sourceSession.timeline.slice(0, startIndex),
+      ...sourceSession.timeline.slice(endExclusive),
+    ].map((entry) => ({ ...entry }));
+
+    const activeQueueItems = (await listCodexQueueItems(profileId)).filter((item) => (
+      (item.queueKey === sourceSession.id || item.sessionId === sourceSession.id)
+      && (
+        item.status === 'scheduled'
+        || item.status === 'queued'
+        || item.status === 'running'
+        || item.status === 'cancelling'
+      )
+    ));
+
+    for (const item of activeQueueItems) {
+      try {
+        await cancelCodexQueueItem(item.id);
+      } catch {
+        // Best effort cancellation. The cleaned draft becomes the active session either way.
+      }
+    }
+
+    const sourceProviderLabel = getProviderDisplayLabel(profile.provider);
+    const baseDraftContext = sourceSession.forkDraftContext || null;
+    const promptPrefix = buildDeletedTurnPromptPrefix(sourceSession, sourceProviderLabel, filteredTimeline);
+    const latestUserEntryWithText = [...filteredTimeline]
+      .reverse()
+      .find((entry) => entry.entryType === 'message' && entry.role === 'user' && entry.text?.trim());
+    const promptPreview = clipTransferText(
+      latestUserEntryWithText?.text || sourceSession.title,
+      140
+    );
+    const draft = await createForkDraftSession({
+      sessionId: sourceSession.isDraft ? sourceSession.id : undefined,
+      profileId,
+      sourceSessionId: baseDraftContext?.sourceSessionId || sourceSession.id,
+      sourceTitle: baseDraftContext?.sourceTitle || sourceSession.title,
+      sourceCwd: baseDraftContext?.sourceCwd || sourceSession.cwd || profile.workspaceCwd,
+      forkEntryId: deletedUserEntryId,
+      transferSourceProvider: baseDraftContext?.transferSourceProvider || null,
+      transferTargetProvider: baseDraftContext?.transferTargetProvider || null,
+      promptPreview,
+      promptPrefix,
+      timeline: filteredTimeline,
+    });
+
+    const draftSidebarMetadata = await copySessionSidebarMetadataToForkSession(
+      profileId,
+      profileId,
+      sourceSession,
+      draft.sessionId
+    );
+
+    if (draft.sessionId !== sourceSession.id) {
+      await setSessionHidden(profileId, sourceSession.id, true);
+    }
+
+    await setSessionHidden(profileId, draft.sessionId, false);
+
+    if (draft.sessionId !== sourceSession.id) {
+      const sourceInstruction = await getSessionInstruction(profileId, sourceSession.id);
+      if (sourceInstruction?.trim()) {
+        await setSessionInstruction(profileId, draft.sessionId, sourceInstruction);
+      }
+    }
+
+    const cleanedSession = await getAgentSessionDetail(draft.sessionId, profileId, {
+      full: true,
+    });
+
+    res.status(201).json({
+      sessionId: draft.sessionId,
+      deletedUserEntryId,
+      deletedAssistantEntryId,
+      cancelledQueueItemIds: activeQueueItems.map((item) => item.id),
+      session: {
+        ...cleanedSession,
+        title: draftSidebarMetadata.title,
+        hidden: false,
+        topic: draftSidebarMetadata.topic,
+      },
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete the selected turn' });
   }
 });
 
