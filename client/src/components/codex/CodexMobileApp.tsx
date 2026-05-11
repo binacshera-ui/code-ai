@@ -10309,15 +10309,11 @@ export function CodexMobileApp() {
       <RailHeistDialog
         isOpen={isRailHeistOpen}
         onClose={() => setIsRailHeistOpen(false)}
-        sessionActiveCount={currentSessionActiveQueueCount}
-        sessionCompletionSignal={gameSessionCompletionSignal}
       />
 
       <IronDesertDialog
         isOpen={isIronDesertOpen}
         onClose={() => setIsIronDesertOpen(false)}
-        sessionActiveCount={currentSessionActiveQueueCount}
-        sessionCompletionSignal={gameSessionCompletionSignal}
       />
 
       <VaultRunnerDialog

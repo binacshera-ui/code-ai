@@ -700,13 +700,9 @@ function stepRailGame(
 export function RailHeistDialog({
   isOpen,
   onClose,
-  sessionActiveCount,
-  sessionCompletionSignal,
 }: {
   isOpen: boolean;
   onClose: () => void;
-  sessionActiveCount: number;
-  sessionCompletionSignal: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -748,7 +744,7 @@ export function RailHeistDialog({
     setIsGameOver(false);
     setIsCampaignComplete(false);
     setNotice(null);
-    setTopStatus(sessionActiveCount > 0 ? 'השרת חי ברקע, המסילות בידיים שלך' : 'Rail Heist');
+    setTopStatus('Rail Heist');
     syncHud();
   });
 
@@ -888,20 +884,8 @@ export function RailHeistDialog({
     if (!isOpen) {
       return;
     }
-    if (sessionActiveCount > 0) {
-      setTopStatus('השרת עובד ברקע, המסילה נשארת חיה');
-    } else {
-      setTopStatus(stage.title);
-    }
-  }, [isOpen, sessionActiveCount, stage.title]);
-
-  useEffect(() => {
-    if (!isOpen || sessionCompletionSignal <= 0) {
-      return;
-    }
-    setNotice('הסשן הסתיים ברקע. המסילות נשארות אצלך.');
-    setTopStatus('סשן הושלם, רשת השלל ממשיכה');
-  }, [isOpen, sessionCompletionSignal]);
+    setTopStatus(stage.title);
+  }, [isOpen, stage.title]);
 
   if (!isOpen) {
     return null;

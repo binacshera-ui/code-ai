@@ -420,13 +420,9 @@ function drawBurst(context: CanvasRenderingContext2D, burst: DesertBurst) {
 export function IronDesertDialog({
   isOpen,
   onClose,
-  sessionActiveCount,
-  sessionCompletionSignal,
 }: {
   isOpen: boolean;
   onClose: () => void;
-  sessionActiveCount: number;
-  sessionCompletionSignal: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -468,7 +464,7 @@ export function IronDesertDialog({
     setIsGameOver(false);
     setIsCampaignComplete(false);
     setNotice(null);
-    setTopStatus(sessionActiveCount > 0 ? 'שכבת הטנקים חיה בזמן שהשרת עובד' : 'Iron Desert');
+    setTopStatus('Iron Desert');
     syncHud();
   });
 
@@ -698,11 +694,11 @@ export function IronDesertDialog({
   }, [animate, isOpen, resetCampaign]);
 
   useEffect(() => {
-    if (!isOpen || sessionCompletionSignal <= 0) {
+    if (!isOpen) {
       return;
     }
-    setNotice('הסשן הסתיים ברקע. הזירה ממשיכה לרוץ חלק.');
-  }, [isOpen, sessionCompletionSignal]);
+    setTopStatus(stage.title);
+  }, [isOpen, stage.title]);
 
   if (!isOpen) {
     return null;
