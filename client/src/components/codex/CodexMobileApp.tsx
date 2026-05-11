@@ -57,6 +57,7 @@ import {
   SquarePen,
   Tag,
   Sun,
+  TrainFront,
   User,
   Trash2,
   Wrench,
@@ -72,6 +73,7 @@ import {
   type SudokuPuzzleDifficulty,
 } from './sudokuCatalog';
 import { BiomeSnakeDialog } from './BiomeSnakeDialog';
+import { RailHeistDialog } from './RailHeistDialog';
 import { TempleGemQuestDialog } from './TempleGemQuestDialog';
 import {
   installCodexGlobalCrashHandlers,
@@ -5235,7 +5237,7 @@ function GamePickerDialog({
 }: {
   isOpen: boolean;
   onClose: () => void;
-  onStart: (game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake') => void;
+  onStart: (game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake' | 'rail-heist') => void;
 }) {
   if (!isOpen) {
     return null;
@@ -5277,6 +5279,31 @@ function GamePickerDialog({
         </div>
 
         <div className="grid gap-3 p-4">
+          <button
+            type="button"
+            onClick={() => onStart('rail-heist')}
+            className="group relative overflow-hidden rounded-[1.75rem] border border-amber-100 bg-gradient-to-br from-amber-50 via-rose-50 to-sky-50 px-4 py-4 text-right shadow-[0_24px_48px_-34px_rgba(249,115,22,0.4)] transition hover:-translate-y-0.5 hover:border-amber-200"
+          >
+            <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-r from-amber-200/35 via-rose-200/35 to-sky-200/35 blur-2xl" />
+            <div className="relative flex items-center gap-4">
+              <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[1.35rem] bg-white/90 text-amber-600 shadow-sm backdrop-blur">
+                <TrainFront className="h-7 w-7" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-slate-800">Rail Heist</div>
+                  <span className="rounded-full bg-white/85 px-2.5 py-1 text-[10px] font-semibold text-amber-600 shadow-sm">
+                    פרימיום
+                  </span>
+                </div>
+                <div className="mt-1 text-xs leading-5 text-slate-500">
+                  משחק רכבות בזמן אמת עם סוויצ׳ים, מסילות נפתלות, יעדים כפולים וקצב שמטפס משלב לשלב.
+                </div>
+              </div>
+              <Play className="h-4 w-4 shrink-0 text-amber-400 transition group-hover:text-amber-600" />
+            </div>
+          </button>
+
           <button
             type="button"
             onClick={() => onStart('biome-snake')}
@@ -6330,6 +6357,7 @@ export function CodexMobileApp() {
   const [isSudokuOpen, setIsSudokuOpen] = useState(false);
   const [isTempleGemQuestOpen, setIsTempleGemQuestOpen] = useState(false);
   const [isBiomeSnakeOpen, setIsBiomeSnakeOpen] = useState(false);
+  const [isRailHeistOpen, setIsRailHeistOpen] = useState(false);
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
@@ -7091,13 +7119,14 @@ export function CodexMobileApp() {
     setIsGamePickerOpen(true);
   }
 
-  function startMiniGame(game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake') {
+  function startMiniGame(game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake' | 'rail-heist') {
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
     setIsSudokuOpen(false);
     setIsTempleGemQuestOpen(false);
     setIsBiomeSnakeOpen(false);
+    setIsRailHeistOpen(false);
     if (game === 'sunset-sprint') {
       setIsRunnerGameOpen(true);
       return;
@@ -7112,6 +7141,10 @@ export function CodexMobileApp() {
     }
     if (game === 'biome-snake') {
       setIsBiomeSnakeOpen(true);
+      return;
+    }
+    if (game === 'rail-heist') {
+      setIsRailHeistOpen(true);
       return;
     }
 
@@ -10205,6 +10238,13 @@ export function CodexMobileApp() {
       <BiomeSnakeDialog
         isOpen={isBiomeSnakeOpen}
         onClose={() => setIsBiomeSnakeOpen(false)}
+        sessionActiveCount={currentSessionActiveQueueCount}
+        sessionCompletionSignal={gameSessionCompletionSignal}
+      />
+
+      <RailHeistDialog
+        isOpen={isRailHeistOpen}
+        onClose={() => setIsRailHeistOpen(false)}
         sessionActiveCount={currentSessionActiveQueueCount}
         sessionCompletionSignal={gameSessionCompletionSignal}
       />
