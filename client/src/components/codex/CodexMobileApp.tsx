@@ -6364,6 +6364,10 @@ export function CodexMobileApp() {
   const [isSavingSessionTitle, setIsSavingSessionTitle] = useState(false);
   const [transferringEntryId, setTransferringEntryId] = useState<string | null>(null);
   const [deletingEntryId, setDeletingEntryId] = useState<string | null>(null);
+  const [pendingDeleteTurn, setPendingDeleteTurn] = useState<{
+    entryId: string;
+    shouldStopRunningTurn: boolean;
+  } | null>(null);
   const [newTopicName, setNewTopicName] = useState('');
   const [newTopicIcon, setNewTopicIcon] = useState(TOPIC_ICON_PRESETS[0]);
   const [newTopicColorKey, setNewTopicColorKey] = useState<keyof typeof TOPIC_COLOR_PRESETS>('sky');
@@ -7832,7 +7836,7 @@ export function CodexMobileApp() {
     }
   }
 
-  async function deleteTurnFromTimelineEntry(entryId: string) {
+  function deleteTurnFromTimelineEntry(entryId: string) {
     const activeProfileId = currentProfile?.id || selectedSession?.profileId || profileId || null;
     const activeSessionKey = selectedSessionId || (isDraftConversation ? draftConversationKey : null);
 
@@ -7841,19 +7845,29 @@ export function CodexMobileApp() {
       return;
     }
 
-    const shouldStopRunningTurn = currentSessionActiveQueueCount > 0;
-    const confirmed = window.confirm(
-      shouldStopRunningTurn
-        ? 'המחיקה תעצור את הסבב הפעיל, תמחק את הודעת המשתמש ואת תשובת ה-AI של אותו סבב, ותמשיך משיחה נקייה. להמשיך?'
-        : 'המחיקה תסיר את הודעת המשתמש ואת תשובת ה-AI של אותו סבב מהמשך השיחה. להמשיך?'
-    );
+    setPendingDeleteTurn({
+      entryId,
+      shouldStopRunningTurn: currentSessionActiveQueueCount > 0,
+    });
+  }
 
-    if (!confirmed) {
+  async function confirmDeletePendingTurn() {
+    if (!pendingDeleteTurn) {
+      return;
+    }
+
+    const activeProfileId = currentProfile?.id || selectedSession?.profileId || profileId || null;
+    const activeSessionKey = selectedSessionId || (isDraftConversation ? draftConversationKey : null);
+
+    if (!activeProfileId || !activeSessionKey) {
+      setPendingDeleteTurn(null);
+      setError('לא נמצאה שיחה פעילה למחיקה.');
       return;
     }
 
     try {
-      setDeletingEntryId(entryId);
+      setDeletingEntryId(pendingDeleteTurn.entryId);
+      setPendingDeleteTurn(null);
       setError(null);
       const data = await fetchJson<CodexDeleteTurnResponse>(
         `/api/codex/sessions/${encodeURIComponent(activeSessionKey)}/delete-turn`,
@@ -7864,7 +7878,7 @@ export function CodexMobileApp() {
           },
           body: JSON.stringify({
             profileId: activeProfileId,
-            entryId,
+            entryId: pendingDeleteTurn.entryId,
           }),
         }
       );
@@ -7917,7 +7931,7 @@ export function CodexMobileApp() {
       recordCodexBreadcrumb('session-turn-deleted', {
         sessionId: activeSessionKey,
         nextSessionId: data.sessionId,
-        entryId,
+        entryId: pendingDeleteTurn.entryId,
         deletedUserEntryId: data.deletedUserEntryId,
         deletedAssistantEntryId: data.deletedAssistantEntryId,
         cancelledQueueItemIds: data.cancelledQueueItemIds,
@@ -10264,6 +10278,52 @@ export function CodexMobileApp() {
           onChangeIcon={setNewTopicIcon}
           onChangeColorKey={(value) => setNewTopicColorKey(value as keyof typeof TOPIC_COLOR_PRESETS)}
         />
+      )}
+
+      {pendingDeleteTurn && (
+        <div className="fixed inset-0 z-[61] flex items-end justify-center bg-slate-950/18 p-4 backdrop-blur-sm sm:items-center">
+          <button
+            type="button"
+            className="absolute inset-0 cursor-default"
+            onClick={() => setPendingDeleteTurn(null)}
+            aria-label="Close delete confirmation dialog"
+          />
+          <div className="relative z-10 w-full max-w-[20rem] overflow-hidden rounded-[1.6rem] border border-slate-100/90 bg-white px-4 py-4 text-right shadow-[0_26px_70px_-34px_rgba(15,23,42,0.28)]">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-rose-50 text-rose-500">
+                <Trash2 className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-slate-800">
+                  למחוק את הסבב הזה?
+                </div>
+                <div className="mt-1 text-[12px] leading-6 text-slate-500">
+                  {pendingDeleteTurn.shouldStopRunningTurn
+                    ? 'הסבב הפעיל ייעצר, והודעת המשתמש יחד עם תשובת ה-AI יוסרו מהמשך השיחה.'
+                    : 'הודעת המשתמש יחד עם תשובת ה-AI יוסרו מהמשך השיחה.'}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteTurn(null)}
+                className="h-11 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
+              >
+                בטל
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeletePendingTurn()}
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-rose-100 bg-rose-50 text-rose-600 transition hover:border-rose-200 hover:bg-rose-100"
+                aria-label="אשר מחיקה"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {isSessionChangeDialogOpen && (
