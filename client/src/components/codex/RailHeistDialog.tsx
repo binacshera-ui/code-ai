@@ -291,6 +291,10 @@ function getTrainPosition(train: RailTrain, nodeMap: Record<string, RailNode>) {
   return { x, y, angle: Math.atan2(toNode.y - fromNode.y, toNode.x - fromNode.x) };
 }
 
+function areTrainsOnSameSegment(first: RailTrain, second: RailTrain) {
+  return first.fromId === second.fromId && first.toId === second.toId;
+}
+
 function spawnRailTrain(state: RailGameState, stage: RailStageDefinition, nodeMap: Record<string, RailNode>) {
   const plan = stage.spawnPattern[state.spawnCursor % stage.spawnPattern.length];
   const spawnNode = nodeMap[plan.spawnId];
@@ -656,6 +660,17 @@ function stepRailGame(
       if (removal.has(first.id) || removal.has(second.id)) {
         continue;
       }
+
+      if (areTrainsOnSameSegment(first, second)) {
+        const leading = first.progress >= second.progress ? first : second;
+        const trailing = leading === first ? second : first;
+        const gap = leading.progress - trailing.progress;
+        if (gap < 0.15) {
+          trailing.progress = Math.max(0, leading.progress - 0.15);
+        }
+        continue;
+      }
+
       const a = getTrainPosition(first, nodeMap);
       const b = getTrainPosition(second, nodeMap);
       if (distance(a.x, a.y, b.x, b.y) < 16) {
