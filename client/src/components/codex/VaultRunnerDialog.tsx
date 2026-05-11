@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
   ChevronLeft,
@@ -457,7 +457,7 @@ function drawVaultState(context: CanvasRenderingContext2D, state: VaultState, le
   context.fill();
 }
 
-export function VaultRunnerDialog({
+export const VaultRunnerDialog = memo(function VaultRunnerDialog({
   isOpen,
   onClose,
 }: {
@@ -731,4 +731,4 @@ export function VaultRunnerDialog({
       </div>
     </div>
   );
-}
+});

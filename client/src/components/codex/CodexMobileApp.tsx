@@ -7173,6 +7173,18 @@ export function CodexMobileApp() {
     setIsGamePickerOpen(true);
   }
 
+  const closeRailHeistDialog = useEffectEvent(() => {
+    setIsRailHeistOpen(false);
+  });
+
+  const closeIronDesertDialog = useEffectEvent(() => {
+    setIsIronDesertOpen(false);
+  });
+
+  const closeVaultRunnerDialog = useEffectEvent(() => {
+    setIsVaultRunnerOpen(false);
+  });
+
   function startMiniGame(game: 'sky-ace' | 'sunset-sprint' | 'sudoku-lab' | 'temple-gem-quest' | 'biome-snake' | 'rail-heist' | 'iron-desert' | 'vault-runner') {
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
@@ -10308,17 +10320,17 @@ export function CodexMobileApp() {
 
       <RailHeistDialog
         isOpen={isRailHeistOpen}
-        onClose={() => setIsRailHeistOpen(false)}
+        onClose={closeRailHeistDialog}
       />
 
       <IronDesertDialog
         isOpen={isIronDesertOpen}
-        onClose={() => setIsIronDesertOpen(false)}
+        onClose={closeIronDesertDialog}
       />
 
       <VaultRunnerDialog
         isOpen={isVaultRunnerOpen}
-        onClose={() => setIsVaultRunnerOpen(false)}
+        onClose={closeVaultRunnerDialog}
       />
 
       {isFileTreeOpen && (

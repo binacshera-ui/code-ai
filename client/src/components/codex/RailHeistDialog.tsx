@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useMemo, useRef, useState, type PointerEvent } from 'react';
+import { memo, useEffect, useEffectEvent, useMemo, useRef, useState, type PointerEvent } from 'react';
 import {
   Pause,
   Play,
@@ -697,7 +697,7 @@ function stepRailGame(
   };
 }
 
-export function RailHeistDialog({
+export const RailHeistDialog = memo(function RailHeistDialog({
   isOpen,
   onClose,
 }: {
@@ -859,7 +859,10 @@ export function RailHeistDialog({
         return;
       }
       if (event.key >= '1' && event.key <= '9') {
-        const junction = junctions[Number(event.key) - 1];
+        const currentJunctions = RAIL_STAGES[stateRef.current.stageIndex]
+          .nodes
+          .filter((node): node is RailJunctionNode => node.type === 'junction');
+        const junction = currentJunctions[Number(event.key) - 1];
         if (junction) {
           event.preventDefault();
           toggleJunction(junction.id);
@@ -878,7 +881,7 @@ export function RailHeistDialog({
       }
       lastFrameRef.current = null;
     };
-  }, [animate, isOpen, junctions, resetCampaign, toggleJunction]);
+  }, [animate, isOpen, resetCampaign, toggleJunction]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -1063,4 +1066,4 @@ export function RailHeistDialog({
       </div>
     </div>
   );
-}
+});
