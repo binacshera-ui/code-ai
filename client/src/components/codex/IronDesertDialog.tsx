@@ -711,7 +711,7 @@ export function IronDesertDialog({
       frameRef.current = null;
       controlsRef.current = { up: false, down: false, left: false, right: false };
     };
-  }, [animate, drawFrame, isOpen, resetCampaign]);
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) {

@@ -598,7 +598,7 @@ export function VaultRunnerDialog({
         animationRef.current = null;
       }
     };
-  }, [animate, isOpen, performMove, redraw, resetCampaign]);
+  }, [isOpen]);
 
   if (!isOpen) {
     return null;

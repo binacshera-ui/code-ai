@@ -901,7 +901,7 @@ export function RailHeistDialog({
       }
       lastFrameRef.current = null;
     };
-  }, [animate, drawFrame, isOpen, resetCampaign, toggleJunction]);
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) {
