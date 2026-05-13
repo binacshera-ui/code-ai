@@ -854,7 +854,8 @@ router.post('/uploads', requireCodexAccess, upload.array('files', MAX_UPLOAD_FIL
 router.get('/profiles', requireCodexAccess, async (_req, res) => {
   try {
     const mode = readRequestedMode((_req as any).query?.mode);
-    const profiles = filterProfilesByMode(await getAvailableProfiles(), mode || 'standard');
+    const allProfiles = await getAvailableProfiles();
+    const profiles = mode ? filterProfilesByMode(allProfiles, mode) : allProfiles;
     res.json({ profiles });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load Codex profiles' });
