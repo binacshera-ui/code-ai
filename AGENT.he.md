@@ -12,6 +12,8 @@
 - Claude Code
 - Gemini CLI
 
+בנוסף קיים בה גם `Support workspace` מבודד לפעולות תמיכה דמויות-אנוש.
+
 הקובץ הזה מיועד למצבים של התקנה, עדכון, דיבוג, חקירת תקלות, שחזור נתונים, או מסירת המערכת לסוכן/מפעיל אחר.
 
 ## מה לקרוא קודם
@@ -169,6 +171,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 `
 - `logs/client-crashes.jsonl`
 - `logs/server-crashes.jsonl`
 - `logs/file-access.jsonl`
+- `support/support-session-state.json`
+- `support/homes/<provider>/<source-profile>/...`
+- `support/sandbox/<provider>/<source-profile>/...`
 
 ## איפה באמת נמצאות השיחות
 
@@ -192,6 +197,28 @@ Gemini:
 
 - `projects.json`
 - `tmp/<project-id>/chats/*.jsonl`
+
+## איך מצב התמיכה בנוי
+
+מצב התמיכה מייצר פרופילים נוספים בשם:
+
+- `support-<standard-profile-id>`
+
+הפרופילים האלה:
+
+- משתמשים ב־provider homes מבודדים תחת `.code-ai/support/homes/...`
+- שומרים מטא־דאטה של פניות תמיכה ב־`.code-ai/support/support-session-state.json`
+- פותחים נקודות קצה ייעודיות:
+  - `POST /api/codex/support/ask`
+  - `POST /api/codex/support/webhook`
+- עוטפים כל פנייה ב־support envelope קבוע לפני ההרצה
+
+הקבצים הראשיים של המנגנון:
+
+- `server/supportAgentService.ts`
+- `server/agentService.ts`
+- `server/codexRoutes.ts`
+- `client/src/components/codex/CodexMobileApp.tsx`
 
 ## מפת תקלות מהירה
 

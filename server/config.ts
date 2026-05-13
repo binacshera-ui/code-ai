@@ -2,13 +2,17 @@ import { existsSync } from 'fs';
 import path from 'path';
 
 export type AppProvider = 'codex' | 'claude' | 'gemini';
+export type AppMode = 'standard' | 'support';
 
 export interface CodexProfileConfig {
   id: string;
   label: string;
   provider: AppProvider;
+  mode?: AppMode;
   codexHome: string;
   workspaceCwd: string;
+  sourceProfileId?: string;
+  sandboxCwd?: string;
   defaultProfile?: boolean;
 }
 
@@ -57,6 +61,7 @@ function listAncestorPaths(targetPath: string): string[] {
 
 function normalizeProfile(profile: Partial<CodexProfileConfig>): CodexProfileConfig | null {
   const provider = profile.provider || 'codex';
+  const mode = profile.mode || 'standard';
 
   if (
     !profile.id
@@ -71,8 +76,15 @@ function normalizeProfile(profile: Partial<CodexProfileConfig>): CodexProfileCon
     id: profile.id,
     label: profile.label,
     provider,
+    mode,
     codexHome: path.resolve(profile.codexHome),
     workspaceCwd: path.resolve(profile.workspaceCwd),
+    sourceProfileId: typeof profile.sourceProfileId === 'string' && profile.sourceProfileId.trim()
+      ? profile.sourceProfileId.trim()
+      : undefined,
+    sandboxCwd: typeof profile.sandboxCwd === 'string' && profile.sandboxCwd.trim()
+      ? path.resolve(profile.sandboxCwd)
+      : undefined,
     defaultProfile: Boolean(profile.defaultProfile),
   };
 }
@@ -106,6 +118,7 @@ function getDefaultProfiles(appRoot: string): CodexProfileConfig[] {
       id: 'developer',
       label: 'Developer',
       provider: 'codex',
+      mode: 'standard',
       codexHome: '/home/developer/.codex',
       workspaceCwd: workspaceRoot,
       defaultProfile: true,
@@ -114,6 +127,7 @@ function getDefaultProfiles(appRoot: string): CodexProfileConfig[] {
       id: 'developer2',
       label: 'Developer 2',
       provider: 'codex',
+      mode: 'standard',
       codexHome: '/home/developer2/.codex',
       workspaceCwd: workspaceRoot,
     },
@@ -121,6 +135,7 @@ function getDefaultProfiles(appRoot: string): CodexProfileConfig[] {
       id: 'claude-developer',
       label: 'Developer',
       provider: 'claude',
+      mode: 'standard',
       codexHome: '/home/developer/.claude',
       workspaceCwd: workspaceRoot,
     },
@@ -128,6 +143,7 @@ function getDefaultProfiles(appRoot: string): CodexProfileConfig[] {
       id: 'claude-developer2',
       label: 'Developer 2',
       provider: 'claude',
+      mode: 'standard',
       codexHome: '/home/developer2/.claude',
       workspaceCwd: workspaceRoot,
     },
@@ -135,6 +151,7 @@ function getDefaultProfiles(appRoot: string): CodexProfileConfig[] {
       id: 'gemini-developer',
       label: 'Developer',
       provider: 'gemini',
+      mode: 'standard',
       codexHome: '/home/developer/.gemini',
       workspaceCwd: workspaceRoot,
     },
@@ -142,16 +159,74 @@ function getDefaultProfiles(appRoot: string): CodexProfileConfig[] {
       id: 'gemini-developer2',
       label: 'Developer 2',
       provider: 'gemini',
+      mode: 'standard',
       codexHome: '/home/developer2/.gemini',
       workspaceCwd: workspaceRoot,
     },
   ];
 }
 
+function buildDerivedSupportProfiles(baseProfiles: CodexProfileConfig[], appRoot: string): CodexProfileConfig[] {
+  const storageRoot = path.resolve(process.env.CODEX_STORAGE_ROOT || path.join(appRoot, '.code-ai'));
+  const supportRoot = path.join(storageRoot, 'support');
+  const derivedProfiles: CodexProfileConfig[] = [];
+
+  for (const profile of baseProfiles) {
+    if (profile.mode === 'support') {
+      continue;
+    }
+
+    const supportProfileId = `support-${profile.id}`;
+    if (baseProfiles.some((candidate) => candidate.id === supportProfileId)) {
+      continue;
+    }
+
+    const supportHomeBase = path.join(supportRoot, 'homes', profile.provider, profile.id);
+    const supportProviderHome = profile.provider === 'claude'
+      ? path.join(supportHomeBase, '.claude')
+      : profile.provider === 'gemini'
+        ? path.join(supportHomeBase, '.gemini')
+        : supportHomeBase;
+
+    derivedProfiles.push({
+      id: supportProfileId,
+      label: profile.label,
+      provider: profile.provider,
+      mode: 'support',
+      sourceProfileId: profile.id,
+      codexHome: supportProviderHome,
+      workspaceCwd: profile.workspaceCwd,
+      sandboxCwd: path.join(supportRoot, 'sandbox', profile.provider, profile.id),
+      defaultProfile: Boolean(profile.defaultProfile),
+    });
+  }
+
+  return derivedProfiles;
+}
+
 function loadProfiles(appRoot: string): CodexProfileConfig[] {
   const raw = process.env.CODEX_PROFILES_JSON?.trim();
+  const finalizeProfiles = (baseProfiles: CodexProfileConfig[]): CodexProfileConfig[] => {
+    const profiles = [
+      ...baseProfiles,
+      ...buildDerivedSupportProfiles(baseProfiles, appRoot),
+    ];
+
+    const standardProfiles = profiles.filter((profile) => profile.mode !== 'support');
+    if (!standardProfiles.some((profile) => profile.defaultProfile) && standardProfiles[0]) {
+      standardProfiles[0].defaultProfile = true;
+    }
+
+    const supportProfiles = profiles.filter((profile) => profile.mode === 'support');
+    if (!supportProfiles.some((profile) => profile.defaultProfile) && supportProfiles[0]) {
+      supportProfiles[0].defaultProfile = true;
+    }
+
+    return profiles;
+  };
+
   if (!raw) {
-    return getDefaultProfiles(appRoot);
+    return finalizeProfiles(getDefaultProfiles(appRoot));
   }
 
   try {
@@ -168,11 +243,7 @@ function loadProfiles(appRoot: string): CodexProfileConfig[] {
       throw new Error('CODEX_PROFILES_JSON produced no valid profiles');
     }
 
-    if (!profiles.some((profile) => profile.defaultProfile)) {
-      profiles[0].defaultProfile = true;
-    }
-
-    return profiles;
+    return finalizeProfiles(profiles);
   } catch (error: any) {
     throw new Error(`Failed to parse CODEX_PROFILES_JSON: ${error.message}`);
   }

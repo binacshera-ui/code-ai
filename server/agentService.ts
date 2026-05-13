@@ -51,6 +51,11 @@ import {
   readSessionChangeRecord,
   type SessionChangeRecord,
 } from './sessionChangeTracker.js';
+import {
+  isSupportProfile,
+  prepareAllSupportProfileHomes,
+  prepareSupportProfileHome,
+} from './supportAgentService.js';
 
 export type AgentProfile = CodexProfile;
 
@@ -125,6 +130,19 @@ export function getProviderForProfile(profileId?: string): AppProvider {
 }
 
 function buildProviderPermissionSnapshot(profile: AgentProfile): CodexPermissionSnapshot {
+  if (isSupportProfile(profile)) {
+    return {
+      accessLevel: 'balanced',
+      accessLabel: 'מצב תמיכה',
+      modeLabel: 'support-sandbox',
+      summary: 'מצב תמיכה מבודד: ההרצה נשמרת ב-home פנימי של code-ai, עם ארגז חול ייעודי לכתיבת קבצים.',
+      approvalLabel: 'הרצה: support envelope קבוע',
+      sandboxLabel: profile.sandboxCwd ? `Sandbox: ${profile.sandboxCwd}` : 'Sandbox: support workspace',
+      toolsLabel: 'Files: קריאה חופשית, כתיבה לפי מדיניות ארגז חול',
+      trustLabel: profile.sourceProfileId ? `Source profile: ${profile.sourceProfileId}` : 'Source profile: isolated',
+    };
+  }
+
   if (profile.provider === 'claude') {
     return {
       accessLevel: 'full',
@@ -164,13 +182,16 @@ function buildProviderPermissionSnapshot(profile: AgentProfile): CodexPermission
 }
 
 export async function getAvailableProfiles(): Promise<AgentProfile[]> {
+  const failedSupportProfiles = await prepareAllSupportProfileHomes();
   const [codexProfiles, claudeProfiles, geminiProfiles] = await Promise.all([
     getAvailableCodexProfiles(),
     getAvailableClaudeProfiles(),
     getAvailableGeminiProfiles(),
   ]);
 
-  return [...codexProfiles, ...claudeProfiles, ...geminiProfiles];
+  return [...codexProfiles, ...claudeProfiles, ...geminiProfiles].filter((profile) => (
+    !failedSupportProfiles.has(profile.id)
+  ));
 }
 
 export async function listAgentSessions(
@@ -179,6 +200,7 @@ export async function listAgentSessions(
   limit?: number
 ): Promise<CodexSessionSummary[]> {
   const profile = resolveProfile(profileId);
+  await prepareSupportProfileHome(profile);
   if (profile.provider === 'claude') {
     return listClaudeSessions(profile.id, query, limit);
   }
@@ -199,6 +221,7 @@ export async function getAgentSessionDetail(
   }
 ): Promise<CodexSessionDetail> {
   const profile = resolveProfile(profileId);
+  await prepareSupportProfileHome(profile);
   if (profile.provider === 'claude') {
     return getClaudeSessionDetail(sessionId, profile.id, options);
   }
@@ -211,6 +234,7 @@ export async function getAgentSessionDetail(
 
 export async function getAgentModelCatalog(profileId?: string): Promise<CodexModelCatalog> {
   const profile = resolveProfile(profileId);
+  await prepareSupportProfileHome(profile);
   if (profile.provider === 'claude') {
     const catalog = await getClaudeModelCatalog(profile.id);
     return {
@@ -238,6 +262,7 @@ export async function getAgentRateLimitSnapshot(
   sessionId?: string
 ): Promise<CodexRateLimitSnapshot | null> {
   const profile = resolveProfile(profileId);
+  await prepareSupportProfileHome(profile);
   if (profile.provider === 'claude') {
     return getClaudeRateLimitSnapshot(profile.id, sessionId);
   }
@@ -261,6 +286,7 @@ export async function runAgentPrompt(
   } = {}
 ): Promise<AgentRunResult> {
   const profile = resolveProfile(profileId);
+  await prepareSupportProfileHome(profile);
   const resolvedCwd = options.cwd || (
     sessionId
       ? (await getAgentSessionDetail(sessionId, profile.id, { tail: 1 }).catch(() => null))?.cwd || profile.workspaceCwd
@@ -309,6 +335,7 @@ export async function createAgentForkSession(
   forkedAt: string;
 }> {
   const profile = resolveProfile(profileId);
+  await prepareSupportProfileHome(profile);
   if (profile.provider === 'claude') {
     return createClaudeForkSession(sourceSessionId, forkEntryId, profile.id);
   }

@@ -16,6 +16,25 @@
 
 זה כבר לא "ממשק לקודקס". זו שכבת שליטה אחת שמחברת כמה ספקים, תורים, תיזמון, uploads, העברות בין ספקים, והיסטוריית שיחות לפי ה־home האמיתי של כל provider.
 
+## מצב תמיכה פנימי
+
+ב־`code-ai` קיים גם `Support workspace` מובנה.
+
+הוא מיועד לזרימות תמיכה דמויות-אנוש:
+
+- מצב UI נפרד ממצב הסוכנים הרגיל
+- homes מבודדים לספקים תחת `CODEX_STORAGE_ROOT/support/homes/...`
+- ארגז חול ייעודי לכתיבה לכל ספק/פרופיל תחת `CODEX_STORAGE_ROOT/support/sandbox/...`
+- transcript metadata של התמיכה נשמר ב־`CODEX_STORAGE_ROOT/support/support-session-state.json`
+- נקודות קצה API/Webhook ייעודיות שמכוונות לפרופילי התמיכה של Codex / Claude / Gemini
+
+קבצי runtime רלוונטיים:
+
+- `server/supportAgentService.ts`
+- `POST /api/codex/support/ask`
+- `POST /api/codex/support/webhook`
+- כפתור `Support workspace` בסיידבר של המובייל
+
 ## מה חייב להיות מותקן
 
 בסיס:
@@ -149,6 +168,7 @@ install.cmd --app-name code-ai --port 4000 --profiles-json "[{\"id\":\"codex-mai
 - `CODEX_BIN`
 - `CLAUDE_BIN`
 - `GEMINI_BIN`
+- `CODEX_SUPPORT_WEBHOOK_TOKEN`
 
 דוגמאות:
 
@@ -220,6 +240,12 @@ install.cmd --app-name code-ai --port 4000 --profiles-json "[{\"id\":\"codex-mai
 - `logs/client-crashes.jsonl`
 - `logs/server-crashes.jsonl`
 - `logs/file-access.jsonl`
+
+קבצים ותיקיות של מצב התמיכה:
+
+- `support/support-session-state.json`
+- `support/homes/<provider>/<source-profile>/...`
+- `support/sandbox/<provider>/<source-profile>/...`
 
 ## איפה השיחות האמיתיות נשמרות
 

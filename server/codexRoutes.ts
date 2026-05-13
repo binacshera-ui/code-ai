@@ -3,10 +3,11 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
-import type { AppProvider } from './config.js';
+import type { AppMode, AppProvider } from './config.js';
 import {
   CodexExecutionConfig,
   CodexSessionDetail,
+  CodexSessionSummary,
   CodexUploadedAttachment,
   CODEX_UPLOAD_ROOT,
 } from './codexService.js';
@@ -45,6 +46,19 @@ import {
 import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
 import { getSessionInstruction, setSessionInstruction } from './codexSessionInstructions.js';
 import { createForkDraftSession, getForkDraftSession, recordForkSessionMetadata } from './codexForkSessions.js';
+import {
+  buildSupportPromptEnvelope,
+  decorateSupportSessionDetail,
+  decorateSupportSessionSummary,
+  filterProfilesByMode,
+  isSupportProfile,
+  normalizeSupportSessionForOperations,
+  recordSupportTurnRequest,
+  rebindSupportSessionRecord,
+  resolveDefaultProfileForMode,
+  resolveSupportProfileSelection,
+  type SupportPromptEnvelope,
+} from './supportAgentService.js';
 
 const router = Router();
 const MAX_UPLOAD_SIZE = 15 * 1024 * 1024;
@@ -54,6 +68,7 @@ const CODEX_CLIENT_LOG_ROOT = path.dirname(CLIENT_CRASH_LOG);
 const CODEX_CLIENT_LOG_FILE = CLIENT_CRASH_LOG;
 const DEVICE_UNLOCK_COOKIE = 'code_ai_device_unlock';
 const FORUM_SESSION_COOKIE = 'forum.session';
+const SUPPORT_WEBHOOK_TOKEN = process.env.CODEX_SUPPORT_WEBHOOK_TOKEN?.trim() || '';
 
 function sanitizeFileName(fileName: string): string {
   const extension = path.extname(fileName);
@@ -70,6 +85,26 @@ function sanitizeFileName(fileName: string): string {
 function isPathInside(rootPath: string, targetPath: string): boolean {
   const relative = path.relative(rootPath, targetPath);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function requireSupportWebhookAccess(req: Request, res: Response, next: NextFunction) {
+  if (SUPPORT_WEBHOOK_TOKEN) {
+    const incoming = typeof req.headers['x-code-ai-support-token'] === 'string'
+      ? req.headers['x-code-ai-support-token']
+      : Array.isArray(req.headers['x-code-ai-support-token'])
+        ? req.headers['x-code-ai-support-token'][0]
+        : '';
+
+    if (incoming === SUPPORT_WEBHOOK_TOKEN) {
+      next();
+      return;
+    }
+
+    res.status(401).json({ error: 'Support webhook token is invalid' });
+    return;
+  }
+
+  requireCodexAccess(req, res, next);
 }
 
 async function appendClientCrashLog(entry: Record<string, unknown>) {
@@ -141,6 +176,82 @@ function readExecutionConfig(body: any): CodexExecutionConfig {
     model,
     reasoningEffort,
   };
+}
+
+function readRequestedMode(value: unknown): AppMode | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  return value.trim() === 'support' ? 'support' : value.trim() === 'standard' ? 'standard' : undefined;
+}
+
+function findConfiguredProfile(profileId: string | undefined) {
+  return CODEX_APP_CONFIG.profiles.find((candidate) => candidate.id === profileId) || null;
+}
+
+async function decorateSessionSummaryListForClient(
+  profileId: string | undefined,
+  sessions: CodexSessionSummary[]
+) {
+  if (!profileId) {
+    return sessions;
+  }
+
+  const profile = findConfiguredProfile(profileId);
+  if (!profile || !isSupportProfile(profile)) {
+    return sessions;
+  }
+
+  return Promise.all(sessions.map((session) => decorateSupportSessionSummary(profile, session)));
+}
+
+async function decorateSessionDetailForClient(
+  profileId: string | undefined,
+  session: CodexSessionDetail
+) {
+  if (!profileId) {
+    return session;
+  }
+
+  const profile = findConfiguredProfile(profileId);
+  if (!profile || !isSupportProfile(profile)) {
+    return session;
+  }
+
+  return decorateSupportSessionDetail(profile, session);
+}
+
+async function normalizeSessionDetailForOperations(
+  profileId: string | undefined,
+  session: CodexSessionDetail
+) {
+  if (!profileId) {
+    return session;
+  }
+
+  const profile = findConfiguredProfile(profileId);
+  if (!profile || !isSupportProfile(profile)) {
+    return session;
+  }
+
+  return normalizeSupportSessionForOperations(profile, session);
+}
+
+function buildSupportSessionInstruction(
+  baseInstruction: string | undefined,
+  supportEnvelope: SupportPromptEnvelope | null
+): string | undefined {
+  const sections = [
+    supportEnvelope?.compiledPrompt?.trim() || '',
+    typeof baseInstruction === 'string' ? baseInstruction.trim() : '',
+  ].filter(Boolean);
+
+  if (sections.length === 0) {
+    return undefined;
+  }
+
+  return sections.join('\n\n');
 }
 
 const upload = multer({
@@ -742,7 +853,8 @@ router.post('/uploads', requireCodexAccess, upload.array('files', MAX_UPLOAD_FIL
 
 router.get('/profiles', requireCodexAccess, async (_req, res) => {
   try {
-    const profiles = await getAvailableProfiles();
+    const mode = readRequestedMode((_req as any).query?.mode);
+    const profiles = filterProfilesByMode(await getAvailableProfiles(), mode || 'standard');
     res.json({ profiles });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load Codex profiles' });
@@ -1001,7 +1113,10 @@ router.get('/sessions', requireCodexAccess, async (req, res) => {
     const query = typeof req.query.query === 'string' ? req.query.query : '';
     const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined;
 
-    const sessions = await listAgentSessions(profileId, query, limit);
+    const sessions = await decorateSessionSummaryListForClient(
+      profileId,
+      await listAgentSessions(profileId, query, limit)
+    );
     const hiddenIds = profileId ? await listHiddenSessionIds(profileId) : new Set<string>();
     const topicMap = profileId ? await getSessionTopicMap(profileId) : {};
     const titleMap = profileId ? await getSessionTitleMap(profileId) : {};
@@ -1099,11 +1214,14 @@ router.get('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
       ? Number.parseInt(req.query.before, 10)
       : undefined;
     const full = req.query.full === '1' || req.query.full === 'true';
-    const session = await getAgentSessionDetail(sessionId, profileId, {
-      tail: Number.isFinite(tail) ? tail : undefined,
-      before: Number.isFinite(before) ? before : undefined,
-      full,
-    });
+    const session = await decorateSessionDetailForClient(
+      profileId,
+      await getAgentSessionDetail(sessionId, profileId, {
+        tail: Number.isFinite(tail) ? tail : undefined,
+        before: Number.isFinite(before) ? before : undefined,
+        full,
+      })
+    );
     const topicMap = profileId ? await getSessionTopicMap(profileId) : {};
     const titleMap = profileId ? await getSessionTitleMap(profileId) : {};
     res.json({
@@ -1147,9 +1265,12 @@ router.post('/sessions/:sessionId/delete-turn', requireCodexAccess, async (req, 
       return;
     }
 
-    const sourceSession = await getAgentSessionDetail(sessionId, profileId, {
-      full: true,
-    });
+    const sourceSession = await normalizeSessionDetailForOperations(
+      profileId,
+      await getAgentSessionDetail(sessionId, profileId, {
+        full: true,
+      })
+    );
     const profile = CODEX_APP_CONFIG.profiles.find((candidate) => candidate.id === profileId);
     if (!profile) {
       res.status(404).json({ error: 'הפרופיל שנבחר לא קיים.' });
@@ -1231,9 +1352,12 @@ router.post('/sessions/:sessionId/delete-turn', requireCodexAccess, async (req, 
       }
     }
 
-    const cleanedSession = await getAgentSessionDetail(draft.sessionId, profileId, {
-      full: true,
-    });
+    const cleanedSession = await decorateSessionDetailForClient(
+      profileId,
+      await getAgentSessionDetail(draft.sessionId, profileId, {
+        full: true,
+      })
+    );
 
     res.status(201).json({
       sessionId: draft.sessionId,
@@ -1267,9 +1391,12 @@ router.post('/sessions/:sessionId/fork', requireCodexAccess, async (req, res) =>
       return;
     }
 
-    const sourceSession = await getAgentSessionDetail(sessionId, profileId, {
-      full: true,
-    });
+    const sourceSession = await normalizeSessionDetailForOperations(
+      profileId,
+      await getAgentSessionDetail(sessionId, profileId, {
+        full: true,
+      })
+    );
     const forkResult = await createAgentForkSession(sourceSession.id, forkEntryId, profileId);
     const forkSidebarMetadata = await copySessionSidebarMetadataToForkSession(
       profileId,
@@ -1288,9 +1415,12 @@ router.post('/sessions/:sessionId/fork', requireCodexAccess, async (req, res) =>
       timeline: [],
       createdAt: new Date().toISOString(),
     });
-    const forkSession = await getAgentSessionDetail(forkResult.sessionId, profileId, {
-      tail: 120,
-    });
+    const forkSession = await decorateSessionDetailForClient(
+      profileId,
+      await getAgentSessionDetail(forkResult.sessionId, profileId, {
+        tail: 120,
+      })
+    );
 
     res.status(201).json({
       sessionId: forkResult.sessionId,
@@ -1421,9 +1551,12 @@ router.post('/sessions/:sessionId/transfer', requireCodexAccess, async (req, res
       },
       attachments: [],
     });
-    const transferSession = await getAgentSessionDetail(draft.sessionId, targetProfile.id, {
-      tail: 120,
-    });
+    const transferSession = await decorateSessionDetailForClient(
+      targetProfile.id,
+      await getAgentSessionDetail(draft.sessionId, targetProfile.id, {
+        tail: 120,
+      })
+    );
 
     res.status(201).json({
       sessionId: draft.sessionId,
@@ -1588,6 +1721,11 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
   try {
     const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
     const profileId = requestedProfileId || 'developer';
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
     const queueKey = typeof req.body?.queueKey === 'string' && req.body.queueKey.trim()
       ? req.body.queueKey.trim()
       : randomUUID();
@@ -1650,6 +1788,25 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
         contextPrefix: undefined,
         forkContext: undefined,
       };
+    const supportEnvelope = isSupportProfile(configuredProfile)
+      ? buildSupportPromptEnvelope(configuredProfile, {
+        source: 'ui',
+        userPrompt: prompt,
+        authenticatedUser: (req as any).codexAuth?.user || null,
+      })
+      : null;
+    const effectivePrompt = supportEnvelope?.compiledPrompt || prompt;
+    const effectivePromptPreview = supportEnvelope?.promptPreview || promptPreview;
+    const effectiveSessionInstruction = buildSupportSessionInstruction(sessionInstruction, supportEnvelope);
+
+    if (supportEnvelope) {
+      await recordSupportTurnRequest({
+        profile: configuredProfile,
+        sessionKey: sessionId || queueKey,
+        source: 'ui',
+        envelope: supportEnvelope,
+      });
+    }
 
     const item = await enqueueCodexQueueItem({
       profileId,
@@ -1657,10 +1814,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       clientRequestId,
       sessionId,
       cwd,
-      prompt,
-      promptPreview,
+      prompt: effectivePrompt,
+      promptPreview: effectivePromptPreview,
       contextPrefix: hydratedForkDraft.contextPrefix,
-      sessionInstruction,
+      sessionInstruction: effectiveSessionInstruction,
       forkContext: hydratedForkDraft.forkContext,
       scheduledAt,
       attachments,
@@ -1723,6 +1880,11 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt : '';
     const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
     const profileId = requestedProfileId || 'developer';
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
     const asyncRequested = req.headers['x-codex-async'] === '1' || req.body?.async === true;
     const queueKey = typeof req.body?.queueKey === 'string' && req.body.queueKey.trim()
       ? req.body.queueKey.trim()
@@ -1733,6 +1895,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
       ? req.body.sessionId.trim()
       : undefined;
+    const effectiveQueueKey = queueKey || sessionId || randomUUID();
     const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
       ? req.body.cwd.trim()
       : undefined;
@@ -1783,20 +1946,44 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         contextPrefix: undefined,
         forkContext: undefined,
       };
+    const supportEnvelope = isSupportProfile(configuredProfile)
+      ? buildSupportPromptEnvelope(configuredProfile, {
+        source: 'ui',
+        userPrompt: prompt,
+        authenticatedUser: (req as any).codexAuth?.user || null,
+      })
+      : null;
+    const providerPrompt = supportEnvelope?.compiledPrompt || prompt;
     const promptWithForkContext = hydratedForkDraft.contextPrefix?.trim()
-      ? `${hydratedForkDraft.contextPrefix.trim()}\n\nהודעת ההמשך החדשה:\n${prompt}`
-      : prompt;
-    const effectivePrompt = sessionInstruction?.trim()
-      ? `${promptWithForkContext}\n\nהוראה קבועה לסשן זה. יש ליישם אותה גם אם המשתמש לא חזר עליה בהודעה הנוכחית:\n${sessionInstruction.trim()}`
+      ? `${hydratedForkDraft.contextPrefix.trim()}\n\nהודעת ההמשך החדשה:\n${providerPrompt}`
+      : providerPrompt;
+    const effectiveSessionInstruction = buildSupportSessionInstruction(sessionInstruction, supportEnvelope);
+    const effectivePrompt = effectiveSessionInstruction?.trim()
+      ? `${promptWithForkContext}\n\nהוראה קבועה לסשן זה. יש ליישם אותה גם אם המשתמש לא חזר עליה בהודעה הנוכחית:\n${effectiveSessionInstruction.trim()}`
       : promptWithForkContext;
 
     if (!asyncRequested) {
+      const supportSessionKey = sessionId || effectiveQueueKey;
+      if (supportEnvelope) {
+        await recordSupportTurnRequest({
+          profile: configuredProfile,
+          sessionKey: supportSessionKey,
+          source: 'ui',
+          envelope: supportEnvelope,
+        });
+      }
       const result = await runAgentPrompt(effectivePrompt, sessionId, profileId, attachments, {
         cwd,
         injectDirectoryContext: !sessionId,
         executionConfig,
       });
-      const session = await getAgentSessionDetail(result.sessionId, profileId);
+      if (supportEnvelope && supportSessionKey !== result.sessionId) {
+        await rebindSupportSessionRecord(profileId, supportSessionKey, result.sessionId);
+      }
+      const session = await decorateSessionDetailForClient(
+        profileId,
+        await getAgentSessionDetail(result.sessionId, profileId)
+      );
 
       res.json({
         session,
@@ -1805,18 +1992,26 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       return;
     }
 
+    if (supportEnvelope) {
+      await recordSupportTurnRequest({
+        profile: configuredProfile,
+        sessionKey: effectiveQueueKey,
+        source: 'ui',
+        envelope: supportEnvelope,
+      });
+    }
     const item = await enqueueCodexQueueItem({
       profileId,
-      queueKey: queueKey || sessionId || randomUUID(),
+      queueKey: effectiveQueueKey,
       clientRequestId,
       sessionId,
       cwd,
       model: executionConfig.model,
       reasoningEffort: executionConfig.reasoningEffort,
-      prompt,
-      promptPreview,
+      prompt: providerPrompt,
+      promptPreview: supportEnvelope?.promptPreview || promptPreview,
       contextPrefix: hydratedForkDraft.contextPrefix,
-      sessionInstruction,
+      sessionInstruction: effectiveSessionInstruction,
       forkContext: hydratedForkDraft.forkContext,
       attachments,
       recurrence,
@@ -1826,6 +2021,120 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Codex request failed' });
   }
+});
+
+async function handleSupportAskRequest(
+  req: Request,
+  res: Response,
+  source: 'api' | 'webhook'
+) {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId.trim() : '';
+    const requestedProvider = typeof req.body?.provider === 'string'
+      ? req.body.provider.trim()
+      : '';
+    const profile = resolveSupportProfileSelection(
+      requestedProfileId || undefined,
+      requestedProvider === 'codex' || requestedProvider === 'claude' || requestedProvider === 'gemini'
+        ? requestedProvider
+        : undefined
+    );
+    const prompt = typeof req.body?.prompt === 'string'
+      ? req.body.prompt
+      : typeof req.body?.message === 'string'
+        ? req.body.message
+        : '';
+    const asyncRequested = req.headers['x-codex-async'] === '1' || req.body?.async === true;
+    const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+    const queueKey = typeof req.body?.queueKey === 'string' && req.body.queueKey.trim()
+      ? req.body.queueKey.trim()
+      : `draft:support:${randomUUID()}`;
+    const clientRequestId = typeof req.body?.clientRequestId === 'string' && req.body.clientRequestId.trim()
+      ? req.body.clientRequestId.trim()
+      : undefined;
+    const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+      ? req.body.sessionId.trim()
+      : undefined;
+    const executionConfig = readExecutionConfig(req.body);
+    const cwd = requestedCwd
+      ? (await resolveCodexFolderPath(requestedCwd, profile.id)).resolvedPath
+      : profile.workspaceCwd;
+    const envelope = buildSupportPromptEnvelope(profile, {
+      source,
+      userPrompt: prompt,
+      userContext: typeof req.body?.userContext === 'string'
+        ? req.body.userContext
+        : (() => {
+          try {
+            return req.body?.userContext === undefined
+              ? null
+              : JSON.stringify(req.body.userContext, null, 2);
+          } catch {
+            return null;
+          }
+        })(),
+      webhookPayload: req.body?.payload ?? req.body?.webhookPayload,
+      authenticatedUser: (req as any).codexAuth?.user || null,
+    });
+
+    await recordSupportTurnRequest({
+      profile,
+      sessionKey: sessionId || queueKey,
+      source,
+      envelope,
+    });
+
+    if (!asyncRequested) {
+      const result = await runAgentPrompt(envelope.compiledPrompt, sessionId, profile.id, [], {
+        cwd,
+        injectDirectoryContext: !sessionId,
+        executionConfig,
+      });
+      if ((sessionId || queueKey) !== result.sessionId) {
+        await rebindSupportSessionRecord(profile.id, sessionId || queueKey, result.sessionId);
+      }
+      const session = await decorateSessionDetailForClient(
+        profile.id,
+        await getAgentSessionDetail(result.sessionId, profile.id)
+      );
+
+      res.json({
+        profileId: profile.id,
+        session,
+        finalMessage: result.finalMessage,
+      });
+      return;
+    }
+
+    const item = await enqueueCodexQueueItem({
+      profileId: profile.id,
+      queueKey: sessionId || queueKey,
+      clientRequestId,
+      sessionId,
+      cwd,
+      model: executionConfig.model,
+      reasoningEffort: executionConfig.reasoningEffort,
+      prompt: envelope.compiledPrompt,
+      promptPreview: envelope.promptPreview,
+    });
+
+    res.status(202).json({
+      profileId: profile.id,
+      item,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Support request failed' });
+  }
+}
+
+router.post('/support/ask', requireCodexAccess, async (req, res) => {
+  await handleSupportAskRequest(req, res, 'api');
+});
+
+router.post('/support/webhook', requireSupportWebhookAccess, async (req, res) => {
+  await handleSupportAskRequest(req, res, 'webhook');
 });
 
 export default router;

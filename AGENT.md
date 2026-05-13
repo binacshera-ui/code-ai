@@ -12,6 +12,8 @@ This file is the operator handoff for `code-ai`.
 - Claude Code
 - Gemini CLI
 
+It also includes an isolated internal `Support workspace` mode for human-like support operations.
+
 Use this file when you need to install, update, debug, recover data, or explain the system to another agent or operator.
 
 ## Read These First
@@ -171,6 +173,9 @@ Expected files:
 - `logs/client-crashes.jsonl`
 - `logs/server-crashes.jsonl`
 - `logs/file-access.jsonl`
+- `support/support-session-state.json`
+- `support/homes/<provider>/<source-profile>/...`
+- `support/sandbox/<provider>/<source-profile>/...`
 
 ## Where Real Sessions Live
 
@@ -194,6 +199,28 @@ Gemini:
 
 - `projects.json`
 - `tmp/<project-id>/chats/*.jsonl`
+
+## Support Workspace Internals
+
+Support mode derives extra profiles named:
+
+- `support-<standard-profile-id>`
+
+Those profiles:
+
+- use isolated provider homes under `.code-ai/support/homes/...`
+- keep support request metadata in `.code-ai/support/support-session-state.json`
+- expose dedicated entrypoints:
+  - `POST /api/codex/support/ask`
+  - `POST /api/codex/support/webhook`
+- inject a fixed support envelope before provider execution
+
+Primary files:
+
+- `server/supportAgentService.ts`
+- `server/agentService.ts`
+- `server/codexRoutes.ts`
+- `client/src/components/codex/CodexMobileApp.tsx`
 
 ## First Place To Inspect For Each Symptom
 

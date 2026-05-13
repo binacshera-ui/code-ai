@@ -101,8 +101,11 @@ interface CodexProfile {
   id: string;
   label: string;
   provider: 'codex' | 'claude' | 'gemini';
+  mode?: 'standard' | 'support';
   codexHome: string;
   workspaceCwd: string;
+  sourceProfileId?: string;
+  sandboxCwd?: string;
   defaultProfile?: boolean;
 }
 
@@ -471,6 +474,7 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 type ThemeMode = 'light' | 'dark';
+type WorkspaceMode = 'standard' | 'support';
 
 const INITIAL_TIMELINE_WINDOW_SIZE = 120;
 const TIMELINE_WINDOW_INCREMENT = 120;
@@ -483,6 +487,7 @@ const CLAUDE_EMPTY_STATE_ICON_PATH = '/icons/claude-agent.png';
 const GEMINI_EMPTY_STATE_ICON_PATH = '/icons/gemini-agent.png';
 const CODE_AI_PUBLIC_ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
 const PROVIDER_DISPLAY_ORDER: CodexProfile['provider'][] = ['codex', 'claude', 'gemini'];
+const WORKSPACE_MODE_STORAGE_KEY = 'code-ai.workspaceMode';
 
 function formatTimestamp(value: string | null): string {
   if (!value) return 'ללא זמן';
@@ -757,6 +762,37 @@ function getProviderLogoSrc(provider: CodexProfile['provider']): string {
     default:
       return '/icons/codex-empty-state.png';
   }
+}
+
+function readWorkspaceMode(): WorkspaceMode {
+  if (typeof window === 'undefined') {
+    return 'standard';
+  }
+
+  const raw = window.localStorage.getItem(WORKSPACE_MODE_STORAGE_KEY);
+  return raw === 'support' ? 'support' : 'standard';
+}
+
+function writeWorkspaceMode(mode: WorkspaceMode) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.setItem(WORKSPACE_MODE_STORAGE_KEY, mode);
+}
+
+function filterProfilesForMode(profiles: CodexProfile[], mode: WorkspaceMode): CodexProfile[] {
+  return profiles.filter((profile) => (mode === 'support' ? profile.mode === 'support' : profile.mode !== 'support'));
+}
+
+function resolveDefaultProfileForWorkspaceMode(
+  profiles: CodexProfile[],
+  mode: WorkspaceMode,
+  provider?: CodexProfile['provider']
+): CodexProfile | null {
+  const modeProfiles = filterProfilesForMode(profiles, mode)
+    .filter((profile) => (!provider || profile.provider === provider));
+  return modeProfiles.find((profile) => profile.defaultProfile) || modeProfiles[0] || null;
 }
 
 function getSessionChangeStatusLabel(status: SessionChangeFileRecordResponse['status']): string {
@@ -2818,6 +2854,7 @@ function SidebarPanel({
   profileId,
   selectedProvider,
   selectedProfile,
+  workspaceMode,
   search,
   sessions,
   groupedSessions,
@@ -2836,6 +2873,7 @@ function SidebarPanel({
   onLogout,
   onNewConversation,
   onChooseFolder,
+  onToggleWorkspaceMode,
   onManageTopic,
   onToggleArchived,
   onToggleSessionHidden,
@@ -2847,6 +2885,7 @@ function SidebarPanel({
   profileId: string;
   selectedProvider: CodexProfile['provider'];
   selectedProfile: CodexProfile | null;
+  workspaceMode: WorkspaceMode;
   search: string;
   sessions: CodexSessionSummary[];
   groupedSessions: SessionFolderGroup[];
@@ -2865,6 +2904,7 @@ function SidebarPanel({
   onLogout: () => void;
   onNewConversation: (cwd?: string | null) => void;
   onChooseFolder: () => void;
+  onToggleWorkspaceMode: () => void;
   onManageTopic: (session: CodexSessionSummary) => void;
   onToggleArchived: () => void;
   onToggleSessionHidden: (sessionId: string, hidden: boolean) => void;
@@ -2915,7 +2955,7 @@ function SidebarPanel({
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="flex min-w-0 flex-col gap-2 p-4">
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-4 gap-2">
             <button
               onClick={() => onNewConversation()}
               className="flex min-w-0 flex-col items-center justify-center gap-1.5 overflow-hidden rounded-2xl bg-indigo-50/50 px-2 py-3 text-center text-[12px] font-medium leading-4 text-indigo-700 transition-colors active:scale-95"
@@ -2943,6 +2983,19 @@ function SidebarPanel({
             >
               <Archive className="h-4 w-4 shrink-0" />
               <span className="line-clamp-2 min-w-0">{showArchived ? 'חזור לשיחות' : 'ארכיון'}</span>
+            </button>
+
+            <button
+              onClick={onToggleWorkspaceMode}
+              className={cn(
+                'flex min-w-0 flex-col items-center justify-center gap-1.5 overflow-hidden rounded-2xl border px-2 py-3 text-center text-[12px] font-medium leading-4 transition-colors active:scale-95',
+                workspaceMode === 'support'
+                  ? 'border-cyan-200 bg-cyan-50 text-cyan-700'
+                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+              )}
+            >
+              <ShieldCheck className="h-4 w-4 shrink-0" />
+              <span className="line-clamp-2 min-w-0">{workspaceMode === 'support' ? 'חזור רגיל' : 'מצב תמיכה'}</span>
             </button>
           </div>
 
@@ -6364,6 +6417,7 @@ function TopicManagerDialog({
 export function CodexMobileApp() {
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [profiles, setProfiles] = useState<CodexProfile[]>([]);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(readWorkspaceMode);
   const [profileId, setProfileId] = useState('');
   const [sessions, setSessions] = useState<CodexSessionSummary[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -6505,12 +6559,16 @@ export function CodexMobileApp() {
   const folderForwardStackRef = useRef<string[]>([]);
   const browserTimeZone = getBrowserTimeZone();
   const isIosInstallFlow = isIosInstallableDevice() && !isStandaloneMode;
+  const visibleProfiles = useMemo(
+    () => filterProfilesForMode(profiles, workspaceMode),
+    [profiles, workspaceMode]
+  );
   const currentQueueKey = selectedSessionId || draftConversationKey;
   const draftSidebarSessionId = forkDraftContext ? toDraftSessionId(draftConversationKey) : null;
   const activeQueueCount = queueItems.filter(isQueueItemActive).length;
   const effectiveDraftCwd = draftCwd || null;
   const activeSessionCwd = selectedSession?.cwd || null;
-  const currentProfile = profiles.find((profile) => profile.id === profileId) || null;
+  const currentProfile = visibleProfiles.find((profile) => profile.id === profileId) || null;
   const selectedProfileWorkspaceCwd = currentProfile?.workspaceCwd || null;
   const activeComposerCwd = selectedSessionId ? activeSessionCwd : (effectiveDraftCwd || selectedProfileWorkspaceCwd);
   const selectedConversationId = selectedSessionId || (isDraftConversation ? draftSidebarSessionId : null);
@@ -7009,12 +7067,13 @@ export function CodexMobileApp() {
     try {
       const data = await fetchJson<{ profiles: CodexProfile[] }>('/api/codex/profiles');
       setProfiles(data.profiles);
+      const modeProfiles = filterProfilesForMode(data.profiles, workspaceMode);
       const currentStillAvailable = profileId
-        ? data.profiles.find((profile) => profile.id === profileId) || null
+        ? modeProfiles.find((profile) => profile.id === profileId) || null
         : null;
       const preferred = currentStillAvailable
-        || data.profiles.find((profile) => profile.defaultProfile)
-        || data.profiles[0];
+        || resolveDefaultProfileForWorkspaceMode(data.profiles, workspaceMode)
+        || modeProfiles[0];
       if (preferred) {
         setProfileId(preferred.id);
         setDraftCwd((current) => currentStillAvailable && current ? current : preferred.workspaceCwd);
@@ -7767,8 +7826,26 @@ export function CodexMobileApp() {
     setProfileId(nextProfileId);
   }
 
+  function handleToggleWorkspaceMode() {
+    const nextMode: WorkspaceMode = workspaceMode === 'support' ? 'standard' : 'support';
+    const nextProfile = resolveDefaultProfileForWorkspaceMode(
+      profiles,
+      nextMode,
+      currentProfile?.provider
+    ) || resolveDefaultProfileForWorkspaceMode(profiles, nextMode);
+
+    if (!nextProfile) {
+      setError(nextMode === 'support' ? 'אין פרופיל תמיכה זמין.' : 'אין פרופיל רגיל זמין.');
+      return;
+    }
+
+    writeWorkspaceMode(nextMode);
+    setWorkspaceMode(nextMode);
+    handleProfileChange(nextProfile.id);
+  }
+
   function handleProviderChange(nextProvider: CodexProfile['provider']) {
-    const providerProfiles = profiles.filter((profile) => profile.provider === nextProvider);
+    const providerProfiles = visibleProfiles.filter((profile) => profile.provider === nextProvider);
     if (providerProfiles.length === 0) {
       return;
     }
@@ -8862,8 +8939,8 @@ export function CodexMobileApp() {
   }
 
   const selectedProvider = currentProfile?.provider
-    || profiles.find((profile) => profile.defaultProfile)?.provider
-    || profiles[0]?.provider
+    || visibleProfiles.find((profile) => profile.defaultProfile)?.provider
+    || visibleProfiles[0]?.provider
     || 'codex';
   const selectedProviderLabel = getProviderDisplayLabel(selectedProvider);
   const thinkingDots = '.'.repeat((thinkingPulseIndex % 3) + 1);
@@ -8874,8 +8951,8 @@ export function CodexMobileApp() {
   ][thinkingPulseIndex % 3];
   const isCurrentConversationRunning = currentSessionActiveQueueCount > 0;
   const transferTargetProfiles = useMemo(
-    () => resolveTransferTargetProfiles(profiles, currentProfile),
-    [currentProfile, profiles]
+    () => resolveTransferTargetProfiles(visibleProfiles, currentProfile),
+    [currentProfile, visibleProfiles]
   );
   const transferTargetOptions = useMemo<TransferTargetOption[]>(
     () => transferTargetProfiles.map((profile) => ({
@@ -8938,6 +9015,22 @@ export function CodexMobileApp() {
     void loadModelCatalog(profileId);
     void loadRateLimitSnapshot(profileId, selectedSessionId);
   }, [profileId, selectedSessionId]);
+
+  useEffect(() => {
+    writeWorkspaceMode(workspaceMode);
+    if (visibleProfiles.length === 0) {
+      return;
+    }
+
+    if (currentProfile) {
+      return;
+    }
+
+    const fallbackProfile = resolveDefaultProfileForWorkspaceMode(profiles, workspaceMode);
+    if (fallbackProfile && fallbackProfile.id !== profileId) {
+      handleProfileChange(fallbackProfile.id);
+    }
+  }, [currentProfile, profileId, profiles, visibleProfiles.length, workspaceMode]);
 
   useEffect(() => {
     if (!profileId || !isRateLimitOpen) {
@@ -9148,10 +9241,11 @@ export function CodexMobileApp() {
 
   const sidebar = (onClose?: () => void) => (
     <SidebarPanel
-      profiles={profiles}
+      profiles={visibleProfiles}
       profileId={profileId}
       selectedProvider={selectedProvider}
       selectedProfile={currentProfile}
+      workspaceMode={workspaceMode}
       search={search}
       sessions={sessions}
       groupedSessions={groupedSessions}
@@ -9170,6 +9264,7 @@ export function CodexMobileApp() {
       onLogout={() => void handleLogout()}
       onNewConversation={handleNewConversation}
       onChooseFolder={handleChooseFolderFromSidebar}
+      onToggleWorkspaceMode={handleToggleWorkspaceMode}
       onManageTopic={(session) => void openTopicManager(session)}
       onToggleArchived={() => setShowArchived((current) => !current)}
       onToggleSessionHidden={(sessionId, hidden) => void handleToggleSessionHidden(sessionId, hidden)}
@@ -9217,8 +9312,17 @@ export function CodexMobileApp() {
             </h1>
             <div className="mt-1 flex items-center gap-1.5 opacity-60">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-xs font-medium">{isRefreshing ? 'מסנכרן שיחות' : 'מחובר ומוכן'}</span>
+              <span className="text-xs font-medium">
+                {workspaceMode === 'support'
+                  ? (isRefreshing ? 'מסנכרן תמיכה' : 'מצב תמיכה פעיל')
+                  : (isRefreshing ? 'מסנכרן שיחות' : 'מחובר ומוכן')}
+              </span>
             </div>
+            {workspaceMode === 'support' && (
+              <div className="mt-1 rounded-full bg-cyan-50 px-2 py-0.5 text-[10px] font-medium text-cyan-700">
+                Support workspace
+              </div>
+            )}
             {sessionInstruction && (
               <div className="mt-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
                 הוראה קבועה פעילה

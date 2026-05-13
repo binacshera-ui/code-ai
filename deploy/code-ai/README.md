@@ -16,6 +16,25 @@ Windows field notes:
 
 This repo is not "a Codex skin" anymore. It is a unified control plane for multiple provider CLIs, shared sessions UI, queueing, scheduling, uploads, transfers between providers, and provider-specific profile homes.
 
+## Internal Support Workspace
+
+`code-ai` also includes a built-in internal support workspace.
+
+It is designed for human-like support investigation flows:
+
+- separate UI mode from normal agent work
+- separate provider homes generated automatically under `CODEX_STORAGE_ROOT/support/homes/...`
+- separate write sandbox per provider/profile under `CODEX_STORAGE_ROOT/support/sandbox/...`
+- support transcript metadata stored in `CODEX_STORAGE_ROOT/support/support-session-state.json`
+- webhook/API entrypoints that can target Codex, Claude, or Gemini support profiles
+
+Relevant runtime files:
+
+- `server/supportAgentService.ts`
+- `POST /api/codex/support/ask`
+- `POST /api/codex/support/webhook`
+- sidebar `Support workspace` toggle in the mobile UI
+
 ## What Must Be Installed
 
 Base requirements:
@@ -149,6 +168,7 @@ If binaries are already in `PATH`, you usually do not need these.
 - `CODEX_BIN`
 - `CLAUDE_BIN`
 - `GEMINI_BIN`
+- `CODEX_SUPPORT_WEBHOOK_TOKEN`
 
 Examples:
 
@@ -220,6 +240,12 @@ Typical contents:
 - `logs/client-crashes.jsonl`
 - `logs/server-crashes.jsonl`
 - `logs/file-access.jsonl`
+
+Support-mode contents:
+
+- `support/support-session-state.json`
+- `support/homes/<provider>/<source-profile>/...`
+- `support/sandbox/<provider>/<source-profile>/...`
 
 ## Where Real Sessions Live
 

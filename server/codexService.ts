@@ -19,8 +19,11 @@ export interface CodexProfile {
   id: string;
   label: string;
   provider: AppProvider;
+  mode?: 'standard' | 'support';
   codexHome: string;
   workspaceCwd: string;
+  sourceProfileId?: string;
+  sandboxCwd?: string;
   defaultProfile?: boolean;
 }
 

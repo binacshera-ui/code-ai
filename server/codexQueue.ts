@@ -23,6 +23,7 @@ import { rebindSessionInstruction } from './codexSessionInstructions.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
 import { getSessionTopicMap, setSessionTopic } from './codexSessionTopics.js';
 import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
+import { rebindSupportSessionRecord } from './supportAgentService.js';
 
 export type CodexQueueItemStatus =
   | 'scheduled'
@@ -724,6 +725,7 @@ async function rebindQueueItemsToSession(profileId: string, queueKey: string, se
   state.sessionBindings[queueKey] = sessionId;
   state.sessionBindings[sessionId] = sessionId;
   await rebindSessionInstruction(profileId, queueKey, sessionId);
+  await rebindSupportSessionRecord(profileId, queueKey, sessionId).catch(() => undefined);
 
   for (const candidate of state.items) {
     if (candidate.queueKey !== queueKey) {
