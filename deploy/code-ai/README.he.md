@@ -35,6 +35,15 @@
 - `POST /api/codex/support/webhook`
 - כפתור `Support workspace` בסיידבר של המובייל
 
+רמות הרצה ל־Support API:
+
+- `fast`
+- `balanced`
+- `deep`
+
+כל רמה ממופה אוטומטית למודל + רמת חשיבה מתאימים עבור Codex, Claude ו־Gemini.
+אם צריך, עדיין אפשר לעקוף ידנית עם `model` ו/או `reasoningEffort`.
+
 ## מה חייב להיות מותקן
 
 בסיס:

@@ -35,6 +35,15 @@ Relevant runtime files:
 - `POST /api/codex/support/webhook`
 - sidebar `Support workspace` toggle in the mobile UI
 
+Support API execution levels:
+
+- `fast`
+- `balanced`
+- `deep`
+
+These map to provider-specific model + reasoning presets for Codex, Claude, and Gemini.
+You can still override them explicitly with `model` and/or `reasoningEffort`.
+
 ## What Must Be Installed
 
 Base requirements:

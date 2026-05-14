@@ -178,6 +178,60 @@ function readExecutionConfig(body: any): CodexExecutionConfig {
   };
 }
 
+type SupportExecutionLevel = 'fast' | 'balanced' | 'deep';
+
+function readSupportExecutionLevel(value: unknown): SupportExecutionLevel | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'fast' || normalized === 'balanced' || normalized === 'deep') {
+    return normalized;
+  }
+
+  return null;
+}
+
+function resolveSupportExecutionConfig(
+  provider: AppProvider,
+  requestedLevel: SupportExecutionLevel | null,
+  explicitConfig: CodexExecutionConfig
+): {
+  level: SupportExecutionLevel;
+  executionConfig: CodexExecutionConfig;
+} {
+  const level = requestedLevel || 'balanced';
+
+  const presetByProvider: Record<AppProvider, Record<SupportExecutionLevel, { model: string; reasoningEffort: string }>> = {
+    codex: {
+      fast: { model: 'gpt-5.4-mini', reasoningEffort: 'low' },
+      balanced: { model: 'gpt-5.4', reasoningEffort: 'medium' },
+      deep: { model: 'gpt-5.5', reasoningEffort: 'xhigh' },
+    },
+    claude: {
+      fast: { model: 'claude-sonnet-4-6', reasoningEffort: 'low' },
+      balanced: { model: 'claude-sonnet-4-6', reasoningEffort: 'medium' },
+      deep: { model: 'claude-opus-4-6', reasoningEffort: 'max' },
+    },
+    gemini: {
+      fast: { model: 'gemini-2.5-flash-lite', reasoningEffort: 'low' },
+      balanced: { model: 'gemini-2.5-flash', reasoningEffort: 'medium' },
+      deep: { model: 'gemini-2.5-pro', reasoningEffort: 'high' },
+    },
+  };
+
+  const preset = presetByProvider[provider][level];
+
+  return {
+    level,
+    executionConfig: {
+      model: explicitConfig.model || preset.model,
+      reasoningEffort: explicitConfig.reasoningEffort || preset.reasoningEffort,
+    },
+  };
+}
+
 function readRequestedMode(value: unknown): AppMode | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -2058,7 +2112,15 @@ async function handleSupportAskRequest(
     const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
       ? req.body.sessionId.trim()
       : undefined;
-    const executionConfig = readExecutionConfig(req.body);
+    const requestedSupportLevel = readSupportExecutionLevel(
+      req.body?.supportLevel ?? req.body?.level ?? req.body?.tier
+    );
+    const supportExecution = resolveSupportExecutionConfig(
+      profile.provider,
+      requestedSupportLevel,
+      readExecutionConfig(req.body)
+    );
+    const executionConfig = supportExecution.executionConfig;
     const cwd = requestedCwd
       ? (await resolveCodexFolderPath(requestedCwd, profile.id)).resolvedPath
       : profile.workspaceCwd;
@@ -2103,6 +2165,8 @@ async function handleSupportAskRequest(
 
       res.json({
         profileId: profile.id,
+        supportLevel: supportExecution.level,
+        executionConfig,
         session,
         finalMessage: result.finalMessage,
       });
@@ -2123,6 +2187,8 @@ async function handleSupportAskRequest(
 
     res.status(202).json({
       profileId: profile.id,
+      supportLevel: supportExecution.level,
+      executionConfig,
       item,
     });
   } catch (error: any) {
