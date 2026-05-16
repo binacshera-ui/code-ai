@@ -2,6 +2,7 @@ import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
 import {
   cancelCodexRun,
   createCodexForkSession,
+  deleteCodexSession,
   getAvailableProfiles as getAvailableCodexProfiles,
   getCodexModelCatalog,
   getCodexRateLimitSnapshot,
@@ -21,6 +22,7 @@ import {
 import {
   cancelClaudeRun,
   createClaudeForkSession,
+  deleteClaudeSession,
   getAvailableClaudeProfiles,
   getClaudeModelCatalog,
   getClaudeRateLimitSnapshot,
@@ -33,6 +35,7 @@ import {
 import {
   cancelGeminiRun,
   createGeminiForkSession,
+  deleteGeminiSession,
   getAvailableGeminiProfiles,
   getGeminiModelCatalog,
   getGeminiRateLimitSnapshot,
@@ -392,4 +395,24 @@ export async function getAgentSessionChangeRecord(
     cwd: detail.cwd,
     timeline: detail.timeline,
   });
+}
+
+export async function deleteAgentSession(
+  sessionId: string,
+  profileId?: string
+): Promise<void> {
+  const profile = resolveProfile(profileId);
+  await prepareSupportProfileHome(profile);
+
+  if (profile.provider === 'claude') {
+    await deleteClaudeSession(sessionId, profile.id);
+    return;
+  }
+
+  if (profile.provider === 'gemini') {
+    await deleteGeminiSession(sessionId, profile.id);
+    return;
+  }
+
+  await deleteCodexSession(sessionId, profile.id);
 }

@@ -1444,6 +1444,19 @@ export async function listGeminiSessions(
     .slice(0, Math.min(limit, MAX_SESSIONS));
 }
 
+export async function deleteGeminiSession(
+  sessionId: string,
+  profileId?: string
+): Promise<void> {
+  const profile = resolveProfile(profileId);
+  const sessionRecord = await resolveGeminiSessionRecord(profile, sessionId);
+  if (!sessionRecord) {
+    throw new Error(`Session ${sessionId} was not found`);
+  }
+
+  await fs.rm(sessionRecord.path, { force: true });
+}
+
 export async function getGeminiSessionDetail(
   sessionId: string,
   profileId?: string,

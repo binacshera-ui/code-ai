@@ -71,3 +71,15 @@ export async function setSessionHidden(
   await persistState();
   return hidden;
 }
+
+export async function deleteSessionVisibility(profileId: string, sessionId: string): Promise<void> {
+  await ensureStateLoaded();
+
+  const next = new Set(state.hiddenByProfile[profileId] || []);
+  if (!next.delete(sessionId)) {
+    return;
+  }
+
+  state.hiddenByProfile[profileId] = [...next];
+  await persistState();
+}

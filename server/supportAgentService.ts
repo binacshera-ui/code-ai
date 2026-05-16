@@ -431,6 +431,21 @@ export async function getSupportSessionRecord(
   return supportState.sessionsByKey[buildSupportSessionKey(profileId, sessionKey)] || null;
 }
 
+export async function deleteSupportSessionRecord(
+  profileId: string,
+  sessionKey: string
+): Promise<void> {
+  await ensureSupportStateLoaded();
+
+  const key = buildSupportSessionKey(profileId, sessionKey);
+  if (!supportState.sessionsByKey[key]) {
+    return;
+  }
+
+  delete supportState.sessionsByKey[key];
+  await persistSupportState();
+}
+
 function normalizeSupportTimeline(
   timeline: CodexTimelineEntry[],
   turns: SupportTurnRecord[]

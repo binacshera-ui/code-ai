@@ -362,6 +362,46 @@ interface CodexSessionInstructionResponse {
   instruction: string | null;
 }
 
+interface CodexProjectAnchor {
+  id: string;
+  cwd: string;
+  targetPath: string;
+  relativePath: string;
+  targetKind: 'file' | 'directory';
+  name: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface CodexProjectAnchorsResponse {
+  anchors: CodexProjectAnchor[];
+}
+
+interface UnifiedSkillSummary {
+  id: string;
+  name: string;
+  displayName: string;
+  description: string | null;
+  providerOrigin: 'codex' | 'claude';
+  scope: 'system' | 'project' | 'user' | 'plugin';
+  sourceLabel: string;
+  path: string;
+}
+
+interface UnifiedSkillCatalogResponse {
+  skills: UnifiedSkillSummary[];
+}
+
+interface CodexSessionContextSelection {
+  anchorIds: string[];
+  skillIds: string[];
+}
+
+interface CodexSessionContextSelectionResponse {
+  selection: CodexSessionContextSelection;
+}
+
 interface CodexFilePreview {
   path: string;
   name: string;
@@ -761,6 +801,23 @@ function getProviderLogoSrc(provider: CodexProfile['provider']): string {
       return '/icons/gemini-agent.png';
     default:
       return '/icons/codex-empty-state.png';
+  }
+}
+
+function getSkillOriginLabel(providerOrigin: UnifiedSkillSummary['providerOrigin']): string {
+  return providerOrigin === 'claude' ? 'Claude' : 'Codex';
+}
+
+function getSkillScopeLabel(scope: UnifiedSkillSummary['scope']): string {
+  switch (scope) {
+    case 'system':
+      return 'מערכתי';
+    case 'project':
+      return 'פרויקט';
+    case 'plugin':
+      return 'תוסף';
+    default:
+      return 'משתמש';
   }
 }
 
@@ -1235,6 +1292,80 @@ async function saveSessionInstruction(profileId: string, sessionKey: string, ins
     }),
   });
   return data.instruction || null;
+}
+
+async function fetchSessionContextSelection(profileId: string, sessionKey: string): Promise<CodexSessionContextSelection> {
+  const data = await fetchJson<CodexSessionContextSelectionResponse>(
+    `/api/codex/session-context-selection?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
+  );
+  return data.selection || { anchorIds: [], skillIds: [] };
+}
+
+async function saveSessionContextSelection(
+  profileId: string,
+  sessionKey: string,
+  selection: CodexSessionContextSelection
+): Promise<CodexSessionContextSelection> {
+  const data = await fetchJson<CodexSessionContextSelectionResponse>('/api/codex/session-context-selection', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      sessionKey,
+      anchorIds: selection.anchorIds,
+      skillIds: selection.skillIds,
+    }),
+  });
+  return data.selection || { anchorIds: [], skillIds: [] };
+}
+
+async function fetchProjectAnchors(profileId: string, cwd: string): Promise<CodexProjectAnchor[]> {
+  const data = await fetchJson<CodexProjectAnchorsResponse>(
+    `/api/codex/anchors?profileId=${encodeURIComponent(profileId)}&cwd=${encodeURIComponent(cwd)}`
+  );
+  return data.anchors || [];
+}
+
+async function createProjectAnchorRequest(
+  profileId: string,
+  input: {
+    cwd: string;
+    targetPath: string;
+    targetKind: 'file' | 'directory';
+    name: string;
+    description: string;
+  }
+): Promise<CodexProjectAnchor> {
+  const data = await fetchJson<{ anchor: CodexProjectAnchor }>('/api/codex/anchors', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      ...input,
+    }),
+  });
+  return data.anchor;
+}
+
+async function deleteProjectAnchorRequest(profileId: string, cwd: string, anchorId: string): Promise<void> {
+  await fetchJson(`/api/codex/anchors/${encodeURIComponent(anchorId)}?profileId=${encodeURIComponent(profileId)}&cwd=${encodeURIComponent(cwd)}`, {
+    method: 'DELETE',
+  });
+}
+
+async function fetchUnifiedSkills(): Promise<UnifiedSkillSummary[]> {
+  const data = await fetchJson<UnifiedSkillCatalogResponse>('/api/codex/skills');
+  return data.skills || [];
+}
+
+async function deleteSessionPermanently(sessionId: string, profileId: string): Promise<void> {
+  await fetchJson(`/api/codex/sessions/${encodeURIComponent(sessionId)}?profile=${encodeURIComponent(profileId)}`, {
+    method: 'DELETE',
+  });
 }
 
 async function fetchFolderBrowser(profileId: string, targetPath?: string | null): Promise<CodexFolderBrowseResult> {
@@ -2702,9 +2833,11 @@ function SessionCard({
   isSelected,
   isActive,
   isArchivedView,
+  isDeletingPermanent,
   onSelect,
   onManageTopic,
   onToggleHidden,
+  onDeletePermanent,
   isPreviewOpen,
   onPreviewOpen,
   onPreviewClose,
@@ -2713,9 +2846,11 @@ function SessionCard({
   isSelected: boolean;
   isActive: boolean;
   isArchivedView: boolean;
+  isDeletingPermanent?: boolean;
   onSelect: () => void;
   onManageTopic: () => void;
   onToggleHidden: (hidden: boolean) => void;
+  onDeletePermanent?: () => void;
   isPreviewOpen: boolean;
   onPreviewOpen: (sessionId: string) => void;
   onPreviewClose: () => void;
@@ -2829,6 +2964,21 @@ function SessionCard({
             >
               {isArchivedView ? <ArchiveRestore className="h-3.5 w-3.5" /> : <Archive className="h-3.5 w-3.5" />}
             </button>
+            {isArchivedView && onDeletePermanent && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onDeletePermanent();
+                }}
+                className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-rose-50 text-rose-500 transition-colors hover:bg-rose-100 hover:text-rose-700"
+                title="מחק סופית"
+                disabled={isDeletingPermanent}
+              >
+                {isDeletingPermanent ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+              </button>
+            )}
           </div>
         </div>
       </button>
@@ -2863,6 +3013,7 @@ function SidebarPanel({
   showArchived,
   selectedSessionId,
   isRefreshing,
+  deletingSessionId,
   onClose,
   onProviderChange,
   onProfileChange,
@@ -2877,6 +3028,7 @@ function SidebarPanel({
   onManageTopic,
   onToggleArchived,
   onToggleSessionHidden,
+  onDeleteSessionPermanently,
   onSelectSession,
   themeMode,
   onThemeModeChange,
@@ -2894,6 +3046,7 @@ function SidebarPanel({
   showArchived: boolean;
   selectedSessionId: string | null;
   isRefreshing: boolean;
+  deletingSessionId?: string | null;
   onClose?: () => void;
   onProviderChange: (value: CodexProfile['provider']) => void;
   onProfileChange: (value: string) => void;
@@ -2908,6 +3061,7 @@ function SidebarPanel({
   onManageTopic: (session: CodexSessionSummary) => void;
   onToggleArchived: () => void;
   onToggleSessionHidden: (sessionId: string, hidden: boolean) => void;
+  onDeleteSessionPermanently: (session: CodexSessionSummary) => void;
   onSelectSession: (sessionId: string) => void;
   themeMode: ThemeMode;
   onThemeModeChange: (mode: ThemeMode) => void;
@@ -3100,9 +3254,11 @@ function SidebarPanel({
                                 isSelected={selectedSessionId === session.id}
                                 isActive={activeSessionIds.has(session.id)}
                                 isArchivedView={showArchived}
+                                isDeletingPermanent={deletingSessionId === session.id}
                                 onSelect={() => onSelectSession(session.id)}
                                 onManageTopic={() => onManageTopic(session)}
                                 onToggleHidden={(hidden) => onToggleSessionHidden(session.id, hidden)}
+                                onDeletePermanent={showArchived ? () => onDeleteSessionPermanently(session) : undefined}
                                 isPreviewOpen={previewSessionId === session.id}
                                 onPreviewOpen={setPreviewSessionId}
                                 onPreviewClose={() => setPreviewSessionId((current) => current === session.id ? null : current)}
@@ -4016,6 +4172,7 @@ function FileTreeDialog({
   onNavigateTo,
   onToggleDirectory,
   onPreviewFile,
+  selectionState,
 }: {
   browser: CodexFileTreeBrowseResult | null;
   loadedNodes: Record<string, CodexFileTreeBrowseResult>;
@@ -4031,6 +4188,13 @@ function FileTreeDialog({
   onNavigateTo: (path: string) => void;
   onToggleDirectory: (path: string) => void;
   onPreviewFile: (path: string) => void;
+  selectionState?: {
+    title: string;
+    description: string;
+    selectedPath: string | null;
+    onSelectEntry: (entry: CodexFileTreeEntry) => void;
+    onConfirmSelection: () => void;
+  } | null;
 }) {
   const normalizedFilter = filterValue.trim().toLowerCase();
 
@@ -4074,7 +4238,7 @@ function FileTreeDialog({
                 <div className={cn(
                   'flex h-9 w-9 shrink-0 items-center justify-center rounded-full',
                   isDirectory ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'
-                )}>
+              )}>
                   {isDirectory ? <Folder className="h-4 w-4" /> : <File className="h-4 w-4" />}
                 </div>
                 <div className="min-w-0 flex-1">
@@ -4101,6 +4265,21 @@ function FileTreeDialog({
                 >
                   <Eye className="h-3.5 w-3.5" />
                   <span>צפייה</span>
+                </button>
+              )}
+              {selectionState && (
+                <button
+                  type="button"
+                  onClick={() => selectionState.onSelectEntry(entry)}
+                  className={cn(
+                    'inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-[11px] font-medium transition',
+                    selectionState.selectedPath === entry.path
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  )}
+                >
+                  {selectionState.selectedPath === entry.path ? <Check className="h-3.5 w-3.5" /> : <Tag className="h-3.5 w-3.5" />}
+                  <span>בחר</span>
                 </button>
               )}
               <CopyButton text={entry.path} ariaLabel="העתק נתיב" className="h-8 w-8 border-0 bg-slate-50" />
@@ -4234,6 +4413,31 @@ function FileTreeDialog({
             </div>
           )}
         </div>
+
+        {selectionState && (
+          <div className="border-t border-slate-100 px-5 py-4">
+            <div className="rounded-[1.25rem] border border-slate-100 bg-slate-50/70 px-4 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Anchor Target
+              </div>
+              <div className="mt-1 text-sm font-semibold text-slate-700">{selectionState.title}</div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">{selectionState.description}</div>
+              <div className="mt-2 truncate rounded-full bg-white px-3 py-2 text-[11px] text-slate-500" dir="ltr" title={selectionState.selectedPath || undefined}>
+                {selectionState.selectedPath || 'עדיין לא נבחר נתיב'}
+              </div>
+              <div className="mt-3 flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={selectionState.onConfirmSelection}
+                  disabled={!selectionState.selectedPath}
+                  className="rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  אשר בחירה
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -6414,6 +6618,462 @@ function TopicManagerDialog({
   );
 }
 
+function AnchorManagerDialog({
+  isOpen,
+  cwd,
+  anchors,
+  selectedAnchorIds,
+  isLoading,
+  error,
+  deletingAnchorId,
+  onClose,
+  onToggleAnchor,
+  onCreateAnchor,
+  onDeleteAnchor,
+}: {
+  isOpen: boolean;
+  cwd: string | null;
+  anchors: CodexProjectAnchor[];
+  selectedAnchorIds: string[];
+  isLoading: boolean;
+  error: string | null;
+  deletingAnchorId: string | null;
+  onClose: () => void;
+  onToggleAnchor: (anchorId: string) => void;
+  onCreateAnchor: () => void;
+  onDeleteAnchor: (anchorId: string) => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[76] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close anchors dialog"
+      />
+      <div className="relative z-10 flex w-full max-w-2xl max-h-[82dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-50 text-amber-700">
+              <Tag className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Anchors
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">עוגנים לתיקייה הזו</div>
+              <div className="mt-1 truncate text-xs text-slate-500" dir="ltr" title={cwd || undefined}>
+                {cwd || 'לא נבחרה תיקייה פעילה'}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-3">
+          <div className="text-xs leading-6 text-slate-500">
+            בחר עוגנים לטעינה אוטומטית בשיחה הזו. הם יישמרו לשיחה בלבד, אבל זמינים בכל השיחות של אותה תיקייה.
+          </div>
+          <button
+            type="button"
+            onClick={onCreateAnchor}
+            disabled={!cwd}
+            className="shrink-0 rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            צור עוגן
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          {error && (
+            <div className="rounded-[1.25rem] border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+
+          {isLoading ? (
+            <div className="flex min-h-[220px] items-center justify-center rounded-[1.5rem] border border-slate-100 bg-slate-50/70 text-sm text-slate-500">
+              <div className="flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>טוען עוגנים...</span>
+              </div>
+            </div>
+          ) : anchors.length === 0 ? (
+            <div className="rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm leading-7 text-slate-500">
+              עדיין אין עוגנים לתיקייה הזו.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {anchors.map((anchor) => {
+                const isSelected = selectedAnchorIds.includes(anchor.id);
+                return (
+                  <div
+                    key={anchor.id}
+                    className={cn(
+                      'rounded-[1.35rem] border px-4 py-4 transition',
+                      isSelected
+                        ? 'border-amber-200 bg-amber-50/70'
+                        : 'border-slate-100 bg-white'
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <button
+                        type="button"
+                        onClick={() => onToggleAnchor(anchor.id)}
+                        className="flex min-w-0 flex-1 items-start gap-3 text-right"
+                      >
+                        <div className={cn(
+                          'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+                          isSelected ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'
+                        )}>
+                          {anchor.targetKind === 'directory' ? <FolderTree className="h-4 w-4" /> : <FileText className="h-4 w-4" />}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="truncate text-sm font-semibold text-slate-800">{anchor.name}</div>
+                            {isSelected && (
+                              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                פעיל
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 text-xs leading-6 text-slate-500">{anchor.description}</div>
+                          <div className="mt-2 truncate rounded-full bg-white/80 px-3 py-1.5 text-[11px] text-slate-400" dir="ltr" title={anchor.targetPath}>
+                            {anchor.relativePath}
+                          </div>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDeleteAnchor(anchor.id)}
+                        disabled={deletingAnchorId === anchor.id}
+                        className="shrink-0 rounded-full border border-rose-100 bg-white p-2 text-rose-500 transition hover:bg-rose-50 disabled:opacity-40"
+                        title="מחק עוגן"
+                      >
+                        {deletingAnchorId === anchor.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SkillPickerDialog({
+  isOpen,
+  skills,
+  selectedSkillIds,
+  isLoading,
+  error,
+  onClose,
+  onToggleSkill,
+}: {
+  isOpen: boolean;
+  skills: UnifiedSkillSummary[];
+  selectedSkillIds: string[];
+  isLoading: boolean;
+  error: string | null;
+  onClose: () => void;
+  onToggleSkill: (skillId: string) => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[76] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close skills dialog"
+      />
+      <div className="relative z-10 flex w-full max-w-3xl max-h-[82dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-sky-50 text-sky-700">
+              <Wrench className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Skills
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">סקילים משותפים לכל הפרוביידרים</div>
+              <div className="mt-1 text-sm leading-6 text-slate-500">
+                בחר סקילים של Codex ו-Claude, והאפליקציה תטען אותם כהקשר גם ל-Gemini.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          {error && (
+            <div className="rounded-[1.25rem] border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+
+          {isLoading ? (
+            <div className="flex min-h-[220px] items-center justify-center rounded-[1.5rem] border border-slate-100 bg-slate-50/70 text-sm text-slate-500">
+              <div className="flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>טוען סקילים...</span>
+              </div>
+            </div>
+          ) : skills.length === 0 ? (
+            <div className="rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm leading-7 text-slate-500">
+              לא נמצאו סקילים זמינים ב-Codex או Claude.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {skills.map((skill) => {
+                const isSelected = selectedSkillIds.includes(skill.id);
+                return (
+                  <button
+                    key={skill.id}
+                    type="button"
+                    onClick={() => onToggleSkill(skill.id)}
+                    className={cn(
+                      'flex w-full items-start gap-3 rounded-[1.35rem] border px-4 py-4 text-right transition',
+                      isSelected
+                        ? 'border-sky-200 bg-sky-50/70'
+                        : 'border-slate-100 bg-white hover:border-slate-200 hover:bg-slate-50/70'
+                    )}
+                  >
+                    <div className={cn(
+                      'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+                      isSelected ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-500'
+                    )}>
+                      {skill.providerOrigin === 'claude' ? <Bot className="h-4 w-4" /> : <Command className="h-4 w-4" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="truncate text-sm font-semibold text-slate-800">{skill.displayName}</div>
+                        <div className="flex flex-wrap items-center gap-1">
+                          <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-slate-500">
+                            {getSkillOriginLabel(skill.providerOrigin)}
+                          </span>
+                          <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-slate-500">
+                            {getSkillScopeLabel(skill.scope)}
+                          </span>
+                          {isSelected && (
+                            <span className="rounded-full bg-sky-600 px-2 py-0.5 text-[10px] font-medium text-white">
+                              פעיל
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="mt-1 text-xs leading-6 text-slate-500">
+                        {skill.description || 'ללא תיאור.'}
+                      </div>
+                      <div className="mt-2 truncate text-[11px] text-slate-400" dir="ltr" title={skill.path}>
+                        {skill.path}
+                      </div>
+                    </div>
+                    {isSelected && <Check className="mt-1 h-4 w-4 shrink-0 text-sky-600" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CreateAnchorDialog({
+  isOpen,
+  cwd,
+  targetEntry,
+  name,
+  description,
+  isSaving,
+  onClose,
+  onChangeName,
+  onChangeDescription,
+  onSave,
+}: {
+  isOpen: boolean;
+  cwd: string | null;
+  targetEntry: CodexFileTreeEntry | null;
+  name: string;
+  description: string;
+  isSaving: boolean;
+  onClose: () => void;
+  onChangeName: (value: string) => void;
+  onChangeDescription: (value: string) => void;
+  onSave: () => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[77] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close create anchor dialog"
+      />
+      <div className="relative z-10 flex w-full max-w-xl flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-50 text-amber-700">
+              <Tag className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                New Anchor
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">צור עוגן חדש</div>
+              <div className="mt-1 truncate text-xs text-slate-500" dir="ltr" title={cwd || undefined}>
+                {cwd || 'לא נבחרה תיקייה פעילה'}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="space-y-4 px-5 py-5">
+          <div className="rounded-[1.25rem] border border-slate-100 bg-slate-50/70 px-4 py-3">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">יעד נבחר</div>
+            <div className="mt-1 text-sm font-semibold text-slate-800">
+              {targetEntry?.name || 'לא נבחר יעד'}
+            </div>
+            <div className="mt-2 truncate rounded-full bg-white px-3 py-2 text-[11px] text-slate-500" dir="ltr" title={targetEntry?.path || undefined}>
+              {targetEntry?.path || 'בחר קודם קובץ או תיקייה מתוך עץ הקבצים'}
+            </div>
+          </div>
+
+          <input
+            value={name}
+            onChange={(event) => onChangeName(event.target.value)}
+            placeholder="שם קצר לעוגן"
+            className="w-full rounded-[1.25rem] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 outline-none transition focus:border-indigo-300"
+          />
+
+          <Textarea
+            value={description}
+            onChange={(event) => onChangeDescription(event.target.value)}
+            placeholder="מה העוגן הזה מייצג ומתי כדאי לבחור אותו?"
+            rows={4}
+            className="min-h-[120px] resize-none rounded-[1.25rem] border border-slate-200 bg-white px-4 py-4 text-sm leading-7 text-slate-800 shadow-none placeholder:text-slate-300 focus-visible:ring-0"
+          />
+
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+            >
+              בטל
+            </button>
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={isSaving || !targetEntry || !name.trim() || !description.trim()}
+              className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isSaving ? 'יוצר...' : 'שמור עוגן'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PermanentDeleteSessionDialog({
+  session,
+  isDeleting,
+  onClose,
+  onConfirm,
+}: {
+  session: CodexSessionSummary | null;
+  isDeleting: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  if (!session) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[78] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close permanent delete confirmation"
+      />
+      <div className="relative z-10 w-full max-w-[21rem] overflow-hidden rounded-[1.7rem] border border-slate-100/90 bg-white px-4 py-4 text-right shadow-[0_26px_70px_-34px_rgba(15,23,42,0.28)]">
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-rose-50 text-rose-500">
+            <Trash2 className="h-4 w-4" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-slate-800">למחוק שיחה סופית?</div>
+            <div className="mt-1 text-[12px] leading-6 text-slate-500">
+              השיחה תימחק מהארכיון, מהמטא-דאטה ומהקבצים בדיסק. אי אפשר לשחזר אחרי זה.
+            </div>
+            <div className="mt-2 truncate rounded-full bg-slate-50 px-3 py-2 text-[11px] text-slate-500">
+              {getSessionDisplayTitle(session)}
+            </div>
+          </div>
+        </div>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="h-11 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
+          >
+            בטל
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={isDeleting}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-rose-100 bg-rose-50 text-rose-600 transition hover:border-rose-200 hover:bg-rose-100 disabled:opacity-40"
+            aria-label="אשר מחיקה סופית"
+          >
+            {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function CodexMobileApp() {
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [profiles, setProfiles] = useState<CodexProfile[]>([]);
@@ -6437,6 +7097,11 @@ export function CodexMobileApp() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isHeaderActionsOpen, setIsHeaderActionsOpen] = useState(false);
   const [isScheduleOpen, setIsScheduleOpen] = useState(false);
+  const [isAdditionsMenuOpen, setIsAdditionsMenuOpen] = useState(false);
+  const [isAnchorManagerOpen, setIsAnchorManagerOpen] = useState(false);
+  const [isSkillPickerDialogOpen, setIsSkillPickerDialogOpen] = useState(false);
+  const [isAnchorCreateDialogOpen, setIsAnchorCreateDialogOpen] = useState(false);
+  const [isAnchorTargetPickerMode, setIsAnchorTargetPickerMode] = useState(false);
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
   const [isReasoningPickerOpen, setIsReasoningPickerOpen] = useState(false);
   const [isRateLimitOpen, setIsRateLimitOpen] = useState(false);
@@ -6469,10 +7134,24 @@ export function CodexMobileApp() {
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
+  const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>({ anchorIds: [], skillIds: [] });
   const [instructionDraft, setInstructionDraft] = useState('');
+  const [projectAnchors, setProjectAnchors] = useState<CodexProjectAnchor[]>([]);
+  const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
   const [isInstructionDialogOpen, setIsInstructionDialogOpen] = useState(false);
   const [isInstructionLoading, setIsInstructionLoading] = useState(false);
+  const [isSessionContextSelectionLoading, setIsSessionContextSelectionLoading] = useState(false);
+  const [isSessionContextSelectionSaving, setIsSessionContextSelectionSaving] = useState(false);
+  const [isProjectAnchorsLoading, setIsProjectAnchorsLoading] = useState(false);
+  const [isUnifiedSkillsLoading, setIsUnifiedSkillsLoading] = useState(false);
   const [isInstructionSaving, setIsInstructionSaving] = useState(false);
+  const [projectAnchorsError, setProjectAnchorsError] = useState<string | null>(null);
+  const [unifiedSkillsError, setUnifiedSkillsError] = useState<string | null>(null);
+  const [anchorDraftTargetEntry, setAnchorDraftTargetEntry] = useState<CodexFileTreeEntry | null>(null);
+  const [anchorDraftName, setAnchorDraftName] = useState('');
+  const [anchorDraftDescription, setAnchorDraftDescription] = useState('');
+  const [isAnchorSaving, setIsAnchorSaving] = useState(false);
+  const [deletingAnchorId, setDeletingAnchorId] = useState<string | null>(null);
   const [scheduleType, setScheduleType] = useState<'once' | 'recurring'>('once');
   const [recurringFreq, setRecurringFreq] = useState<'daily' | 'weekly'>('daily');
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -6504,6 +7183,8 @@ export function CodexMobileApp() {
     entryId: string;
     shouldStopRunningTurn: boolean;
   } | null>(null);
+  const [pendingPermanentDeleteSession, setPendingPermanentDeleteSession] = useState<CodexSessionSummary | null>(null);
+  const [deletingPermanentSessionId, setDeletingPermanentSessionId] = useState<string | null>(null);
   const [newTopicName, setNewTopicName] = useState('');
   const [newTopicIcon, setNewTopicIcon] = useState(TOPIC_ICON_PRESETS[0]);
   const [newTopicColorKey, setNewTopicColorKey] = useState<keyof typeof TOPIC_COLOR_PRESETS>('sky');
@@ -6539,6 +7220,9 @@ export function CodexMobileApp() {
   const latestSessionLoadTokenRef = useRef(0);
   const latestFullTimelineLoadTokenRef = useRef(0);
   const latestInstructionLoadTokenRef = useRef(0);
+  const latestSessionContextSelectionLoadTokenRef = useRef(0);
+  const latestProjectAnchorsLoadTokenRef = useRef(0);
+  const latestUnifiedSkillsLoadTokenRef = useRef(0);
   const latestModelCatalogLoadTokenRef = useRef(0);
   const latestRateLimitLoadTokenRef = useRef(0);
   const currentSessionActiveCountRef = useRef(0);
@@ -7218,6 +7902,9 @@ export function CodexMobileApp() {
   function openFileTree() {
     setIsHeaderActionsOpen(false);
     setIsSidebarOpen(false);
+    setIsAdditionsMenuOpen(false);
+    setIsAnchorTargetPickerMode(false);
+    setAnchorDraftTargetEntry(null);
     setIsFileTreeOpen(true);
     setFileTreeFilter('');
     setFileTreePathInput(activeComposerCwd || currentProfile?.workspaceCwd || '');
@@ -7229,6 +7916,7 @@ export function CodexMobileApp() {
   function openMiniGame() {
     setIsHeaderActionsOpen(false);
     setIsSidebarOpen(false);
+    setIsAdditionsMenuOpen(false);
     setIsGamePickerOpen(true);
   }
 
@@ -7746,6 +8434,14 @@ export function CodexMobileApp() {
     setPrompt('');
     setSearch('');
     setError(null);
+    setIsAdditionsMenuOpen(false);
+    setIsAnchorManagerOpen(false);
+    setIsSkillPickerDialogOpen(false);
+    setIsAnchorCreateDialogOpen(false);
+    setIsAnchorTargetPickerMode(false);
+    setAnchorDraftTargetEntry(null);
+    setAnchorDraftName('');
+    setAnchorDraftDescription('');
     clearDraftAttachments();
     setScheduledFor('');
     setIsScheduleOpen(false);
@@ -7812,6 +8508,17 @@ export function CodexMobileApp() {
     setFileTreeLoadingPaths({});
     setFileTreeError(null);
     setIsFileTreeOpen(false);
+    setIsAdditionsMenuOpen(false);
+    setIsAnchorManagerOpen(false);
+    setIsSkillPickerDialogOpen(false);
+    setIsAnchorCreateDialogOpen(false);
+    setIsAnchorTargetPickerMode(false);
+    setAnchorDraftTargetEntry(null);
+    setAnchorDraftName('');
+    setAnchorDraftDescription('');
+    setProjectAnchors([]);
+    setProjectAnchorsError(null);
+    setSessionContextSelection({ anchorIds: [], skillIds: [] });
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
@@ -8894,6 +9601,255 @@ export function CodexMobileApp() {
     }
   }
 
+  async function loadCurrentSessionContextSelection(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
+    if (!nextProfileId || !nextSessionKey) {
+      setSessionContextSelection({ anchorIds: [], skillIds: [] });
+      return;
+    }
+
+    const requestToken = ++latestSessionContextSelectionLoadTokenRef.current;
+    setIsSessionContextSelectionLoading(true);
+    try {
+      const selection = await fetchSessionContextSelection(nextProfileId, nextSessionKey);
+      if (requestToken !== latestSessionContextSelectionLoadTokenRef.current) {
+        return;
+      }
+      setSessionContextSelection(selection);
+    } catch (selectionError: any) {
+      if (requestToken === latestSessionContextSelectionLoadTokenRef.current) {
+        setSessionContextSelection({ anchorIds: [], skillIds: [] });
+        setError(selectionError.message || 'Failed to load anchor and skill selection');
+      }
+    } finally {
+      if (requestToken === latestSessionContextSelectionLoadTokenRef.current) {
+        setIsSessionContextSelectionLoading(false);
+      }
+    }
+  }
+
+  async function persistSessionContextSelection(nextSelection: CodexSessionContextSelection) {
+    if (!profileId || !currentQueueKey) {
+      return;
+    }
+
+    setSessionContextSelection(nextSelection);
+    setIsSessionContextSelectionSaving(true);
+    try {
+      const savedSelection = await saveSessionContextSelection(profileId, currentQueueKey, nextSelection);
+      setSessionContextSelection(savedSelection);
+    } catch (selectionError: any) {
+      setError(selectionError.message || 'Failed to save anchor and skill selection');
+      void loadCurrentSessionContextSelection(profileId, currentQueueKey);
+    } finally {
+      setIsSessionContextSelectionSaving(false);
+    }
+  }
+
+  async function loadCurrentProjectAnchors(nextProfileId = profileId, nextCwd = activeComposerCwd) {
+    if (!nextProfileId || !nextCwd) {
+      setProjectAnchors([]);
+      setProjectAnchorsError(null);
+      return;
+    }
+
+    const requestToken = ++latestProjectAnchorsLoadTokenRef.current;
+    setIsProjectAnchorsLoading(true);
+    setProjectAnchorsError(null);
+    try {
+      const anchors = await fetchProjectAnchors(nextProfileId, nextCwd);
+      if (requestToken !== latestProjectAnchorsLoadTokenRef.current) {
+        return;
+      }
+      setProjectAnchors(anchors);
+    } catch (anchorsError: any) {
+      if (requestToken === latestProjectAnchorsLoadTokenRef.current) {
+        setProjectAnchors([]);
+        setProjectAnchorsError(anchorsError.message || 'Failed to load project anchors');
+      }
+    } finally {
+      if (requestToken === latestProjectAnchorsLoadTokenRef.current) {
+        setIsProjectAnchorsLoading(false);
+      }
+    }
+  }
+
+  async function loadUnifiedSkillCatalog() {
+    const requestToken = ++latestUnifiedSkillsLoadTokenRef.current;
+    setIsUnifiedSkillsLoading(true);
+    setUnifiedSkillsError(null);
+    try {
+      const skills = await fetchUnifiedSkills();
+      if (requestToken !== latestUnifiedSkillsLoadTokenRef.current) {
+        return;
+      }
+      setAvailableUnifiedSkills(skills);
+    } catch (skillsError: any) {
+      if (requestToken === latestUnifiedSkillsLoadTokenRef.current) {
+        setAvailableUnifiedSkills([]);
+        setUnifiedSkillsError(skillsError.message || 'Failed to load unified skills');
+      }
+    } finally {
+      if (requestToken === latestUnifiedSkillsLoadTokenRef.current) {
+        setIsUnifiedSkillsLoading(false);
+      }
+    }
+  }
+
+  function toggleAnchorSelection(anchorId: string) {
+    const currentIds = new Set(sessionContextSelection.anchorIds);
+    if (currentIds.has(anchorId)) {
+      currentIds.delete(anchorId);
+    } else {
+      currentIds.add(anchorId);
+    }
+    void persistSessionContextSelection({
+      anchorIds: [...currentIds],
+      skillIds: sessionContextSelection.skillIds,
+    });
+  }
+
+  function toggleSkillSelection(skillId: string) {
+    const currentIds = new Set(sessionContextSelection.skillIds);
+    if (currentIds.has(skillId)) {
+      currentIds.delete(skillId);
+    } else {
+      currentIds.add(skillId);
+    }
+    void persistSessionContextSelection({
+      anchorIds: sessionContextSelection.anchorIds,
+      skillIds: [...currentIds],
+    });
+  }
+
+  function openAdditionsMenu() {
+    setIsScheduleOpen(false);
+    setIsModelPickerOpen(false);
+    setIsReasoningPickerOpen(false);
+    setIsRateLimitOpen(false);
+    setIsAdditionsMenuOpen((current) => !current);
+  }
+
+  function openAnchorManager() {
+    setIsAdditionsMenuOpen(false);
+    setIsAnchorManagerOpen(true);
+    if (profileId && activeComposerCwd) {
+      void loadCurrentProjectAnchors(profileId, activeComposerCwd);
+    }
+  }
+
+  function openSkillPickerDialog() {
+    setIsAdditionsMenuOpen(false);
+    setIsSkillPickerDialogOpen(true);
+    if (availableUnifiedSkills.length === 0) {
+      void loadUnifiedSkillCatalog();
+    }
+  }
+
+  function openAnchorTargetPicker() {
+    if (!activeComposerCwd && !currentProfile?.workspaceCwd) {
+      setError('אין תיקייה פעילה לבחירת עוגן.');
+      return;
+    }
+
+    setIsAnchorManagerOpen(false);
+    setIsAnchorTargetPickerMode(true);
+    setAnchorDraftTargetEntry(null);
+    setAnchorDraftName('');
+    setAnchorDraftDescription('');
+    setIsFileTreeOpen(true);
+    setFileTreeFilter('');
+    setFileTreePathInput(activeComposerCwd || currentProfile?.workspaceCwd || '');
+    setFileTreeNodes({});
+    setFileTreeExpandedPaths({});
+    void loadFileTree(undefined, { replaceRoot: true, expandRoot: true });
+  }
+
+  function confirmAnchorTargetSelection() {
+    if (!anchorDraftTargetEntry) {
+      return;
+    }
+
+    setIsAnchorTargetPickerMode(false);
+    setIsFileTreeOpen(false);
+    setIsAnchorCreateDialogOpen(true);
+  }
+
+  async function createAnchorFromDraft() {
+    if (!profileId || !activeComposerCwd || !anchorDraftTargetEntry) {
+      setError('חסר מידע ליצירת עוגן.');
+      return;
+    }
+
+    setIsAnchorSaving(true);
+    try {
+      const anchor = await createProjectAnchorRequest(profileId, {
+        cwd: activeComposerCwd,
+        targetPath: anchorDraftTargetEntry.path,
+        targetKind: anchorDraftTargetEntry.kind === 'directory' ? 'directory' : 'file',
+        name: anchorDraftName.trim(),
+        description: anchorDraftDescription.trim(),
+      });
+      setProjectAnchors((current) => [anchor, ...current.filter((currentAnchor) => currentAnchor.id !== anchor.id)]);
+      const nextAnchorIds = Array.from(new Set([anchor.id, ...sessionContextSelection.anchorIds]));
+      await persistSessionContextSelection({
+        anchorIds: nextAnchorIds,
+        skillIds: sessionContextSelection.skillIds,
+      });
+      setIsAnchorCreateDialogOpen(false);
+      setIsAnchorManagerOpen(true);
+      setAnchorDraftTargetEntry(null);
+      setAnchorDraftName('');
+      setAnchorDraftDescription('');
+    } catch (anchorError: any) {
+      setError(anchorError.message || 'Failed to create anchor');
+    } finally {
+      setIsAnchorSaving(false);
+    }
+  }
+
+  async function deleteAnchor(anchorId: string) {
+    if (!profileId || !activeComposerCwd) {
+      return;
+    }
+
+    setDeletingAnchorId(anchorId);
+    try {
+      await deleteProjectAnchorRequest(profileId, activeComposerCwd, anchorId);
+      setProjectAnchors((current) => current.filter((anchor) => anchor.id !== anchorId));
+      if (sessionContextSelection.anchorIds.includes(anchorId)) {
+        await persistSessionContextSelection({
+          anchorIds: sessionContextSelection.anchorIds.filter((currentId) => currentId !== anchorId),
+          skillIds: sessionContextSelection.skillIds,
+        });
+      }
+    } catch (anchorError: any) {
+      setError(anchorError.message || 'Failed to delete anchor');
+    } finally {
+      setDeletingAnchorId(null);
+    }
+  }
+
+  async function confirmPermanentDeleteSession() {
+    if (!pendingPermanentDeleteSession) {
+      return;
+    }
+
+    try {
+      setDeletingPermanentSessionId(pendingPermanentDeleteSession.id);
+      await deleteSessionPermanently(pendingPermanentDeleteSession.id, pendingPermanentDeleteSession.profileId);
+      if (selectedSessionId === pendingPermanentDeleteSession.id) {
+        handleNewConversation(activeComposerCwd);
+      }
+      setSessions((current) => current.filter((session) => session.id !== pendingPermanentDeleteSession.id));
+      setPendingPermanentDeleteSession(null);
+      await loadSessionsOnly(profileId, { silent: true });
+    } catch (deleteError: any) {
+      setError(deleteError.message || 'Failed to delete archived session permanently');
+    } finally {
+      setDeletingPermanentSessionId(null);
+    }
+  }
+
   async function handleSupportedSlashCommand(rawPrompt: string): Promise<boolean> {
     const command = parseSlashCommand(rawPrompt);
     if (!command) {
@@ -8973,6 +9929,14 @@ export function CodexMobileApp() {
     () => supportedReasoningLevels.find((level) => level.effort === selectedReasoningEffort) || null,
     [selectedReasoningEffort, supportedReasoningLevels]
   );
+  const selectedAnchorSummaries = useMemo(
+    () => projectAnchors.filter((anchor) => sessionContextSelection.anchorIds.includes(anchor.id)),
+    [projectAnchors, sessionContextSelection.anchorIds]
+  );
+  const selectedSkillSummaries = useMemo(
+    () => availableUnifiedSkills.filter((skill) => sessionContextSelection.skillIds.includes(skill.id)),
+    [availableUnifiedSkills, sessionContextSelection.skillIds]
+  );
   const modelPermissionTone = useMemo(
     () => getPermissionTone(modelPermissionSnapshot),
     [modelPermissionSnapshot]
@@ -9000,7 +9964,22 @@ export function CodexMobileApp() {
     }
 
     void loadCurrentSessionInstruction(profileId, currentQueueKey);
+    void loadCurrentSessionContextSelection(profileId, currentQueueKey);
   }, [currentQueueKey, profileId]);
+
+  useEffect(() => {
+    if (!profileId || !activeComposerCwd) {
+      setProjectAnchors([]);
+      setProjectAnchorsError(null);
+      return;
+    }
+
+    void loadCurrentProjectAnchors(profileId, activeComposerCwd);
+  }, [activeComposerCwd, profileId]);
+
+  useEffect(() => {
+    void loadUnifiedSkillCatalog();
+  }, []);
 
   useEffect(() => {
     if (!profileId) {
@@ -9067,7 +10046,7 @@ export function CodexMobileApp() {
   }, [selectedModelOption, selectedReasoningEffort, supportedReasoningLevels]);
 
   useEffect(() => {
-    if (!isModelPickerOpen && !isReasoningPickerOpen && !isRateLimitOpen) {
+    if (!isModelPickerOpen && !isReasoningPickerOpen && !isRateLimitOpen && !isAdditionsMenuOpen) {
       return;
     }
 
@@ -9080,13 +10059,14 @@ export function CodexMobileApp() {
       setIsModelPickerOpen(false);
       setIsReasoningPickerOpen(false);
       setIsRateLimitOpen(false);
+      setIsAdditionsMenuOpen(false);
     };
 
     document.addEventListener('pointerdown', handlePointerDown);
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown);
     };
-  }, [isModelPickerOpen, isRateLimitOpen, isReasoningPickerOpen]);
+  }, [isAdditionsMenuOpen, isModelPickerOpen, isRateLimitOpen, isReasoningPickerOpen]);
 
   useEffect(() => {
     if (!profileId) {
@@ -9254,6 +10234,7 @@ export function CodexMobileApp() {
       showArchived={showArchived}
       selectedSessionId={selectedConversationId}
       isRefreshing={isRefreshing}
+      deletingSessionId={deletingPermanentSessionId}
       onClose={onClose}
       onProviderChange={handleProviderChange}
       onProfileChange={handleProfileChange}
@@ -9268,6 +10249,7 @@ export function CodexMobileApp() {
       onManageTopic={(session) => void openTopicManager(session)}
       onToggleArchived={() => setShowArchived((current) => !current)}
       onToggleSessionHidden={(sessionId, hidden) => void handleToggleSessionHidden(sessionId, hidden)}
+      onDeleteSessionPermanently={(session) => setPendingPermanentDeleteSession(session)}
       onSelectSession={handleSelectConversation}
       themeMode={themeMode}
       onThemeModeChange={setThemeMode}
@@ -9691,6 +10673,39 @@ export function CodexMobileApp() {
               </div>
             )}
 
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || isSessionContextSelectionSaving) && (
+              <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
+                {selectedAnchorSummaries.map((anchor) => (
+                  <button
+                    key={anchor.id}
+                    type="button"
+                    onClick={openAnchorManager}
+                    className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] font-medium text-amber-700 transition hover:bg-amber-100"
+                  >
+                    <Tag className="h-3.5 w-3.5" />
+                    <span>{anchor.name}</span>
+                  </button>
+                ))}
+                {selectedSkillSummaries.map((skill) => (
+                  <button
+                    key={skill.id}
+                    type="button"
+                    onClick={openSkillPickerDialog}
+                    className="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-[11px] font-medium text-sky-700 transition hover:bg-sky-100"
+                  >
+                    <Wrench className="h-3.5 w-3.5" />
+                    <span>{skill.displayName}</span>
+                  </button>
+                ))}
+                {isSessionContextSelectionSaving && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-500">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>שומר הקשר...</span>
+                  </span>
+                )}
+              </div>
+            )}
+
             {isScheduleOpen && (
               <div dir="rtl" className="mb-3 flex flex-col gap-3 rounded-2xl border border-indigo-100 bg-indigo-50/50 p-3">
                 <div className="flex items-center gap-2">
@@ -9867,6 +10882,7 @@ export function CodexMobileApp() {
                     onClick={() => {
                       setIsScheduleOpen(false);
                       setIsRateLimitOpen(false);
+                      setIsAdditionsMenuOpen(false);
                       setIsModelPickerOpen((current) => !current);
                       setIsReasoningPickerOpen(false);
                     }}
@@ -9974,6 +10990,7 @@ export function CodexMobileApp() {
                                       || model.supportedReasoningLevels[0]?.effort
                                       || null
                                     );
+                                    setIsAdditionsMenuOpen(false);
                                     setIsReasoningPickerOpen(false);
                                   }}
                                   className={cn(
@@ -10027,6 +11044,7 @@ export function CodexMobileApp() {
                                   type="button"
                                   onClick={() => {
                                     setSelectedReasoningEffort(level.effort);
+                                    setIsAdditionsMenuOpen(false);
                                     setIsReasoningPickerOpen(false);
                                     setIsModelPickerOpen(false);
                                   }}
@@ -10063,6 +11081,7 @@ export function CodexMobileApp() {
                       setIsRateLimitOpen(false);
                       setIsModelPickerOpen(false);
                       setIsReasoningPickerOpen(false);
+                      setIsAdditionsMenuOpen(false);
                       setIsScheduleOpen((current) => !current);
                     }}
                     className={cn(
@@ -10102,6 +11121,7 @@ export function CodexMobileApp() {
                       setIsScheduleOpen(false);
                       setIsModelPickerOpen(false);
                       setIsReasoningPickerOpen(false);
+                      setIsAdditionsMenuOpen(false);
                       setIsRateLimitOpen((current) => !current);
                     }}
                     className={cn(
@@ -10240,17 +11260,77 @@ export function CodexMobileApp() {
                   )}
 
                   <button
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={openAdditionsMenu}
                     disabled={isUploading}
                     className={cn(
                       'shrink-0 p-2.5 text-slate-400 transition-all active:scale-95',
                       isUploading
                         ? 'text-slate-300'
-                        : 'hover:text-indigo-500'
+                        : isAdditionsMenuOpen
+                          ? 'text-indigo-600'
+                          : 'hover:text-indigo-500'
                     )}
                   >
                     {isUploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Paperclip className="h-5 w-5" />}
                   </button>
+
+                  {isAdditionsMenuOpen && (
+                    <div className="absolute bottom-full left-0 z-20 mb-2 w-[min(12.5rem,72vw)] overflow-hidden rounded-[1rem] border border-slate-200/80 bg-white/96 shadow-[0_16px_36px_-30px_rgba(15,23,42,0.2)] backdrop-blur-xl">
+                      <div className="border-b border-slate-100/90 bg-gradient-to-b from-indigo-50/45 via-white to-white px-2.5 py-2 text-right">
+                        <div className="flex items-center justify-between gap-2">
+                          <Paperclip className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[11px] font-semibold text-slate-700">תוספות לשיחה</div>
+                            <div className="truncate text-[9px] text-slate-400">
+                              קבצים, עוגנים וסקילים
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="space-y-1 p-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsAdditionsMenuOpen(false);
+                            fileInputRef.current?.click();
+                          }}
+                          className="flex w-full items-center justify-between gap-3 rounded-[0.9rem] border border-slate-100 bg-slate-50/80 px-3 py-2 text-right transition hover:border-slate-200 hover:bg-white"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-[11px] font-semibold text-slate-700">קבצים</div>
+                            <div className="text-[9px] text-slate-400">כמו ההעלאה הרגילה</div>
+                          </div>
+                          <File className="h-4 w-4 shrink-0 text-slate-400" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={openAnchorManager}
+                          className="flex w-full items-center justify-between gap-3 rounded-[0.9rem] border border-slate-100 bg-slate-50/80 px-3 py-2 text-right transition hover:border-amber-200 hover:bg-amber-50/50"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-[11px] font-semibold text-slate-700">עוגנים</div>
+                            <div className="text-[9px] text-slate-400">
+                              {selectedAnchorSummaries.length > 0 ? `${selectedAnchorSummaries.length} פעילים כעת` : 'עוגנים קבועים לתיקייה'}
+                            </div>
+                          </div>
+                          <Tag className="h-4 w-4 shrink-0 text-amber-500" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={openSkillPickerDialog}
+                          className="flex w-full items-center justify-between gap-3 rounded-[0.9rem] border border-slate-100 bg-slate-50/80 px-3 py-2 text-right transition hover:border-sky-200 hover:bg-sky-50/50"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-[11px] font-semibold text-slate-700">סקילים</div>
+                            <div className="text-[9px] text-slate-400">
+                              {selectedSkillSummaries.length > 0 ? `${selectedSkillSummaries.length} טעונים כעת` : 'Codex + Claude לכל provider'}
+                            </div>
+                          </div>
+                          <Wrench className="h-4 w-4 shrink-0 text-sky-500" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <button
@@ -10446,7 +11526,10 @@ export function CodexMobileApp() {
           error={fileTreeError}
           pathValue={fileTreePathInput}
           filterValue={fileTreeFilter}
-          onClose={() => setIsFileTreeOpen(false)}
+          onClose={() => {
+            setIsFileTreeOpen(false);
+            setIsAnchorTargetPickerMode(false);
+          }}
           onPathChange={setFileTreePathInput}
           onFilterChange={setFileTreeFilter}
           onOpenPath={openFileTreePathFromInput}
@@ -10458,10 +11541,60 @@ export function CodexMobileApp() {
           onToggleDirectory={toggleFileTreeDirectory}
           onPreviewFile={(path) => {
             setIsFileTreeOpen(false);
+            setIsAnchorTargetPickerMode(false);
             void handleOpenFilePreview(path);
           }}
+          selectionState={isAnchorTargetPickerMode ? {
+            title: 'בחירת יעד לעוגן',
+            description: 'בחר קובץ או תיקיית משנה מתוך העץ הקיים, ואז המשך לשם ותיאור העוגן.',
+            selectedPath: anchorDraftTargetEntry?.path || null,
+            onSelectEntry: setAnchorDraftTargetEntry,
+            onConfirmSelection: confirmAnchorTargetSelection,
+          } : null}
         />
       )}
+
+      <AnchorManagerDialog
+        isOpen={isAnchorManagerOpen}
+        cwd={activeComposerCwd}
+        anchors={projectAnchors}
+        selectedAnchorIds={sessionContextSelection.anchorIds}
+        isLoading={isProjectAnchorsLoading || isSessionContextSelectionLoading}
+        error={projectAnchorsError}
+        deletingAnchorId={deletingAnchorId}
+        onClose={() => setIsAnchorManagerOpen(false)}
+        onToggleAnchor={toggleAnchorSelection}
+        onCreateAnchor={openAnchorTargetPicker}
+        onDeleteAnchor={(anchorId) => void deleteAnchor(anchorId)}
+      />
+
+      <SkillPickerDialog
+        isOpen={isSkillPickerDialogOpen}
+        skills={availableUnifiedSkills}
+        selectedSkillIds={sessionContextSelection.skillIds}
+        isLoading={isUnifiedSkillsLoading || isSessionContextSelectionLoading}
+        error={unifiedSkillsError}
+        onClose={() => setIsSkillPickerDialogOpen(false)}
+        onToggleSkill={toggleSkillSelection}
+      />
+
+      <CreateAnchorDialog
+        isOpen={isAnchorCreateDialogOpen}
+        cwd={activeComposerCwd}
+        targetEntry={anchorDraftTargetEntry}
+        name={anchorDraftName}
+        description={anchorDraftDescription}
+        isSaving={isAnchorSaving}
+        onClose={() => {
+          setIsAnchorCreateDialogOpen(false);
+          setAnchorDraftTargetEntry(null);
+          setAnchorDraftName('');
+          setAnchorDraftDescription('');
+        }}
+        onChangeName={setAnchorDraftName}
+        onChangeDescription={setAnchorDraftDescription}
+        onSave={() => void createAnchorFromDraft()}
+      />
 
       {isFolderPickerOpen && (
         <FolderPickerDialog
@@ -10553,6 +11686,18 @@ export function CodexMobileApp() {
           </div>
         </div>
       )}
+
+      <PermanentDeleteSessionDialog
+        session={pendingPermanentDeleteSession}
+        isDeleting={deletingPermanentSessionId === pendingPermanentDeleteSession?.id}
+        onClose={() => {
+          if (deletingPermanentSessionId) {
+            return;
+          }
+          setPendingPermanentDeleteSession(null);
+        }}
+        onConfirm={() => void confirmPermanentDeleteSession()}
+      />
 
       {isSessionChangeDialogOpen && (
         <div className="fixed inset-0 z-[60] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">

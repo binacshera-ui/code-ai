@@ -210,3 +210,14 @@ export async function getSessionTopicMap(profileId: string): Promise<Record<stri
 
   return result;
 }
+
+export async function deleteSessionTopicAssignment(profileId: string, sessionId: string): Promise<void> {
+  await ensureStateLoaded();
+  const assignmentKey = `${profileId}:${sessionId}`;
+  if (!state.assignments[assignmentKey]) {
+    return;
+  }
+
+  delete state.assignments[assignmentKey];
+  await persistState();
+}

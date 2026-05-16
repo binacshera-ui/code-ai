@@ -253,6 +253,16 @@ export async function getForkSessionMetadata(sessionId: string): Promise<CodexFo
   return metadata ? cloneForkMetadata(metadata) : null;
 }
 
+export async function deleteForkSessionMetadata(sessionId: string): Promise<void> {
+  await ensureLoaded();
+  if (!state.sessions[sessionId]) {
+    return;
+  }
+
+  delete state.sessions[sessionId];
+  await persistState();
+}
+
 export function isForkDraftSessionId(sessionId: string): boolean {
   return sessionId.startsWith('draft:');
 }

@@ -994,3 +994,8 @@ export async function readSessionChangeRecord(
     throw error;
   }
 }
+
+export async function deleteSessionChangeRecords(sessionId: string): Promise<void> {
+  const sessionDir = path.join(SESSION_CHANGE_ROOT, sanitizeFileToken(sessionId));
+  await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
+}

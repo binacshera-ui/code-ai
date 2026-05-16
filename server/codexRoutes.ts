@@ -13,6 +13,7 @@ import {
 } from './codexService.js';
 import {
   createAgentForkSession,
+  deleteAgentSession,
   getAgentSessionChangeRecord,
   getAgentModelCatalog,
   getAgentRateLimitSnapshot,
@@ -37,17 +38,35 @@ import { MAX_PREVIEW_FILE_BYTES, resolveCodexFileTarget } from './codexFileResol
 import { browseCodexFileTree } from './codexFileTree.js';
 import { browseCodexFolders, resolveCodexFolderPath } from './codexFolderBrowser.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
+import { deleteSessionVisibility } from './codexSessionVisibility.js';
 import {
   createSessionTopic,
+  deleteSessionTopicAssignment,
   getSessionTopicMap,
   listSessionTopics,
   setSessionTopic,
 } from './codexSessionTopics.js';
-import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
-import { getSessionInstruction, setSessionInstruction } from './codexSessionInstructions.js';
-import { createForkDraftSession, getForkDraftSession, recordForkSessionMetadata } from './codexForkSessions.js';
+import { deleteSessionCustomTitle, getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
+import { deleteSessionInstruction, getSessionInstruction, setSessionInstruction } from './codexSessionInstructions.js';
+import {
+  createForkDraftSession,
+  deleteForkDraftSession,
+  deleteForkSessionMetadata,
+  getForkDraftSession,
+  recordForkSessionMetadata,
+} from './codexForkSessions.js';
+import { createProjectAnchor, deleteProjectAnchor, listProjectAnchors } from './codexProjectAnchors.js';
+import {
+  deleteSessionContextSelection,
+  getSessionContextSelection,
+  rebindSessionContextSelection,
+  setSessionContextSelection,
+} from './codexSessionContextSelections.js';
+import { buildSessionPromptAdditionsContext } from './sessionPromptAdditions.js';
+import { listUnifiedSkills } from './skillCatalogService.js';
 import {
   buildSupportPromptEnvelope,
+  deleteSupportSessionRecord,
   decorateSupportSessionDetail,
   decorateSupportSessionSummary,
   filterProfilesByMode,
@@ -59,6 +78,7 @@ import {
   resolveSupportProfileSelection,
   type SupportPromptEnvelope,
 } from './supportAgentService.js';
+import { deleteSessionChangeRecords } from './sessionChangeTracker.js';
 
 const router = Router();
 const MAX_UPLOAD_SIZE = 15 * 1024 * 1024;
@@ -644,6 +664,33 @@ async function copySessionSidebarMetadataToForkSession(
     topic: assignedTopic,
     title: sourceCustomTitle || sourceSession.title,
   };
+}
+
+async function copySessionContextSelectionToSession(
+  sourceProfileId: string,
+  targetProfileId: string,
+  sourceSessionId: string,
+  targetSessionId: string
+) {
+  const selection = await getSessionContextSelection(sourceProfileId, sourceSessionId);
+  if (selection.anchorIds.length === 0 && selection.skillIds.length === 0) {
+    return;
+  }
+
+  await setSessionContextSelection(targetProfileId, targetSessionId, selection);
+}
+
+async function deleteSessionMetadata(profileId: string, sessionId: string) {
+  await Promise.all([
+    deleteSessionVisibility(profileId, sessionId),
+    deleteSessionTopicAssignment(profileId, sessionId),
+    deleteSessionCustomTitle(profileId, sessionId),
+    deleteSessionInstruction(profileId, sessionId),
+    deleteSessionContextSelection(profileId, sessionId),
+    deleteForkSessionMetadata(sessionId),
+    deleteSupportSessionRecord(profileId, sessionId),
+    deleteSessionChangeRecords(sessionId),
+  ]);
 }
 
 function getProviderDisplayLabel(provider: AppProvider): string {
@@ -1258,6 +1305,35 @@ router.post('/sessions/:sessionId/hide', requireCodexAccess, async (req, res) =>
   }
 });
 
+router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const profileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+        ? req.body.profileId.trim()
+        : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    if (isDraftSessionKey(sessionId)) {
+      await deleteForkDraftSession(sessionId);
+      await deleteSessionMetadata(profileId, sessionId);
+      res.status(204).end();
+      return;
+    }
+
+    await deleteAgentSession(sessionId, profileId);
+    await deleteSessionMetadata(profileId, sessionId);
+    res.status(204).end();
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete session permanently' });
+  }
+});
+
 router.get('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
   try {
     const sessionId = readRouteParam(req.params.sessionId);
@@ -1406,6 +1482,7 @@ router.post('/sessions/:sessionId/delete-turn', requireCodexAccess, async (req, 
         await setSessionInstruction(profileId, draft.sessionId, sourceInstruction);
       }
     }
+    await copySessionContextSelectionToSession(profileId, profileId, sourceSession.id, draft.sessionId);
 
     const cleanedSession = await decorateSessionDetailForClient(
       profileId,
@@ -1459,6 +1536,7 @@ router.post('/sessions/:sessionId/fork', requireCodexAccess, async (req, res) =>
       sourceSession,
       forkResult.sessionId
     );
+    await copySessionContextSelectionToSession(profileId, profileId, sourceSession.id, forkResult.sessionId);
     await recordForkSessionMetadata({
       sessionId: forkResult.sessionId,
       profileId,
@@ -1585,6 +1663,7 @@ router.post('/sessions/:sessionId/transfer', requireCodexAccess, async (req, res
       sourceSession,
       draft.sessionId
     );
+    await copySessionContextSelectionToSession(profileId, targetProfile.id, sourceSession.id, draft.sessionId);
     const autoPrompt = buildTransferAutoPrompt(selectedEntry);
     const queueItem = await enqueueCodexQueueItem({
       profileId: targetProfile.id,
@@ -1772,6 +1851,159 @@ router.post('/session-instruction', requireCodexAccess, async (req, res) => {
   }
 });
 
+router.get('/session-context-selection', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const selection = await getSessionContextSelection(profileId, sessionKey);
+    res.json({ selection });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session context selection' });
+  }
+});
+
+router.post('/session-context-selection', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const selection = await setSessionContextSelection(profileId, sessionKey, {
+      anchorIds: req.body?.anchorIds,
+      skillIds: req.body?.skillIds,
+    });
+    res.json({ selection });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to update session context selection' });
+  }
+});
+
+router.get('/anchors', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const cwdInput = typeof req.query.cwd === 'string' && req.query.cwd.trim()
+      ? req.query.cwd.trim()
+      : undefined;
+
+    if (!profileId || !cwdInput) {
+      res.status(400).json({ error: 'Profile id and cwd are required' });
+      return;
+    }
+
+    const cwd = (await resolveCodexFolderPath(cwdInput, profileId)).resolvedPath;
+    const anchors = await listProjectAnchors(cwd);
+    res.json({
+      anchors: anchors.map((anchor) => ({
+        ...anchor,
+        relativePath: path.relative(cwd, anchor.targetPath) || '.',
+      })),
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to load anchors' });
+  }
+});
+
+router.post('/anchors', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const cwdInput = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+    const targetPathInput = typeof req.body?.targetPath === 'string' && req.body.targetPath.trim()
+      ? req.body.targetPath.trim()
+      : undefined;
+    const targetKind = req.body?.targetKind === 'directory' ? 'directory' : req.body?.targetKind === 'file' ? 'file' : null;
+    const name = typeof req.body?.name === 'string' ? req.body.name : '';
+    const description = typeof req.body?.description === 'string' ? req.body.description : '';
+
+    if (!profileId || !cwdInput || !targetPathInput || !targetKind) {
+      res.status(400).json({ error: 'Profile id, cwd, target path and target kind are required' });
+      return;
+    }
+
+    const cwd = (await resolveCodexFolderPath(cwdInput, profileId)).resolvedPath;
+    const targetPath = (await resolveCodexFolderPath(targetPathInput, profileId)).resolvedPath;
+    const targetStats = await fs.stat(targetPath);
+    if (targetKind === 'directory' && !targetStats.isDirectory()) {
+      res.status(400).json({ error: 'Target is not a directory' });
+      return;
+    }
+    if (targetKind === 'file' && !targetStats.isFile()) {
+      res.status(400).json({ error: 'Target is not a file' });
+      return;
+    }
+
+    const anchor = await createProjectAnchor(cwd, {
+      targetPath,
+      targetKind,
+      name,
+      description,
+    });
+    res.status(201).json({
+      anchor: {
+        ...anchor,
+        relativePath: path.relative(cwd, anchor.targetPath) || '.',
+      },
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to create anchor' });
+  }
+});
+
+router.delete('/anchors/:anchorId', requireCodexAccess, async (req, res) => {
+  try {
+    const anchorId = readRouteParam(req.params.anchorId);
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const cwdInput = typeof req.query.cwd === 'string' && req.query.cwd.trim()
+      ? req.query.cwd.trim()
+      : undefined;
+
+    if (!profileId || !cwdInput) {
+      res.status(400).json({ error: 'Profile id and cwd are required' });
+      return;
+    }
+
+    const cwd = (await resolveCodexFolderPath(cwdInput, profileId)).resolvedPath;
+    await deleteProjectAnchor(cwd, anchorId);
+    res.status(204).end();
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete anchor' });
+  }
+});
+
+router.get('/skills', requireCodexAccess, async (_req, res) => {
+  try {
+    const skills = await listUnifiedSkills();
+    res.json({ skills });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load unified skills' });
+  }
+});
+
 router.post('/queue/items', requireCodexAccess, async (req, res) => {
   try {
     const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
@@ -1853,6 +2085,22 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     const effectivePrompt = supportEnvelope?.compiledPrompt || prompt;
     const effectivePromptPreview = supportEnvelope?.promptPreview || promptPreview;
     const effectiveSessionInstruction = buildSupportSessionInstruction(sessionInstruction, supportEnvelope);
+    const sessionContextKey = sessionId || queueKey;
+    const contextCwd = cwd || (
+      sessionId
+        ? (await getAgentSessionDetail(sessionId, profileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
+        : configuredProfile.workspaceCwd
+    );
+    const additionsContextPrefix = sessionContextKey
+      ? await buildSessionPromptAdditionsContext({
+        profileId,
+        sessionKey: sessionContextKey,
+        cwd: contextCwd,
+      })
+      : null;
+    const combinedContextPrefix = [hydratedForkDraft.contextPrefix, additionsContextPrefix]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n\n');
 
     if (supportEnvelope) {
       await recordSupportTurnRequest({
@@ -1871,7 +2119,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       cwd,
       prompt: effectivePrompt,
       promptPreview: effectivePromptPreview,
-      contextPrefix: hydratedForkDraft.contextPrefix,
+      contextPrefix: combinedContextPrefix || undefined,
       sessionInstruction: effectiveSessionInstruction,
       forkContext: hydratedForkDraft.forkContext,
       scheduledAt,
@@ -2009,8 +2257,20 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       })
       : null;
     const providerPrompt = supportEnvelope?.compiledPrompt || prompt;
-    const promptWithForkContext = hydratedForkDraft.contextPrefix?.trim()
-      ? `${hydratedForkDraft.contextPrefix.trim()}\n\nהודעת ההמשך החדשה:\n${providerPrompt}`
+    const sessionContextKey = sessionId || effectiveQueueKey;
+    const contextCwd = cwd || (sessionId
+      ? (await getAgentSessionDetail(sessionId, profileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
+      : configuredProfile.workspaceCwd);
+    const additionsContextPrefix = await buildSessionPromptAdditionsContext({
+      profileId,
+      sessionKey: sessionContextKey,
+      cwd: contextCwd,
+    });
+    const combinedContextPrefix = [hydratedForkDraft.contextPrefix, additionsContextPrefix]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n\n');
+    const promptWithForkContext = combinedContextPrefix.trim()
+      ? `${combinedContextPrefix.trim()}\n\nהודעת ההמשך החדשה:\n${providerPrompt}`
       : providerPrompt;
     const effectiveSessionInstruction = buildSupportSessionInstruction(sessionInstruction, supportEnvelope);
     const effectivePrompt = effectiveSessionInstruction?.trim()
@@ -2065,7 +2325,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       reasoningEffort: executionConfig.reasoningEffort,
       prompt: providerPrompt,
       promptPreview: supportEnvelope?.promptPreview || promptPreview,
-      contextPrefix: hydratedForkDraft.contextPrefix,
+      contextPrefix: combinedContextPrefix || undefined,
       sessionInstruction: effectiveSessionInstruction,
       forkContext: hydratedForkDraft.forkContext,
       attachments,

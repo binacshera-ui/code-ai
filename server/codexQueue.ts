@@ -19,6 +19,7 @@ import {
   type CodexForkTimelineEntry,
 } from './codexForkSessions.js';
 import { CODEX_APP_CONFIG } from './config.js';
+import { rebindSessionContextSelection } from './codexSessionContextSelections.js';
 import { rebindSessionInstruction } from './codexSessionInstructions.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
 import { getSessionTopicMap, setSessionTopic } from './codexSessionTopics.js';
@@ -725,6 +726,7 @@ async function rebindQueueItemsToSession(profileId: string, queueKey: string, se
   state.sessionBindings[queueKey] = sessionId;
   state.sessionBindings[sessionId] = sessionId;
   await rebindSessionInstruction(profileId, queueKey, sessionId);
+  await rebindSessionContextSelection(profileId, queueKey, sessionId);
   await rebindSupportSessionRecord(profileId, queueKey, sessionId).catch(() => undefined);
 
   for (const candidate of state.items) {

@@ -108,3 +108,18 @@ export async function rebindSessionInstruction(
   delete state.instructionsByKey[fromKey];
   await persistState();
 }
+
+export async function deleteSessionInstruction(
+  profileId: string,
+  sessionKey: string
+): Promise<void> {
+  await ensureStateLoaded();
+
+  const key = buildInstructionKey(profileId, sessionKey);
+  if (!state.instructionsByKey[key]) {
+    return;
+  }
+
+  delete state.instructionsByKey[key];
+  await persistState();
+}

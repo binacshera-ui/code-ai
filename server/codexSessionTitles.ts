@@ -112,3 +112,14 @@ export async function getSessionTitleMap(profileId: string): Promise<Record<stri
 
   return result;
 }
+
+export async function deleteSessionCustomTitle(profileId: string, sessionId: string): Promise<void> {
+  await ensureStateLoaded();
+  const key = makeSessionKey(profileId, sessionId);
+  if (!state.titles[key]) {
+    return;
+  }
+
+  delete state.titles[key];
+  await persistState();
+}
