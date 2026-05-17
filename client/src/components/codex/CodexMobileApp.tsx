@@ -1186,6 +1186,12 @@ async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> 
   const contentType = response.headers.get('content-type') || '';
   const rawText = await response.text();
   const trimmed = rawText.trim();
+  const isEmptySuccessfulResponse = response.ok && trimmed.length === 0;
+
+  if (isEmptySuccessfulResponse) {
+    return null as T;
+  }
+
   const looksLikeJson = contentType.includes('application/json')
     || trimmed.startsWith('{')
     || trimmed.startsWith('[');

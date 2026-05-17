@@ -614,6 +614,11 @@ function isDraftSessionKey(value: string | undefined): boolean {
   return typeof value === 'string' && value.startsWith('draft:');
 }
 
+function isMissingSessionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.includes('was not found');
+}
+
 async function copySessionSidebarMetadataToForkSession(
   sourceProfileId: string,
   targetProfileId: string,
@@ -1322,13 +1327,29 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
     if (isDraftSessionKey(sessionId)) {
       await deleteForkDraftSession(sessionId);
       await deleteSessionMetadata(profileId, sessionId);
-      res.status(204).end();
+      res.json({
+        deleted: true,
+        sessionId,
+        profileId,
+        draft: true,
+      });
       return;
     }
 
-    await deleteAgentSession(sessionId, profileId);
+    try {
+      await deleteAgentSession(sessionId, profileId);
+    } catch (error) {
+      if (!isMissingSessionError(error)) {
+        throw error;
+      }
+    }
     await deleteSessionMetadata(profileId, sessionId);
-    res.status(204).end();
+    res.json({
+      deleted: true,
+      sessionId,
+      profileId,
+      draft: false,
+    });
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to delete session permanently' });
   }
