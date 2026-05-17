@@ -7640,6 +7640,7 @@ export function CodexMobileApp() {
   const currentSessionActivityKeyRef = useRef('');
   const activeProfileRef = useRef(profileId);
   const activeSelectedSessionIdRef = useRef<string | null>(selectedSessionId);
+  const selectedSessionRef = useRef<CodexSessionDetail | null>(selectedSession);
   const isTranscriptNearBottomRef = useRef(true);
   const lastTranscriptSignatureRef = useRef('');
   const transcriptViewportSnapshotRef = useRef({
@@ -7861,6 +7862,10 @@ export function CodexMobileApp() {
   useEffect(() => {
     activeSelectedSessionIdRef.current = selectedSessionId;
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    selectedSessionRef.current = selectedSession;
+  }, [selectedSession]);
 
   useEffect(() => {
     setCodexRuntimeContext({
@@ -8485,31 +8490,67 @@ export function CodexMobileApp() {
         return data.session;
       }
 
-      if (data.session.isDraft && data.session.forkDraftContext) {
+      let nextSession = data.session;
+      const currentSession = selectedSessionRef.current;
+      const shouldPreserveVisibleWindow = (
+        silent
+        && !full
+        && !isTranscriptNearBottomRef.current
+        && Boolean(currentSession)
+        && currentSession?.id === sessionId
+        && currentSession.timelineWindowStart > 0
+        && data.session.totalTimelineEntries > currentSession.totalTimelineEntries
+        && currentSession.timeline.length > 0
+      );
+
+      if (shouldPreserveVisibleWindow && currentSession) {
+        const growth = data.session.totalTimelineEntries - currentSession.totalTimelineEntries;
+        const preservedPrefix = currentSession.timeline
+          .slice(0, Math.min(growth, currentSession.timeline.length))
+          .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.id === entry.id) === index);
+        const nextEntryIds = new Set(data.session.timeline.map((entry) => entry.id));
+        const mergedTimeline = [
+          ...preservedPrefix.filter((entry) => !nextEntryIds.has(entry.id)),
+          ...data.session.timeline,
+        ];
+
+        nextSession = {
+          ...data.session,
+          timeline: mergedTimeline,
+          timelineWindowStart: currentSession.timelineWindowStart,
+          timelineWindowEnd: Math.min(
+            data.session.totalTimelineEntries,
+            currentSession.timelineWindowStart + mergedTimeline.length
+          ),
+          hasEarlierTimeline: currentSession.timelineWindowStart > 0,
+        };
+      }
+
+      if (nextSession.isDraft && nextSession.forkDraftContext) {
         const nextForkDraftContext = mapForkDraftServerContext(
-          data.session.forkDraftContext,
-          data.session.updatedAt
+          nextSession.forkDraftContext,
+          nextSession.updatedAt
         );
 
         startTransition(() => {
           setSelectedSessionId(null);
           setSelectedSession(null);
           setIsDraftConversation(true);
-          setDraftConversationKey(data.session.id);
+          setDraftConversationKey(nextSession.id);
           setForkDraftContext(nextForkDraftContext);
-          setDraftCwd(data.session.cwd || nextForkDraftContext.sourceCwd || selectedProfileWorkspaceCwd || null);
+          setDraftCwd(nextSession.cwd || nextForkDraftContext.sourceCwd || selectedProfileWorkspaceCwd || null);
           if (!silent) {
             setIsSidebarOpen(false);
           }
         });
         setLastSyncedAt(new Date().toISOString());
         lastSessionDetailPollAtRef.current = Date.now();
-        return data.session;
+        return nextSession;
       }
 
       startTransition(() => {
         setSelectedSessionId(sessionId);
-        setSelectedSession(data.session);
+        setSelectedSession(nextSession);
         setIsDraftConversation(false);
         setForkDraftContext(null);
         if (!silent) {
@@ -8517,11 +8558,13 @@ export function CodexMobileApp() {
         }
       });
       if (full) {
-        setSessionWindowSize(data.session.totalTimelineEntries);
+        setSessionWindowSize(nextSession.totalTimelineEntries);
+      } else if (shouldPreserveVisibleWindow) {
+        setSessionWindowSize((current) => Math.max(current, nextSession.timeline.length));
       }
       setLastSyncedAt(new Date().toISOString());
       lastSessionDetailPollAtRef.current = Date.now();
-      return data.session;
+      return nextSession;
     } catch (loadError: any) {
       reportCodexClientLog({
         type: 'session-detail-load-failed',
