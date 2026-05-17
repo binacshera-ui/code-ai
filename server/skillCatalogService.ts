@@ -67,12 +67,21 @@ async function collectSkillFiles(root: string): Promise<string[]> {
 }
 
 function normalizeDescription(rawContent: string): string | null {
+  const frontmatterMatch = rawContent.match(/^---\n([\s\S]*?)\n---/);
+  if (frontmatterMatch) {
+    const descriptionMatch = frontmatterMatch[1]?.match(/^\s*description:\s*(.+)$/m);
+    if (descriptionMatch?.[1]) {
+      return descriptionMatch[1].trim().slice(0, 180);
+    }
+  }
+
   const lines = rawContent
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
     .filter((line) => !line.startsWith('#'));
-  const firstLine = lines[0];
+  const meaningfulLines = lines.filter((line) => line !== '---' && !line.startsWith('name:') && !line.startsWith('description:'));
+  const firstLine = meaningfulLines[0];
   if (!firstLine) {
     return null;
   }

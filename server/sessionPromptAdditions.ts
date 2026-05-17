@@ -16,25 +16,26 @@ async function ensureContextPackRoot() {
 }
 
 function renderAnchorBlock(anchors: Awaited<ReturnType<typeof listProjectAnchors>>) {
-  return anchors.map((anchor, index) => {
+  return anchors.map((anchor) => {
     const relativePath = path.relative(anchor.cwd, anchor.targetPath) || '.';
     return [
-      `### עוגן ${index + 1}: ${anchor.name}`,
-      `תיאור: ${anchor.description}`,
-      `סוג: ${anchor.targetKind === 'directory' ? 'תיקייה' : 'קובץ'}`,
-      `נתיב יחסי: ${relativePath}`,
-      `נתיב מלא: ${anchor.targetPath}`,
+      'מצורף עוגן להבנה:',
+      `שם העוגן: ${anchor.name}`,
+      `מיקום העוגן: ${relativePath} (${anchor.targetPath})`,
+      `תיאור העוגן לצורך ההבנה: ${anchor.description}`,
     ].join('\n');
   }).join('\n\n');
 }
 
 function renderSkillBlock(skills: Awaited<ReturnType<typeof getUnifiedSkillsByIds>>) {
-  return skills.map((skill, index) => (
+  return skills.map((skill) => (
     [
-      `### סקיל ${index + 1}: ${skill.displayName}`,
-      `מקור: ${skill.sourceLabel} (${skill.providerOrigin})`,
-      `נתיב: ${skill.path}`,
-      '',
+      'מצורף סקיל להבנה:',
+      `שם הסקיל: ${skill.displayName}`,
+      `מקור הסקיל: ${skill.sourceLabel} (${skill.providerOrigin})`,
+      `מיקום הסקיל: ${skill.path}`,
+      `תיאור הסקיל לצורך ההבנה: ${skill.description || 'ללא תיאור.'}`,
+      'תוכן הסקיל:',
       skill.content,
     ].join('\n')
   )).join('\n\n');
@@ -93,13 +94,10 @@ export async function buildSessionPromptAdditionsContext(options: {
     : null;
 
   return [
-    'להלן context pack מחייב לשיחה הזו. הוא נשמר גם בקובץ מקומי לצורך מעקב, וגם מוזרק כאן ישירות כדי שלא תהיה תלות בפתיחת קבצים חיצוניים.',
-    packPath,
-    '--- BEGIN CONTEXT PACK ---',
-    packContent.trim(),
-    '--- END CONTEXT PACK ---',
     anchorsPreview,
     skillsPreview,
-    'יש ליישם את כל המידע לעיל כהקשר מחייב לשיחה הזו, גם אם המשתמש לא חזר עליו שוב.',
+    'הפריטים הבאים מצורפים להודעה הנוכחית כהקשר להבנה ולביצוע:',
+    packContent.trim().replace(/^# Code-AI context pack\s*/m, '').replace(/^הקובץ הזה נוצר על ידי Code-AI כדי לטעון לשיחה עוגנים וסקילים שנבחרו ידנית למהלך השיחה\.\s*/m, '').trim(),
+    `קובץ מעקב מקומי: ${packPath}`,
   ].filter(Boolean).join('\n\n');
 }

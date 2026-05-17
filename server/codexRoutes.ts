@@ -2131,7 +2131,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
         authenticatedUser: (req as any).codexAuth?.user || null,
       })
       : null;
-    const effectivePrompt = supportEnvelope?.compiledPrompt || prompt;
+    const basePrompt = supportEnvelope?.compiledPrompt || prompt;
     const effectivePromptPreview = supportEnvelope?.promptPreview || promptPreview;
     const effectiveSessionInstruction = buildSupportSessionInstruction(sessionInstruction, supportEnvelope);
     const sessionContextKey = sessionId || queueKey;
@@ -2140,14 +2140,17 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
         ? (await getAgentSessionDetail(sessionId, profileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
         : configuredProfile.workspaceCwd
     );
-    const additionsContextPrefix = sessionContextKey
+    const additionsPromptSuffix = sessionContextKey
       ? await buildSessionPromptAdditionsContext({
         profileId,
         sessionKey: sessionContextKey,
         cwd: contextCwd,
       })
       : null;
-    const combinedContextPrefix = [hydratedForkDraft.contextPrefix, additionsContextPrefix]
+    const effectivePrompt = [basePrompt, additionsPromptSuffix]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n\n');
+    const combinedContextPrefix = [hydratedForkDraft.contextPrefix]
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .join('\n\n');
 
@@ -2313,17 +2316,20 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const contextCwd = cwd || (sessionId
       ? (await getAgentSessionDetail(sessionId, profileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
       : configuredProfile.workspaceCwd);
-    const additionsContextPrefix = await buildSessionPromptAdditionsContext({
+    const additionsPromptSuffix = await buildSessionPromptAdditionsContext({
       profileId,
       sessionKey: sessionContextKey,
       cwd: contextCwd,
     });
-    const combinedContextPrefix = [hydratedForkDraft.contextPrefix, additionsContextPrefix]
+    const providerPromptWithAdditions = [providerPrompt, additionsPromptSuffix]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n\n');
+    const combinedContextPrefix = [hydratedForkDraft.contextPrefix]
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .join('\n\n');
     const promptWithForkContext = combinedContextPrefix.trim()
-      ? `${combinedContextPrefix.trim()}\n\nהודעת ההמשך החדשה:\n${providerPrompt}`
-      : providerPrompt;
+      ? `${combinedContextPrefix.trim()}\n\nהודעת ההמשך החדשה:\n${providerPromptWithAdditions}`
+      : providerPromptWithAdditions;
     const effectiveSessionInstruction = buildSupportSessionInstruction(sessionInstruction, supportEnvelope);
     const effectivePrompt = effectiveSessionInstruction?.trim()
       ? `${promptWithForkContext}\n\nהוראה קבועה לסשן זה. יש ליישם אותה גם אם המשתמש לא חזר עליה בהודעה הנוכחית:\n${effectiveSessionInstruction.trim()}`
