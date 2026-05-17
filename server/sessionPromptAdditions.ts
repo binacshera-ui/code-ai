@@ -82,7 +82,8 @@ export async function buildSessionPromptAdditionsContext(options: {
   const profileDir = path.join(CONTEXT_PACK_ROOT, sanitizeFileToken(options.profileId));
   await fs.mkdir(profileDir, { recursive: true });
   const packPath = path.join(profileDir, `${sanitizeFileToken(options.sessionKey)}.md`);
-  await fs.writeFile(packPath, `${packSections.join('\n\n')}\n`, 'utf-8');
+  const packContent = `${packSections.join('\n\n')}\n`;
+  await fs.writeFile(packPath, packContent, 'utf-8');
 
   const anchorsPreview = selectedAnchors.length > 0
     ? `עוגנים פעילים: ${selectedAnchors.map((anchor) => anchor.name).join(', ')}.`
@@ -92,10 +93,13 @@ export async function buildSessionPromptAdditionsContext(options: {
     : null;
 
   return [
-    'לפני כל מענה, פתח וקרא את קובץ ה-context pack הבא. הוא מכיל את כל העוגנים והסקילים שנבחרו ידנית לשיחה הזו ועליך ליישם אותם:',
+    'להלן context pack מחייב לשיחה הזו. הוא נשמר גם בקובץ מקומי לצורך מעקב, וגם מוזרק כאן ישירות כדי שלא תהיה תלות בפתיחת קבצים חיצוניים.',
     packPath,
+    '--- BEGIN CONTEXT PACK ---',
+    packContent.trim(),
+    '--- END CONTEXT PACK ---',
     anchorsPreview,
     skillsPreview,
-    'אחרי קריאת הקובץ, השתמש במידע שבו כהקשר מחייב לשיחה הזו.',
+    'יש ליישם את כל המידע לעיל כהקשר מחייב לשיחה הזו, גם אם המשתמש לא חזר עליו שוב.',
   ].filter(Boolean).join('\n\n');
 }
