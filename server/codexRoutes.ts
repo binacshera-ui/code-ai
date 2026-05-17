@@ -47,7 +47,12 @@ import {
   setSessionTopic,
 } from './codexSessionTopics.js';
 import { deleteSessionCustomTitle, getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
-import { deleteSessionInstruction, getSessionInstruction, setSessionInstruction } from './codexSessionInstructions.js';
+import {
+  deleteSessionInstruction,
+  getSessionInstruction,
+  rebindSessionInstruction,
+  setSessionInstruction,
+} from './codexSessionInstructions.js';
 import {
   createForkDraftSession,
   deleteForkDraftSession,
@@ -2313,6 +2318,12 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         injectDirectoryContext: !sessionId,
         executionConfig,
       });
+      if (!sessionId && supportSessionKey !== result.sessionId) {
+        await Promise.all([
+          rebindSessionInstruction(profileId, supportSessionKey, result.sessionId),
+          rebindSessionContextSelection(profileId, supportSessionKey, result.sessionId),
+        ]);
+      }
       if (supportEnvelope && supportSessionKey !== result.sessionId) {
         await rebindSupportSessionRecord(profileId, supportSessionKey, result.sessionId);
       }
