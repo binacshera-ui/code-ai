@@ -9135,6 +9135,7 @@ export function CodexMobileApp() {
       setScheduledFor('');
       setIsScheduleOpen(false);
       setScheduleType('once');
+      clearSessionContextSelectionAfterSend();
       clearDraftAttachments();
       sendDedupRef.current = null;
       recordCodexBreadcrumb('queue-enqueue-succeeded', {
@@ -9741,6 +9742,13 @@ export function CodexMobileApp() {
     } finally {
       setIsSessionContextSelectionSaving(false);
     }
+  }
+
+  function clearSessionContextSelectionAfterSend() {
+    setSessionContextSelection({ anchorIds: [], skillIds: [] });
+    setIsAdditionsMenuOpen(false);
+    setIsAnchorManagerOpen(false);
+    setIsSkillPickerDialogOpen(false);
   }
 
   async function loadCurrentProjectAnchors(nextProfileId = profileId, nextCwd = activeComposerCwd) {

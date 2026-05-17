@@ -35,8 +35,6 @@ function renderSkillBlock(skills: Awaited<ReturnType<typeof getUnifiedSkillsById
       `מקור הסקיל: ${skill.sourceLabel} (${skill.providerOrigin})`,
       `מיקום הסקיל: ${skill.path}`,
       `תיאור הסקיל לצורך ההבנה: ${skill.description || 'ללא תיאור.'}`,
-      'תוכן הסקיל:',
-      skill.content,
     ].join('\n')
   )).join('\n\n');
 }

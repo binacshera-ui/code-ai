@@ -2179,6 +2179,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       recurrence,
     });
 
+    if (sessionContextKey) {
+      await deleteSessionContextSelection(profileId, sessionContextKey);
+    }
+
     res.status(202).json({ item });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to enqueue Codex task' });
@@ -2351,14 +2355,12 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         executionConfig,
       });
       if (!sessionId && supportSessionKey !== result.sessionId) {
-        await Promise.all([
-          rebindSessionInstruction(profileId, supportSessionKey, result.sessionId),
-          rebindSessionContextSelection(profileId, supportSessionKey, result.sessionId),
-        ]);
+        await rebindSessionInstruction(profileId, supportSessionKey, result.sessionId);
       }
       if (supportEnvelope && supportSessionKey !== result.sessionId) {
         await rebindSupportSessionRecord(profileId, supportSessionKey, result.sessionId);
       }
+      await deleteSessionContextSelection(profileId, supportSessionKey);
       const session = await decorateSessionDetailForClient(
         profileId,
         await getAgentSessionDetail(result.sessionId, profileId)
@@ -2396,6 +2398,8 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       attachments,
       recurrence,
     });
+
+    await deleteSessionContextSelection(profileId, sessionContextKey);
 
     res.status(202).json({ job: item });
   } catch (error: any) {
