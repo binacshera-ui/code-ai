@@ -1971,7 +1971,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
               const localFile = href ? parseLocalFileHref(href) : null;
               const linkClassName = cn(
                 'break-words font-medium underline underline-offset-4 [overflow-wrap:anywhere]',
-                isUser ? 'text-cyan-100' : 'text-cyan-700'
+                'text-cyan-700'
               );
 
               if (localFile && onOpenFilePreview) {
@@ -2003,7 +2003,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
               className={cn(
                 'my-3 rounded-r-2xl border-r-4 px-4 py-3',
                 isUser
-                  ? 'border-cyan-200 bg-white/10 text-white'
+                  ? 'border-indigo-200 bg-indigo-50/60 text-slate-700'
                   : 'border-cyan-300 bg-cyan-50 text-slate-700'
               )}
             >
@@ -2016,7 +2016,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
                 dir="ltr"
                 className={cn(
                   'inline break-words font-mono text-[0.95em] font-semibold [overflow-wrap:anywhere]',
-                  isUser ? 'text-white' : 'text-slate-900'
+                  'text-slate-900'
                 )}
               >
                 {props.children}
@@ -2026,7 +2026,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
           pre: ({ children }) => (
             <pre className={cn(
               'my-3 w-full max-w-full overflow-x-auto rounded-[1.25rem] px-4 py-3 text-left text-[13px] leading-6',
-              isUser ? 'bg-white/10 text-white' : 'bg-slate-100 text-slate-900'
+              isUser ? 'bg-indigo-100/70 text-slate-900' : 'bg-slate-100 text-slate-900'
             )}>
               {children}
             </pre>
@@ -2607,10 +2607,10 @@ function MessageBubble({
             'relative flex min-w-0 max-w-none flex-col gap-1 rounded-[1.25rem] px-4 py-3 text-[15px] leading-relaxed shadow-sm',
             isTransfer ? 'max-w-[min(100%,42rem)] flex-none' : isUser ? 'flex-1' : 'w-full',
             isUser
-              ? 'rounded-tr-sm border border-indigo-100/50 bg-gradient-to-br from-indigo-50 to-blue-50 text-indigo-950 dark:border-indigo-800/70 dark:from-indigo-950/70 dark:to-slate-900 dark:text-indigo-100'
+              ? 'rounded-tr-sm border border-indigo-100/50 bg-gradient-to-br from-indigo-50 to-blue-50 text-indigo-950'
               : isTransfer
                 ? 'rounded-tl-sm border border-orange-200/80 bg-gradient-to-br from-orange-50 to-amber-50 text-slate-700 shadow-[0_10px_24px_rgba(251,146,60,0.10)]'
-              : isCommentary
+                : isCommentary
                 ? 'rounded-tl-sm border border-cyan-100 bg-cyan-50/60 text-slate-700'
                 : 'rounded-tl-sm border border-slate-100/80 bg-white text-slate-700'
           )}
@@ -2618,14 +2618,14 @@ function MessageBubble({
           <div className="mb-1 flex items-center gap-2 text-[10px] font-medium">
             <span className={cn(
               isUser
-                ? 'text-indigo-500/80 dark:text-indigo-200/90'
+                ? 'text-indigo-500/80'
                 : isTransfer
                   ? 'text-orange-500/90'
                   : 'text-slate-400'
             )}>{senderLabel}</span>
             <span className={cn(
               isUser
-                ? 'text-indigo-400/70 dark:text-indigo-300/75'
+                ? 'text-indigo-400/70'
                 : isTransfer
                   ? 'text-orange-400/80'
                   : 'text-slate-400'
@@ -2641,7 +2641,7 @@ function MessageBubble({
               className={cn(
                 'h-7 w-7 border-0 text-[10px]',
                 isUser
-                  ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80'
+                  ? 'bg-white/20 text-indigo-700 hover:bg-white/30'
                   : isTransfer
                     ? 'bg-white/70 text-orange-500 hover:bg-white'
                     : 'bg-slate-50'
@@ -2654,7 +2654,7 @@ function MessageBubble({
                 disabled={isChangeLoading}
                 className={cn(
                   'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
-                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
                 )}
                 title="קבצים שהשיחה שינתה"
                 aria-label="קבצים שהשיחה שינתה"
@@ -2668,7 +2668,7 @@ function MessageBubble({
                 onClick={() => onFork?.(entry.id)}
                 className={cn(
                   'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors',
-                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
                 )}
                 title="מזלג מהודעה זו"
                 aria-label="מזלג מהודעה זו"
@@ -2683,7 +2683,7 @@ function MessageBubble({
                 disabled={isDeleting}
                 className={cn(
                   'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
-                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80' : 'bg-slate-50 text-rose-500 hover:bg-rose-50'
+                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30' : 'bg-slate-50 text-rose-500 hover:bg-rose-50'
                 )}
                 title="מחק את זוג ההודעות הזה"
                 aria-label="מחק את זוג ההודעות הזה"
@@ -2710,7 +2710,7 @@ function MessageBubble({
                   disabled={isTransfering}
                   className={cn(
                     'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
-                    isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30 dark:bg-slate-800/60 dark:text-indigo-100 dark:hover:bg-slate-700/80' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                    isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
                   )}
                   title={transferOptions?.length === 1 ? `העבר ל-${transferOptions[0].label}` : 'העבר לספק אחר'}
                   aria-label={transferOptions?.length === 1 ? `העבר ל-${transferOptions[0].label}` : 'העבר לספק אחר'}
