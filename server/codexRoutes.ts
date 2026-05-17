@@ -68,6 +68,14 @@ import {
   rebindSessionContextSelection,
   setSessionContextSelection,
 } from './codexSessionContextSelections.js';
+import {
+  copySessionReminders,
+  createSessionReminder,
+  deleteSessionReminder,
+  deleteSessionReminders,
+  listSessionReminders,
+  rebindSessionReminders,
+} from './codexSessionReminders.js';
 import { buildSessionPromptAdditionsContext } from './sessionPromptAdditions.js';
 import { listUnifiedSkills } from './skillCatalogService.js';
 import { getSelectedPermissionModeId } from './providerPermissions.js';
@@ -690,11 +698,20 @@ async function copySessionContextSelectionToSession(
   targetSessionId: string
 ) {
   const selection = await getSessionContextSelection(sourceProfileId, sourceSessionId);
-  if (selection.anchorIds.length === 0 && selection.skillIds.length === 0) {
+  if (selection.anchorIds.length === 0 && selection.skillIds.length === 0 && selection.reminderIds.length === 0) {
     return;
   }
 
   await setSessionContextSelection(targetProfileId, targetSessionId, selection);
+}
+
+async function copySessionRemindersToSession(
+  sourceProfileId: string,
+  targetProfileId: string,
+  sourceSessionId: string,
+  targetSessionId: string
+) {
+  await copySessionReminders(sourceProfileId, sourceSessionId, targetProfileId, targetSessionId);
 }
 
 async function deleteSessionMetadata(profileId: string, sessionId: string) {
@@ -704,6 +721,7 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
     deleteSessionCustomTitle(profileId, sessionId),
     deleteSessionInstruction(profileId, sessionId),
     deleteSessionContextSelection(profileId, sessionId),
+    deleteSessionReminders(profileId, sessionId),
     deleteForkSessionMetadata(sessionId),
     deleteSupportSessionRecord(profileId, sessionId),
     deleteSessionChangeRecords(sessionId),
@@ -1532,6 +1550,7 @@ router.post('/sessions/:sessionId/delete-turn', requireCodexAccess, async (req, 
       }
     }
     await copySessionContextSelectionToSession(profileId, profileId, sourceSession.id, draft.sessionId);
+    await copySessionRemindersToSession(profileId, profileId, sourceSession.id, draft.sessionId);
 
     const cleanedSession = await decorateSessionDetailForClient(
       profileId,
@@ -1586,6 +1605,7 @@ router.post('/sessions/:sessionId/fork', requireCodexAccess, async (req, res) =>
       forkResult.sessionId
     );
     await copySessionContextSelectionToSession(profileId, profileId, sourceSession.id, forkResult.sessionId);
+    await copySessionRemindersToSession(profileId, profileId, sourceSession.id, forkResult.sessionId);
     await recordForkSessionMetadata({
       sessionId: forkResult.sessionId,
       profileId,
@@ -1713,6 +1733,7 @@ router.post('/sessions/:sessionId/transfer', requireCodexAccess, async (req, res
       draft.sessionId
     );
     await copySessionContextSelectionToSession(profileId, targetProfile.id, sourceSession.id, draft.sessionId);
+    await copySessionRemindersToSession(profileId, targetProfile.id, sourceSession.id, draft.sessionId);
     const autoPrompt = buildTransferAutoPrompt(selectedEntry);
     const queueItem = await enqueueCodexQueueItem({
       profileId: targetProfile.id,
@@ -1938,6 +1959,7 @@ router.post('/session-context-selection', requireCodexAccess, async (req, res) =
     const selection = await setSessionContextSelection(profileId, sessionKey, {
       anchorIds: req.body?.anchorIds,
       skillIds: req.body?.skillIds,
+      reminderIds: req.body?.reminderIds,
     });
     res.json({ selection });
   } catch (error: any) {
@@ -2050,6 +2072,81 @@ router.get('/skills', requireCodexAccess, async (_req, res) => {
     res.json({ skills });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load unified skills' });
+  }
+});
+
+router.get('/session-reminders', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const reminders = await listSessionReminders(profileId, sessionKey);
+    res.json({ reminders });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session reminders' });
+  }
+});
+
+router.post('/session-reminders', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    const name = typeof req.body?.name === 'string' ? req.body.name : '';
+    const content = typeof req.body?.content === 'string' ? req.body.content : '';
+    const sourceEntryId = typeof req.body?.sourceEntryId === 'string' ? req.body.sourceEntryId : null;
+    const sourceRole = req.body?.sourceRole === 'user' || req.body?.sourceRole === 'assistant'
+      ? req.body.sourceRole
+      : null;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const reminder = await createSessionReminder(profileId, sessionKey, {
+      name,
+      content,
+      sourceEntryId,
+      sourceRole,
+    });
+    res.status(201).json({ reminder });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to create reminder' });
+  }
+});
+
+router.delete('/session-reminders/:reminderId', requireCodexAccess, async (req, res) => {
+  try {
+    const reminderId = readRouteParam(req.params.reminderId);
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    await deleteSessionReminder(profileId, sessionKey, reminderId);
+    res.json({ deleted: true, reminderId });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete reminder' });
   }
 });
 
@@ -2356,6 +2453,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       });
       if (!sessionId && supportSessionKey !== result.sessionId) {
         await rebindSessionInstruction(profileId, supportSessionKey, result.sessionId);
+        await rebindSessionReminders(profileId, supportSessionKey, result.sessionId);
       }
       if (supportEnvelope && supportSessionKey !== result.sessionId) {
         await rebindSupportSessionRecord(profileId, supportSessionKey, result.sessionId);

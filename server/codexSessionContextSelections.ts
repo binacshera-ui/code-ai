@@ -5,6 +5,7 @@ import { CODEX_APP_CONFIG } from './config.js';
 export interface CodexSessionContextSelection {
   anchorIds: string[];
   skillIds: string[];
+  reminderIds: string[];
 }
 
 interface SessionContextSelectionsState {
@@ -47,6 +48,7 @@ function cloneSelection(selection: CodexSessionContextSelection): CodexSessionCo
   return {
     anchorIds: [...selection.anchorIds],
     skillIds: [...selection.skillIds],
+    reminderIds: [...selection.reminderIds],
   };
 }
 
@@ -70,6 +72,7 @@ async function ensureStateLoaded() {
                 {
                   anchorIds: normalizeIdList(selection?.anchorIds),
                   skillIds: normalizeIdList(selection?.skillIds),
+                  reminderIds: normalizeIdList(selection?.reminderIds),
                 },
               ];
             })
@@ -108,7 +111,7 @@ export async function getSessionContextSelection(
 ): Promise<CodexSessionContextSelection> {
   await ensureStateLoaded();
   const selection = state.selectionsByKey[buildSelectionKey(profileId, sessionKey)];
-  return selection ? cloneSelection(selection) : { anchorIds: [], skillIds: [] };
+  return selection ? cloneSelection(selection) : { anchorIds: [], skillIds: [], reminderIds: [] };
 }
 
 export async function setSessionContextSelection(
@@ -121,12 +124,13 @@ export async function setSessionContextSelection(
   const normalized: CodexSessionContextSelection = {
     anchorIds: normalizeIdList(selection?.anchorIds),
     skillIds: normalizeIdList(selection?.skillIds),
+    reminderIds: normalizeIdList(selection?.reminderIds),
   };
 
-  if (normalized.anchorIds.length === 0 && normalized.skillIds.length === 0) {
+  if (normalized.anchorIds.length === 0 && normalized.skillIds.length === 0 && normalized.reminderIds.length === 0) {
     delete state.selectionsByKey[key];
     await persistState();
-    return { anchorIds: [], skillIds: [] };
+    return { anchorIds: [], skillIds: [], reminderIds: [] };
   }
 
   state.selectionsByKey[key] = normalized;

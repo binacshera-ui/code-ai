@@ -17,6 +17,7 @@ import remarkGfm from 'remark-gfm';
 import {
   Archive,
   ArchiveRestore,
+  Bookmark,
   Brain,
   Bot,
   CalendarClock,
@@ -443,10 +444,25 @@ interface UnifiedSkillCatalogResponse {
 interface CodexSessionContextSelection {
   anchorIds: string[];
   skillIds: string[];
+  reminderIds: string[];
 }
 
 interface CodexSessionContextSelectionResponse {
   selection: CodexSessionContextSelection;
+}
+
+interface CodexSessionReminder {
+  id: string;
+  name: string;
+  content: string;
+  sourceEntryId: string | null;
+  sourceRole: 'user' | 'assistant' | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface CodexSessionRemindersResponse {
+  reminders: CodexSessionReminder[];
 }
 
 interface CodexFilePreview {
@@ -1368,7 +1384,7 @@ async function fetchSessionContextSelection(profileId: string, sessionKey: strin
   const data = await fetchJson<CodexSessionContextSelectionResponse>(
     `/api/codex/session-context-selection?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
   );
-  return data.selection || { anchorIds: [], skillIds: [] };
+  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [] };
 }
 
 async function saveSessionContextSelection(
@@ -1386,9 +1402,10 @@ async function saveSessionContextSelection(
       sessionKey,
       anchorIds: selection.anchorIds,
       skillIds: selection.skillIds,
+      reminderIds: selection.reminderIds,
     }),
   });
-  return data.selection || { anchorIds: [], skillIds: [] };
+  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [] };
 }
 
 async function fetchProjectAnchors(profileId: string, cwd: string): Promise<CodexProjectAnchor[]> {
@@ -1430,6 +1447,46 @@ async function deleteProjectAnchorRequest(profileId: string, cwd: string, anchor
 async function fetchUnifiedSkills(): Promise<UnifiedSkillSummary[]> {
   const data = await fetchJson<UnifiedSkillCatalogResponse>('/api/codex/skills');
   return data.skills || [];
+}
+
+async function fetchSessionReminders(profileId: string, sessionKey: string): Promise<CodexSessionReminder[]> {
+  const data = await fetchJson<CodexSessionRemindersResponse>(
+    `/api/codex/session-reminders?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
+  );
+  return data.reminders || [];
+}
+
+async function createSessionReminderRequest(
+  profileId: string,
+  sessionKey: string,
+  input: {
+    name: string;
+    content: string;
+    sourceEntryId?: string | null;
+    sourceRole?: 'user' | 'assistant' | null;
+  }
+): Promise<CodexSessionReminder> {
+  const data = await fetchJson<{ reminder: CodexSessionReminder }>('/api/codex/session-reminders', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      sessionKey,
+      ...input,
+    }),
+  });
+  return data.reminder;
+}
+
+async function deleteSessionReminderRequest(profileId: string, sessionKey: string, reminderId: string): Promise<void> {
+  await fetchJson(
+    `/api/codex/session-reminders/${encodeURIComponent(reminderId)}?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`,
+    {
+      method: 'DELETE',
+    }
+  );
 }
 
 async function deleteSessionPermanently(sessionId: string, profileId: string): Promise<void> {
@@ -2557,6 +2614,7 @@ function MessageBubble({
   onOpenFilePreview,
   onOpenChanges,
   onFork,
+  onAddReminder,
   onDelete,
   onTransfer,
   transferOptions,
@@ -2570,6 +2628,7 @@ function MessageBubble({
   onOpenFilePreview: (rawPath: string) => void;
   onOpenChanges?: (entryId: string) => void;
   onFork?: (entryId: string) => void;
+  onAddReminder?: (entry: CodexTimelineEntry) => void;
   onDelete?: (entryId: string) => void;
   onTransfer?: (entryId: string, targetProfileId: string) => void;
   transferOptions?: TransferTargetOption[];
@@ -2587,6 +2646,7 @@ function MessageBubble({
   const messageText = entry.text || '';
   const showChangesAction = Boolean(onOpenChanges) && !isUser && !isCommentary && !isTransfer && entry.kind === 'final';
   const showForkAction = Boolean(onFork) && !isTransfer;
+  const showReminderAction = Boolean(onAddReminder) && entry.entryType === 'message' && !isTransfer && Boolean(messageText.trim());
   const showDeleteAction = Boolean(onDelete) && (isUser || (!isCommentary && !isTransfer && entry.kind === 'final'));
   const showTransferAction = Boolean(onTransfer && transferOptions?.length) && !isTransfer;
   const hasMultipleTransferTargets = (transferOptions?.length || 0) > 1;
@@ -2674,6 +2734,20 @@ function MessageBubble({
                 aria-label="מזלג מהודעה זו"
               >
                 <GitBranch className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {showReminderAction && (
+              <button
+                type="button"
+                onClick={() => onAddReminder?.(entry)}
+                className={cn(
+                  'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors',
+                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30' : 'bg-slate-50 text-violet-500 hover:bg-violet-50'
+                )}
+                title="הוסף לתזכורות"
+                aria-label="הוסף לתזכורות"
+              >
+                <Bookmark className="h-3.5 w-3.5" />
               </button>
             )}
             {showDeleteAction && (
@@ -6974,6 +7048,261 @@ function SkillPickerDialog({
   );
 }
 
+function ReminderPickerDialog({
+  isOpen,
+  reminders,
+  selectedReminderIds,
+  isLoading,
+  error,
+  deletingReminderId,
+  onClose,
+  onToggleReminder,
+  onDeleteReminder,
+}: {
+  isOpen: boolean;
+  reminders: CodexSessionReminder[];
+  selectedReminderIds: string[];
+  isLoading: boolean;
+  error: string | null;
+  deletingReminderId: string | null;
+  onClose: () => void;
+  onToggleReminder: (reminderId: string) => void;
+  onDeleteReminder: (reminderId: string) => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[76] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close reminders dialog"
+      />
+      <div className="relative z-10 flex w-full max-w-2xl max-h-[82dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-violet-50 text-violet-700">
+              <Bookmark className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Reminders
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">תזכורות מהסשן הזה</div>
+              <div className="mt-1 text-sm leading-6 text-slate-500">
+                בחר תזכורות שכבר נשמרו מהשיחה. הן יצורפו רק להודעה הבאה, ואז יתנקו מהבחירה.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-3">
+          <div className="text-xs leading-6 text-slate-500">
+            יוצרים תזכורת מתוך כל הודעת משתמש או תשובת AI דרך כפתור התזכורת שלצד ההודעה.
+          </div>
+          <span className="shrink-0 rounded-full bg-violet-50 px-3 py-1 text-[11px] font-medium text-violet-700">
+            {selectedReminderIds.length} נבחרו
+          </span>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          {error && (
+            <div className="rounded-[1.25rem] border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+
+          {isLoading ? (
+            <div className="flex min-h-[220px] items-center justify-center rounded-[1.5rem] border border-slate-100 bg-slate-50/70 text-sm text-slate-500">
+              <div className="flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>טוען תזכורות...</span>
+              </div>
+            </div>
+          ) : reminders.length === 0 ? (
+            <div className="rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm leading-7 text-slate-500">
+              עדיין אין תזכורות בסשן הזה.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {reminders.map((reminder) => {
+                const isSelected = selectedReminderIds.includes(reminder.id);
+                return (
+                  <div
+                    key={reminder.id}
+                    className={cn(
+                      'rounded-[1.35rem] border px-4 py-4 transition',
+                      isSelected
+                        ? 'border-violet-200 bg-violet-50/70'
+                        : 'border-slate-100 bg-white'
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <button
+                        type="button"
+                        onClick={() => onToggleReminder(reminder.id)}
+                        className="flex min-w-0 flex-1 items-start gap-3 text-right"
+                      >
+                        <div className={cn(
+                          'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+                          isSelected ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-500'
+                        )}>
+                          <Bookmark className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="truncate text-sm font-semibold text-slate-800">{reminder.name}</div>
+                            {isSelected && (
+                              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-violet-700">
+                                פעיל
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-6 text-slate-500">
+                            {reminder.content}
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                            <span>{formatTimestamp(reminder.updatedAt)}</span>
+                            {reminder.sourceRole && (
+                              <span className="rounded-full bg-white/80 px-2 py-0.5">
+                                {reminder.sourceRole === 'user' ? 'מהודעת משתמש' : 'מתשובת AI'}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDeleteReminder(reminder.id)}
+                        disabled={deletingReminderId === reminder.id}
+                        className="shrink-0 rounded-full border border-rose-100 bg-white p-2 text-rose-500 transition hover:bg-rose-50 disabled:opacity-40"
+                        title="מחק תזכורת"
+                      >
+                        {deletingReminderId === reminder.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CreateReminderDialog({
+  isOpen,
+  entry,
+  name,
+  isSaving,
+  onNameChange,
+  onClose,
+  onSave,
+}: {
+  isOpen: boolean;
+  entry: CodexTimelineEntry | null;
+  name: string;
+  isSaving: boolean;
+  onNameChange: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  if (!isOpen || !entry) {
+    return null;
+  }
+
+  const sourceLabel = entry.role === 'user' ? 'הודעת משתמש' : 'תשובת AI';
+
+  return (
+    <div className="fixed inset-0 z-[77] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close create reminder dialog"
+      />
+      <div className="relative z-10 flex w-full max-w-xl flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-violet-50 text-violet-700">
+              <Bookmark className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Reminder
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">צור תזכורת מהשיחה</div>
+              <div className="mt-1 text-sm leading-6 text-slate-500">
+                שמור קטע מהשיחה כתזכורת לסשן הזה, כדי שתוכל לצרף אותו ידנית בהודעות הבאות.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="px-5 py-5">
+          <div className="mb-3 rounded-[1.2rem] border border-slate-100 bg-slate-50/80 px-4 py-3 text-xs text-slate-500">
+            <div className="font-medium text-slate-700">{sourceLabel}</div>
+            <div className="mt-1">{formatTimestamp(entry.timestamp)}</div>
+          </div>
+
+          <input
+            value={name}
+            onChange={(event) => onNameChange(event.target.value)}
+            placeholder="שם קצר לתזכורת"
+            className="w-full rounded-[1.2rem] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 outline-none transition-colors focus:border-violet-300"
+          />
+
+          <div className="mt-3 rounded-[1.35rem] border border-slate-100 bg-slate-50/70 px-4 py-4">
+            <div className="mb-2 text-[11px] font-semibold tracking-[0.16em] text-slate-400">
+              תוכן שיישמר
+            </div>
+            <div className="max-h-52 overflow-y-auto whitespace-pre-wrap text-sm leading-7 text-slate-600">
+              {entry.text || ''}
+            </div>
+          </div>
+
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+            >
+              בטל
+            </button>
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={isSaving || !name.trim()}
+              className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-50"
+            >
+              {isSaving ? 'שומר...' : 'שמור תזכורת'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CreateAnchorDialog({
   isOpen,
   cwd,
@@ -7170,7 +7499,9 @@ export function CodexMobileApp() {
   const [isAdditionsMenuOpen, setIsAdditionsMenuOpen] = useState(false);
   const [isAnchorManagerOpen, setIsAnchorManagerOpen] = useState(false);
   const [isSkillPickerDialogOpen, setIsSkillPickerDialogOpen] = useState(false);
+  const [isReminderPickerDialogOpen, setIsReminderPickerDialogOpen] = useState(false);
   const [isAnchorCreateDialogOpen, setIsAnchorCreateDialogOpen] = useState(false);
+  const [isCreateReminderDialogOpen, setIsCreateReminderDialogOpen] = useState(false);
   const [isAnchorTargetPickerMode, setIsAnchorTargetPickerMode] = useState(false);
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
   const [activeModelPanelSection, setActiveModelPanelSection] = useState<'permissions' | 'models' | 'reasoning'>('permissions');
@@ -7206,24 +7537,31 @@ export function CodexMobileApp() {
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
-  const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>({ anchorIds: [], skillIds: [] });
+  const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>({ anchorIds: [], skillIds: [], reminderIds: [] });
   const [instructionDraft, setInstructionDraft] = useState('');
   const [projectAnchors, setProjectAnchors] = useState<CodexProjectAnchor[]>([]);
   const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
+  const [sessionReminders, setSessionReminders] = useState<CodexSessionReminder[]>([]);
   const [isInstructionDialogOpen, setIsInstructionDialogOpen] = useState(false);
   const [isInstructionLoading, setIsInstructionLoading] = useState(false);
   const [isSessionContextSelectionLoading, setIsSessionContextSelectionLoading] = useState(false);
   const [isSessionContextSelectionSaving, setIsSessionContextSelectionSaving] = useState(false);
   const [isProjectAnchorsLoading, setIsProjectAnchorsLoading] = useState(false);
   const [isUnifiedSkillsLoading, setIsUnifiedSkillsLoading] = useState(false);
+  const [isSessionRemindersLoading, setIsSessionRemindersLoading] = useState(false);
   const [isInstructionSaving, setIsInstructionSaving] = useState(false);
+  const [isReminderSaving, setIsReminderSaving] = useState(false);
   const [projectAnchorsError, setProjectAnchorsError] = useState<string | null>(null);
   const [unifiedSkillsError, setUnifiedSkillsError] = useState<string | null>(null);
+  const [sessionRemindersError, setSessionRemindersError] = useState<string | null>(null);
   const [anchorDraftTargetEntry, setAnchorDraftTargetEntry] = useState<CodexFileTreeEntry | null>(null);
   const [anchorDraftName, setAnchorDraftName] = useState('');
   const [anchorDraftDescription, setAnchorDraftDescription] = useState('');
+  const [pendingReminderSourceEntry, setPendingReminderSourceEntry] = useState<CodexTimelineEntry | null>(null);
+  const [reminderDraftName, setReminderDraftName] = useState('');
   const [isAnchorSaving, setIsAnchorSaving] = useState(false);
   const [deletingAnchorId, setDeletingAnchorId] = useState<string | null>(null);
+  const [deletingReminderId, setDeletingReminderId] = useState<string | null>(null);
   const [scheduleType, setScheduleType] = useState<'once' | 'recurring'>('once');
   const [recurringFreq, setRecurringFreq] = useState<'daily' | 'weekly'>('daily');
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -7295,6 +7633,7 @@ export function CodexMobileApp() {
   const latestSessionContextSelectionLoadTokenRef = useRef(0);
   const latestProjectAnchorsLoadTokenRef = useRef(0);
   const latestUnifiedSkillsLoadTokenRef = useRef(0);
+  const latestSessionRemindersLoadTokenRef = useRef(0);
   const latestModelCatalogLoadTokenRef = useRef(0);
   const latestRateLimitLoadTokenRef = useRef(0);
   const currentSessionActiveCountRef = useRef(0);
@@ -8509,11 +8848,17 @@ export function CodexMobileApp() {
     setIsAdditionsMenuOpen(false);
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
+    setIsReminderPickerDialogOpen(false);
     setIsAnchorCreateDialogOpen(false);
+    setIsCreateReminderDialogOpen(false);
     setIsAnchorTargetPickerMode(false);
     setAnchorDraftTargetEntry(null);
     setAnchorDraftName('');
     setAnchorDraftDescription('');
+    setPendingReminderSourceEntry(null);
+    setReminderDraftName('');
+    setSessionReminders([]);
+    setSessionRemindersError(null);
     clearDraftAttachments();
     setScheduledFor('');
     setIsScheduleOpen(false);
@@ -8583,14 +8928,20 @@ export function CodexMobileApp() {
     setIsAdditionsMenuOpen(false);
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
+    setIsReminderPickerDialogOpen(false);
     setIsAnchorCreateDialogOpen(false);
+    setIsCreateReminderDialogOpen(false);
     setIsAnchorTargetPickerMode(false);
     setAnchorDraftTargetEntry(null);
     setAnchorDraftName('');
     setAnchorDraftDescription('');
+    setPendingReminderSourceEntry(null);
+    setReminderDraftName('');
     setProjectAnchors([]);
     setProjectAnchorsError(null);
-    setSessionContextSelection({ anchorIds: [], skillIds: [] });
+    setSessionReminders([]);
+    setSessionRemindersError(null);
+    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [] });
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
@@ -9702,7 +10053,7 @@ export function CodexMobileApp() {
 
   async function loadCurrentSessionContextSelection(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
     if (!nextProfileId || !nextSessionKey) {
-      setSessionContextSelection({ anchorIds: [], skillIds: [] });
+      setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [] });
       return;
     }
 
@@ -9716,8 +10067,8 @@ export function CodexMobileApp() {
       setSessionContextSelection(selection);
     } catch (selectionError: any) {
       if (requestToken === latestSessionContextSelectionLoadTokenRef.current) {
-        setSessionContextSelection({ anchorIds: [], skillIds: [] });
-        setError(selectionError.message || 'Failed to load anchor and skill selection');
+        setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [] });
+        setError(selectionError.message || 'Failed to load anchor, skill and reminder selection');
       }
     } finally {
       if (requestToken === latestSessionContextSelectionLoadTokenRef.current) {
@@ -9737,7 +10088,7 @@ export function CodexMobileApp() {
       const savedSelection = await saveSessionContextSelection(profileId, currentQueueKey, nextSelection);
       setSessionContextSelection(savedSelection);
     } catch (selectionError: any) {
-      setError(selectionError.message || 'Failed to save anchor and skill selection');
+      setError(selectionError.message || 'Failed to save anchor, skill and reminder selection');
       void loadCurrentSessionContextSelection(profileId, currentQueueKey);
     } finally {
       setIsSessionContextSelectionSaving(false);
@@ -9745,10 +10096,11 @@ export function CodexMobileApp() {
   }
 
   function clearSessionContextSelectionAfterSend() {
-    setSessionContextSelection({ anchorIds: [], skillIds: [] });
+    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [] });
     setIsAdditionsMenuOpen(false);
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
+    setIsReminderPickerDialogOpen(false);
   }
 
   async function loadCurrentProjectAnchors(nextProfileId = profileId, nextCwd = activeComposerCwd) {
@@ -9801,6 +10153,34 @@ export function CodexMobileApp() {
     }
   }
 
+  async function loadCurrentSessionReminders(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
+    if (!nextProfileId || !nextSessionKey) {
+      setSessionReminders([]);
+      setSessionRemindersError(null);
+      return;
+    }
+
+    const requestToken = ++latestSessionRemindersLoadTokenRef.current;
+    setIsSessionRemindersLoading(true);
+    setSessionRemindersError(null);
+    try {
+      const reminders = await fetchSessionReminders(nextProfileId, nextSessionKey);
+      if (requestToken !== latestSessionRemindersLoadTokenRef.current) {
+        return;
+      }
+      setSessionReminders(reminders);
+    } catch (remindersError: any) {
+      if (requestToken === latestSessionRemindersLoadTokenRef.current) {
+        setSessionReminders([]);
+        setSessionRemindersError(remindersError.message || 'Failed to load session reminders');
+      }
+    } finally {
+      if (requestToken === latestSessionRemindersLoadTokenRef.current) {
+        setIsSessionRemindersLoading(false);
+      }
+    }
+  }
+
   function toggleAnchorSelection(anchorId: string) {
     const currentIds = new Set(sessionContextSelection.anchorIds);
     if (currentIds.has(anchorId)) {
@@ -9811,6 +10191,7 @@ export function CodexMobileApp() {
     void persistSessionContextSelection({
       anchorIds: [...currentIds],
       skillIds: sessionContextSelection.skillIds,
+      reminderIds: sessionContextSelection.reminderIds,
     });
   }
 
@@ -9824,6 +10205,21 @@ export function CodexMobileApp() {
     void persistSessionContextSelection({
       anchorIds: sessionContextSelection.anchorIds,
       skillIds: [...currentIds],
+      reminderIds: sessionContextSelection.reminderIds,
+    });
+  }
+
+  function toggleReminderSelection(reminderId: string) {
+    const currentIds = new Set(sessionContextSelection.reminderIds);
+    if (currentIds.has(reminderId)) {
+      currentIds.delete(reminderId);
+    } else {
+      currentIds.add(reminderId);
+    }
+    void persistSessionContextSelection({
+      anchorIds: sessionContextSelection.anchorIds,
+      skillIds: sessionContextSelection.skillIds,
+      reminderIds: [...currentIds],
     });
   }
 
@@ -9849,6 +10245,24 @@ export function CodexMobileApp() {
     if (availableUnifiedSkills.length === 0) {
       void loadUnifiedSkillCatalog();
     }
+  }
+
+  function openReminderPickerDialog() {
+    setIsAdditionsMenuOpen(false);
+    setIsReminderPickerDialogOpen(true);
+    if (profileId && currentQueueKey) {
+      void loadCurrentSessionReminders(profileId, currentQueueKey);
+    }
+  }
+
+  function openCreateReminderDialog(entry: CodexTimelineEntry) {
+    setPendingReminderSourceEntry(entry);
+    const normalized = (entry.text || '')
+      .split('\n')
+      .map((line) => line.trim())
+      .find(Boolean) || '';
+    setReminderDraftName(normalized.slice(0, 60) || 'תזכורת חדשה');
+    setIsCreateReminderDialogOpen(true);
   }
 
   function openAnchorTargetPicker() {
@@ -9900,6 +10314,7 @@ export function CodexMobileApp() {
       await persistSessionContextSelection({
         anchorIds: nextAnchorIds,
         skillIds: sessionContextSelection.skillIds,
+        reminderIds: sessionContextSelection.reminderIds,
       });
       setIsAnchorCreateDialogOpen(false);
       setIsAnchorManagerOpen(true);
@@ -9926,12 +10341,61 @@ export function CodexMobileApp() {
         await persistSessionContextSelection({
           anchorIds: sessionContextSelection.anchorIds.filter((currentId) => currentId !== anchorId),
           skillIds: sessionContextSelection.skillIds,
+          reminderIds: sessionContextSelection.reminderIds,
         });
       }
     } catch (anchorError: any) {
       setError(anchorError.message || 'Failed to delete anchor');
     } finally {
       setDeletingAnchorId(null);
+    }
+  }
+
+  async function createReminderFromDraft() {
+    if (!profileId || !currentQueueKey || !pendingReminderSourceEntry?.text?.trim()) {
+      setError('חסר מידע ליצירת תזכורת.');
+      return;
+    }
+
+    setIsReminderSaving(true);
+    try {
+      const reminder = await createSessionReminderRequest(profileId, currentQueueKey, {
+        name: reminderDraftName,
+        content: pendingReminderSourceEntry.text,
+        sourceEntryId: pendingReminderSourceEntry.id,
+        sourceRole: pendingReminderSourceEntry.role || null,
+      });
+      setSessionReminders((current) => [reminder, ...current.filter((candidate) => candidate.id !== reminder.id)]);
+      setIsCreateReminderDialogOpen(false);
+      setPendingReminderSourceEntry(null);
+      setReminderDraftName('');
+    } catch (reminderError: any) {
+      setError(reminderError.message || 'Failed to create reminder');
+    } finally {
+      setIsReminderSaving(false);
+    }
+  }
+
+  async function deleteReminder(reminderId: string) {
+    if (!profileId || !currentQueueKey) {
+      return;
+    }
+
+    setDeletingReminderId(reminderId);
+    try {
+      await deleteSessionReminderRequest(profileId, currentQueueKey, reminderId);
+      setSessionReminders((current) => current.filter((reminder) => reminder.id !== reminderId));
+      if (sessionContextSelection.reminderIds.includes(reminderId)) {
+        await persistSessionContextSelection({
+          anchorIds: sessionContextSelection.anchorIds,
+          skillIds: sessionContextSelection.skillIds,
+          reminderIds: sessionContextSelection.reminderIds.filter((currentId) => currentId !== reminderId),
+        });
+      }
+    } catch (reminderError: any) {
+      setError(reminderError.message || 'Failed to delete reminder');
+    } finally {
+      setDeletingReminderId(null);
     }
   }
 
@@ -10054,6 +10518,10 @@ export function CodexMobileApp() {
     () => availableUnifiedSkills.filter((skill) => sessionContextSelection.skillIds.includes(skill.id)),
     [availableUnifiedSkills, sessionContextSelection.skillIds]
   );
+  const selectedReminderSummaries = useMemo(
+    () => sessionReminders.filter((reminder) => sessionContextSelection.reminderIds.includes(reminder.id)),
+    [sessionContextSelection.reminderIds, sessionReminders]
+  );
   const modelPermissionTone = useMemo(
     () => getPermissionTone(modelPermissionSnapshot),
     [modelPermissionSnapshot]
@@ -10082,6 +10550,7 @@ export function CodexMobileApp() {
 
     void loadCurrentSessionInstruction(profileId, currentQueueKey);
     void loadCurrentSessionContextSelection(profileId, currentQueueKey);
+    void loadCurrentSessionReminders(profileId, currentQueueKey);
   }, [currentQueueKey, profileId]);
 
   useEffect(() => {
@@ -10698,6 +11167,7 @@ export function CodexMobileApp() {
                 onOpenFilePreview={(rawPath) => void handleOpenFilePreview(rawPath)}
                 onOpenChanges={selectedSession ? (entryId) => void openSessionChangesForEntry(entryId) : undefined}
                 onFork={selectedSession ? (entryId) => forkFromTimelineEntry(entryId) : undefined}
+                onAddReminder={selectedConversationId ? (entry) => openCreateReminderDialog(entry) : undefined}
                 onDelete={selectedConversationId ? (entryId) => void deleteTurnFromTimelineEntry(entryId) : undefined}
                 onTransfer={selectedSession && transferTargetOptions.length > 0
                   ? (entryId, targetProfileId) => void transferFromTimelineEntry(entryId, targetProfileId)
@@ -10790,7 +11260,7 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || isSessionContextSelectionSaving) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || isSessionContextSelectionSaving) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
                 {selectedAnchorSummaries.map((anchor) => (
                   <button
@@ -10812,6 +11282,17 @@ export function CodexMobileApp() {
                   >
                     <Wrench className="h-3.5 w-3.5" />
                     <span>{skill.displayName}</span>
+                  </button>
+                ))}
+                {selectedReminderSummaries.map((reminder) => (
+                  <button
+                    key={reminder.id}
+                    type="button"
+                    onClick={openReminderPickerDialog}
+                    className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-3 py-1.5 text-[11px] font-medium text-violet-700 transition hover:bg-violet-100"
+                  >
+                    <Bookmark className="h-3.5 w-3.5" />
+                    <span>{reminder.name}</span>
                   </button>
                 ))}
                 {isSessionContextSelectionSaving && (
@@ -11512,7 +11993,7 @@ export function CodexMobileApp() {
                           <div className="min-w-0 flex-1">
                             <div className="text-[11px] font-semibold text-slate-700">תוספות לשיחה</div>
                             <div className="truncate text-[9px] text-slate-400">
-                              קבצים, עוגנים וסקילים
+                              קבצים, עוגנים, סקילים ותזכורות
                             </div>
                           </div>
                         </div>
@@ -11557,6 +12038,19 @@ export function CodexMobileApp() {
                             </div>
                           </div>
                           <Wrench className="h-4 w-4 shrink-0 text-sky-500" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={openReminderPickerDialog}
+                          className="flex w-full items-center justify-between gap-3 rounded-[0.9rem] border border-slate-100 bg-slate-50/80 px-3 py-2 text-right transition hover:border-violet-200 hover:bg-violet-50/50"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-[11px] font-semibold text-slate-700">תזכורות</div>
+                            <div className="text-[9px] text-slate-400">
+                              {selectedReminderSummaries.length > 0 ? `${selectedReminderSummaries.length} יצורפו להודעה הבאה` : 'תזכורות שנוצרו מתוך השיחה'}
+                            </div>
+                          </div>
+                          <Bookmark className="h-4 w-4 shrink-0 text-violet-500" />
                         </button>
                       </div>
                     </div>
@@ -11806,6 +12300,32 @@ export function CodexMobileApp() {
         error={unifiedSkillsError}
         onClose={() => setIsSkillPickerDialogOpen(false)}
         onToggleSkill={toggleSkillSelection}
+      />
+
+      <ReminderPickerDialog
+        isOpen={isReminderPickerDialogOpen}
+        reminders={sessionReminders}
+        selectedReminderIds={sessionContextSelection.reminderIds}
+        isLoading={isSessionRemindersLoading || isSessionContextSelectionLoading}
+        error={sessionRemindersError}
+        deletingReminderId={deletingReminderId}
+        onClose={() => setIsReminderPickerDialogOpen(false)}
+        onToggleReminder={toggleReminderSelection}
+        onDeleteReminder={(reminderId) => void deleteReminder(reminderId)}
+      />
+
+      <CreateReminderDialog
+        isOpen={isCreateReminderDialogOpen}
+        entry={pendingReminderSourceEntry}
+        name={reminderDraftName}
+        isSaving={isReminderSaving}
+        onNameChange={setReminderDraftName}
+        onClose={() => {
+          setIsCreateReminderDialogOpen(false);
+          setPendingReminderSourceEntry(null);
+          setReminderDraftName('');
+        }}
+        onSave={() => void createReminderFromDraft()}
       />
 
       <CreateAnchorDialog
