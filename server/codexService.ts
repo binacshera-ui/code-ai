@@ -14,6 +14,7 @@ import {
 import type { CodexSessionTopic } from './codexSessionTopics.js';
 import { listHiddenSessionIds } from './codexSessionVisibility.js';
 import { getSessionTopicMap } from './codexSessionTopics.js';
+import { getSelectedPermissionMode, resolvePermissionMode } from './providerPermissions.js';
 
 export interface CodexProfile {
   id: string;
@@ -166,6 +167,50 @@ interface CodexRunResult {
 export interface CodexExecutionConfig {
   model: string | null;
   reasoningEffort: string | null;
+  permissionModeId?: string | null;
+}
+
+export interface CodexPermissionModeOption {
+  id: string;
+  label: string;
+  accessLevel: 'full' | 'balanced' | 'restricted';
+  modeLabel: string;
+  summary: string;
+  description: string;
+  approvalLabel: string | null;
+  sandboxLabel: string | null;
+  toolsLabel: string | null;
+  trustLabel: string | null;
+}
+
+export interface CodexPermissionCapabilities {
+  canChangeMode: boolean;
+  detectsLiveApprovalRequests: boolean;
+  canApproveFromUi: boolean;
+  notes: string[];
+}
+
+export interface CodexPermissionPendingApproval {
+  requestId: string;
+  title: string;
+  details: string | null;
+  source: string;
+  canRespond: boolean;
+  updatedAt: string;
+}
+
+export interface CodexPermissionRuntimeState {
+  profileId: string;
+  sessionId: string | null;
+  selectedModeId: string | null;
+  effectiveModeId: string | null;
+  effectiveModeLabel: string | null;
+  approvalLabel: string | null;
+  sandboxLabel: string | null;
+  toolsLabel: string | null;
+  trustLabel: string | null;
+  updatedAt: string | null;
+  pendingApproval: CodexPermissionPendingApproval | null;
 }
 
 export interface CodexReasoningLevelOption {
@@ -191,6 +236,10 @@ export interface CodexPermissionSnapshot {
   sandboxLabel: string | null;
   toolsLabel: string | null;
   trustLabel: string | null;
+  selectedModeId?: string | null;
+  availableModes?: CodexPermissionModeOption[];
+  capabilities?: CodexPermissionCapabilities | null;
+  runtime?: CodexPermissionRuntimeState | null;
 }
 
 export interface CodexModelCatalog {
@@ -2464,11 +2513,13 @@ async function resolveCodexExecutionConfig(
 ): Promise<CodexExecutionConfig> {
   const requestedModel = normalizeExecutionSettingValue(executionConfig?.model);
   const requestedReasoningEffort = normalizeExecutionSettingValue(executionConfig?.reasoningEffort);
+  const requestedPermissionModeId = normalizeExecutionSettingValue(executionConfig?.permissionModeId);
 
   if (!requestedModel && !requestedReasoningEffort) {
     return {
       model: null,
       reasoningEffort: null,
+      permissionModeId: requestedPermissionModeId,
     };
   }
 
@@ -2496,18 +2547,21 @@ async function resolveCodexExecutionConfig(
   return {
     model: selectedModelOption?.slug || requestedModel || null,
     reasoningEffort: requestedReasoningEffort,
+    permissionModeId: requestedPermissionModeId,
   };
 }
 
 function collectCodexArgs(
   prompt: string,
+  permissionArgs: string[],
   sessionId?: string,
   imagePaths: string[] = [],
   executionConfig?: CodexExecutionConfig | null
 ): string[] {
   const baseArgs = [
+    ...permissionArgs,
+    'exec',
     '--json',
-    '--dangerously-bypass-approvals-and-sandbox',
     '--skip-git-repo-check',
   ];
   const executionArgs = [
@@ -2517,10 +2571,26 @@ function collectCodexArgs(
   const imageArgs = imagePaths.flatMap((imagePath) => ['--image', imagePath]);
 
   if (sessionId) {
-    return ['exec', 'resume', ...baseArgs, ...executionArgs, ...imageArgs, sessionId, prompt];
+    return [...baseArgs, 'resume', ...executionArgs, ...imageArgs, sessionId, prompt];
   }
 
-  return ['exec', ...baseArgs, ...executionArgs, ...imageArgs, prompt];
+  return [...baseArgs, ...executionArgs, ...imageArgs, prompt];
+}
+
+async function resolveCodexPermissionArgs(
+  profile: CodexProfile,
+  permissionModeId?: string | null
+): Promise<string[]> {
+  const selectedMode = permissionModeId
+    ? resolvePermissionMode(profile, permissionModeId)
+    : await getSelectedPermissionMode(profile);
+  if (selectedMode.id === 'restricted') {
+    return ['--ask-for-approval', 'on-request', '--sandbox', 'read-only'];
+  }
+  if (selectedMode.id === 'balanced') {
+    return ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'];
+  }
+  return ['--dangerously-bypass-approvals-and-sandbox', '--sandbox', 'danger-full-access'];
 }
 
 function queueBySessionKey<T>(key: string, task: () => Promise<T>): Promise<T> {
@@ -2586,7 +2656,8 @@ export async function runCodexPrompt(
 
   return queueBySessionKey(queueKey, async () => {
     const previousSession = sessionId ? await resolveSessionRecord(profile, sessionId) : null;
-    const args = collectCodexArgs(promptText, sessionId, imagePaths, executionConfig);
+    const permissionArgs = await resolveCodexPermissionArgs(profile, executionConfig.permissionModeId);
+    const args = collectCodexArgs(promptText, permissionArgs, sessionId, imagePaths, executionConfig);
 
     return new Promise<CodexRunResult>((resolve, reject) => {
       const child = spawn(CODEX_BIN, args, {

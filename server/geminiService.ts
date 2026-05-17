@@ -26,6 +26,7 @@ import type {
   CodexTimelineEntry,
   CodexUploadedAttachment,
 } from './codexService.js';
+import { getSelectedPermissionMode, resolvePermissionMode } from './providerPermissions.js';
 
 interface GeminiSessionScanRecord {
   id: string;
@@ -1157,14 +1158,15 @@ function collectGeminiArgs(
   sessionId: string | undefined,
   executionConfig: CodexExecutionConfig | null | undefined,
   includeDirectories: string[],
-  resolvedModel: string
+  resolvedModel: string,
+  approvalMode: string
 ): string[] {
   const args = [
     '--output-format',
     'stream-json',
     '--skip-trust',
     '--approval-mode',
-    'yolo',
+    approvalMode,
     '--model',
     resolvedModel,
     '--prompt',
@@ -1690,7 +1692,16 @@ export async function runGeminiPrompt(
     }
 
     const env = buildGeminiProcessEnv(profile, envValues, temporarySettingsPath);
-    const args = collectGeminiArgs(sessionId, executionConfig, includeDirectories, resolvedModel);
+    const selectedPermissionMode = executionConfig.permissionModeId
+      ? resolvePermissionMode(profile, executionConfig.permissionModeId)
+      : await getSelectedPermissionMode(profile);
+    const args = collectGeminiArgs(
+      sessionId,
+      executionConfig,
+      includeDirectories,
+      resolvedModel,
+      selectedPermissionMode.modeLabel
+    );
 
     try {
       return await new Promise<GeminiRunResult>((resolve, reject) => {

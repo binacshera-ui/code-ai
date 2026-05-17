@@ -237,6 +237,49 @@ interface CodexModelCatalogResponse {
   permissions: CodexPermissionSnapshotResponse | null;
 }
 
+interface CodexPermissionModeOptionResponse {
+  id: string;
+  label: string;
+  accessLevel: 'full' | 'balanced' | 'restricted';
+  modeLabel: string;
+  summary: string;
+  description: string;
+  approvalLabel: string | null;
+  sandboxLabel: string | null;
+  toolsLabel: string | null;
+  trustLabel: string | null;
+}
+
+interface CodexPermissionCapabilitiesResponse {
+  canChangeMode: boolean;
+  detectsLiveApprovalRequests: boolean;
+  canApproveFromUi: boolean;
+  notes: string[];
+}
+
+interface CodexPermissionPendingApprovalResponse {
+  requestId: string;
+  title: string;
+  details: string | null;
+  source: string;
+  canRespond: boolean;
+  updatedAt: string;
+}
+
+interface CodexPermissionRuntimeStateResponse {
+  profileId: string;
+  sessionId: string | null;
+  selectedModeId: string | null;
+  effectiveModeId: string | null;
+  effectiveModeLabel: string | null;
+  approvalLabel: string | null;
+  sandboxLabel: string | null;
+  toolsLabel: string | null;
+  trustLabel: string | null;
+  updatedAt: string | null;
+  pendingApproval: CodexPermissionPendingApprovalResponse | null;
+}
+
 interface CodexPermissionSnapshotResponse {
   accessLevel: 'full' | 'balanced' | 'restricted';
   accessLabel: string;
@@ -246,6 +289,10 @@ interface CodexPermissionSnapshotResponse {
   sandboxLabel: string | null;
   toolsLabel: string | null;
   trustLabel: string | null;
+  selectedModeId?: string | null;
+  availableModes?: CodexPermissionModeOptionResponse[];
+  capabilities?: CodexPermissionCapabilitiesResponse | null;
+  runtime?: CodexPermissionRuntimeStateResponse | null;
 }
 
 interface CodexRateLimitWindowResponse {
@@ -1212,6 +1259,23 @@ async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> 
 
 async function fetchCodexModelCatalog(profileId: string): Promise<CodexModelCatalogResponse> {
   return fetchJson<CodexModelCatalogResponse>(`/api/codex/models?profile=${encodeURIComponent(profileId)}`);
+}
+
+async function saveCodexPermissionMode(
+  profileId: string,
+  modeId: string
+): Promise<CodexPermissionSnapshotResponse> {
+  const data = await fetchJson<{ permissions: CodexPermissionSnapshotResponse }>('/api/codex/permissions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      modeId,
+    }),
+  });
+  return data.permissions;
 }
 
 async function fetchCodexRateLimits(profileId: string, sessionId?: string | null): Promise<CodexRateLimitSnapshotResponse | null> {
@@ -7109,9 +7173,11 @@ export function CodexMobileApp() {
   const [isAnchorCreateDialogOpen, setIsAnchorCreateDialogOpen] = useState(false);
   const [isAnchorTargetPickerMode, setIsAnchorTargetPickerMode] = useState(false);
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
+  const [activeModelPanelSection, setActiveModelPanelSection] = useState<'permissions' | 'models' | 'reasoning'>('permissions');
   const [isReasoningPickerOpen, setIsReasoningPickerOpen] = useState(false);
   const [isRateLimitOpen, setIsRateLimitOpen] = useState(false);
   const [isModelCatalogLoading, setIsModelCatalogLoading] = useState(false);
+  const [isPermissionModeSaving, setIsPermissionModeSaving] = useState(false);
   const [isRateLimitLoading, setIsRateLimitLoading] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [draftCwd, setDraftCwd] = useState<string | null>(null);
@@ -8983,6 +9049,7 @@ export function CodexMobileApp() {
       cwd: !selectedSessionId ? activeComposerCwd : null,
       model: selectedModelSlug,
       reasoningEffort: selectedReasoningEffort,
+      permissionModeId: modelPermissionSnapshot?.selectedModeId || null,
       forkSourceSessionId: forkDraftContext?.sourceSessionId || null,
       forkEntryId: forkDraftContext?.forkEntryId || null,
       prompt: trimmedPrompt,
@@ -9036,6 +9103,7 @@ export function CodexMobileApp() {
           cwd: !selectedSessionId ? activeComposerCwd : undefined,
           model: selectedModelSlug || undefined,
           reasoningEffort: selectedReasoningEffort || undefined,
+          permissionModeId: modelPermissionSnapshot?.selectedModeId || undefined,
           scheduledAt: scheduledFor ? new Date(scheduledFor).toISOString() : undefined,
           recurrence: scheduleType === 'recurring'
             ? {
@@ -9125,6 +9193,7 @@ export function CodexMobileApp() {
           profileId,
           model: selectedModelSlug || undefined,
           reasoningEffort: selectedReasoningEffort || undefined,
+          permissionModeId: modelPermissionSnapshot?.selectedModeId || undefined,
         }),
       });
 
@@ -9528,6 +9597,29 @@ export function CodexMobileApp() {
       if (requestToken === latestModelCatalogLoadTokenRef.current) {
         setIsModelCatalogLoading(false);
       }
+    }
+  }
+
+  async function handlePermissionModeChange(nextModeId: string) {
+    if (!profileId || isPermissionModeSaving) {
+      return;
+    }
+
+    const currentModeId = modelPermissionSnapshot?.selectedModeId || modelPermissionSnapshot?.runtime?.selectedModeId || null;
+    if (currentModeId === nextModeId) {
+      return;
+    }
+
+    setIsPermissionModeSaving(true);
+    setError(null);
+
+    try {
+      const permissions = await saveCodexPermissionMode(profileId, nextModeId);
+      setModelPermissionSnapshot(permissions);
+    } catch (permissionError: any) {
+      setError(permissionError.message || 'Failed to update permission mode');
+    } finally {
+      setIsPermissionModeSaving(false);
     }
   }
 
@@ -9935,6 +10027,17 @@ export function CodexMobileApp() {
     () => supportedReasoningLevels.find((level) => level.effort === selectedReasoningEffort) || null,
     [selectedReasoningEffort, supportedReasoningLevels]
   );
+  const availablePermissionModes = modelPermissionSnapshot?.availableModes || [];
+  const selectedPermissionModeId = modelPermissionSnapshot?.selectedModeId
+    || modelPermissionSnapshot?.runtime?.selectedModeId
+    || null;
+  const permissionCapabilities = modelPermissionSnapshot?.capabilities || null;
+  const permissionRuntimeState = modelPermissionSnapshot?.runtime || null;
+  const modelPanelSectionSummary = useMemo(() => ({
+    permissions: modelPermissionSnapshot?.accessLabel || 'ללא נתון',
+    models: selectedModelOption?.displayName || 'ללא בחירה',
+    reasoning: selectedReasoningOption ? getReasoningEffortLabel(selectedReasoningOption.effort) : 'ללא בחירה',
+  }), [modelPermissionSnapshot?.accessLabel, selectedModelOption?.displayName, selectedReasoningOption]);
   const selectedAnchorSummaries = useMemo(
     () => projectAnchors.filter((anchor) => sessionContextSelection.anchorIds.includes(anchor.id)),
     [projectAnchors, sessionContextSelection.anchorIds]
@@ -10889,7 +10992,12 @@ export function CodexMobileApp() {
                       setIsScheduleOpen(false);
                       setIsRateLimitOpen(false);
                       setIsAdditionsMenuOpen(false);
-                      setIsModelPickerOpen((current) => !current);
+                      setIsModelPickerOpen((current) => {
+                        if (!current) {
+                          setActiveModelPanelSection(modelPermissionSnapshot ? 'permissions' : 'models');
+                        }
+                        return !current;
+                      });
                       setIsReasoningPickerOpen(false);
                     }}
                     className={cn(
@@ -10907,7 +11015,7 @@ export function CodexMobileApp() {
                   </button>
 
                   {isModelPickerOpen && (
-                    <div className="absolute bottom-full right-0 z-20 mb-2 w-[min(13rem,74vw)] overflow-hidden rounded-[1rem] border border-slate-200/80 bg-white/96 shadow-[0_16px_36px_-30px_rgba(15,23,42,0.2)] backdrop-blur-xl">
+                    <div className="absolute bottom-full right-0 z-20 mb-2 w-[min(12rem,72vw)] overflow-hidden rounded-[1rem] border border-slate-200/80 bg-white/96 shadow-[0_16px_36px_-30px_rgba(15,23,42,0.2)] backdrop-blur-xl">
                       <div className="border-b border-slate-100/90 bg-gradient-to-b from-violet-50/45 via-white to-white px-2.5 py-2 text-right">
                         <div className="flex items-center justify-between gap-2">
                           <Brain className="h-3.5 w-3.5 shrink-0 text-violet-400" />
@@ -10920,7 +11028,7 @@ export function CodexMobileApp() {
                         </div>
                       </div>
 
-                      <div className="max-h-[58vh] space-y-2 overflow-y-auto p-2">
+                      <div className="max-h-[48vh] space-y-2 overflow-y-auto p-2">
                         <div className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-2 text-right">
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-[10px] font-semibold text-slate-600">פעיל עכשיו</span>
@@ -10939,142 +11047,250 @@ export function CodexMobileApp() {
                         </div>
 
                         {modelPermissionSnapshot && (
-                          <div className="rounded-[0.85rem] border border-slate-100 bg-white/85 px-2.5 py-2 text-right">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[10px] font-semibold text-slate-600">הרשאות</span>
+                          <div className="overflow-hidden rounded-[0.85rem] border border-slate-100 bg-white/85">
+                            <button
+                              type="button"
+                              onClick={() => setActiveModelPanelSection((current) => current === 'permissions' ? 'models' : 'permissions')}
+                              className="flex w-full items-center justify-between gap-2 px-2.5 py-2 text-right"
+                            >
+                              <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-slate-300 transition-transform', activeModelPanelSection === 'permissions' && 'rotate-180')} />
+                              <div className="min-w-0 flex-1">
+                                <div className="text-[10px] font-semibold text-slate-600">הרשאות</div>
+                                <div className="truncate text-[8px] text-slate-400">{modelPanelSectionSummary.permissions}</div>
+                              </div>
                               <span className={cn('rounded-full px-1.5 py-0.5 text-[9px] font-medium', modelPermissionTone.badgeClassName)}>
                                 {modelPermissionSnapshot.accessLabel}
                               </span>
-                            </div>
-                            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-200/70">
-                              <div
-                                className={cn('h-full w-full rounded-full bg-gradient-to-l', modelPermissionTone.barClassName)}
-                              />
-                            </div>
-                            <div className="mt-1 text-[9px] leading-4 text-slate-500">
-                              {modelPermissionSnapshot.summary}
-                            </div>
-                            <div className="mt-1.5 space-y-1 text-[8px] leading-4 text-slate-400">
-                              <div className="flex items-center justify-between gap-2">
-                                <ShieldCheck className="h-3 w-3 shrink-0 text-slate-300" />
-                                <span className="truncate">{modelPermissionSnapshot.modeLabel}</span>
+                            </button>
+                            {activeModelPanelSection === 'permissions' && (
+                              <div className="space-y-2 border-t border-slate-100 px-2.5 py-2 text-right">
+                                <div className="h-1 overflow-hidden rounded-full bg-slate-200/70">
+                                  <div
+                                    className={cn('h-full w-full rounded-full bg-gradient-to-l', modelPermissionTone.barClassName)}
+                                  />
+                                </div>
+                                <div className="text-[9px] leading-4 text-slate-500">
+                                  {modelPermissionSnapshot.summary}
+                                </div>
+                                <div className="space-y-1.5">
+                                  {availablePermissionModes.map((mode) => {
+                                    const isSelected = selectedPermissionModeId === mode.id;
+                                    return (
+                                      <button
+                                        key={mode.id}
+                                        type="button"
+                                        disabled={isPermissionModeSaving || permissionCapabilities?.canChangeMode === false}
+                                        onClick={() => void handlePermissionModeChange(mode.id)}
+                                        className={cn(
+                                          'flex w-full items-start justify-between gap-2 rounded-[0.8rem] border px-2 py-2 text-right transition disabled:cursor-default disabled:opacity-70',
+                                          isSelected
+                                            ? 'border-violet-200/90 bg-violet-50/85 text-violet-800'
+                                            : 'border-slate-100 bg-slate-50/80 text-slate-700 hover:border-slate-200/80 hover:bg-white'
+                                        )}
+                                      >
+                                        <div className="min-w-0 flex-1">
+                                          <div className="flex items-center justify-end gap-1.5">
+                                            <span className="text-[10px] font-semibold">{mode.label}</span>
+                                            <span className="rounded-full border border-white/80 bg-white/80 px-1.5 py-0.5 text-[8px] text-slate-400">
+                                              {mode.modeLabel}
+                                            </span>
+                                          </div>
+                                          <div className={cn(
+                                            'mt-0.5 text-[8px] leading-4',
+                                            isSelected ? 'text-violet-700/80' : 'text-slate-500'
+                                          )}>
+                                            {mode.summary}
+                                          </div>
+                                        </div>
+                                        {isPermissionModeSaving && isSelected
+                                          ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-violet-500" />
+                                          : isSelected
+                                            ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-500" />
+                                            : null}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                                <div className="rounded-[0.8rem] border border-slate-100/90 bg-slate-50/75 px-2 py-2 text-[8px] leading-4 text-slate-400">
+                                  <div className="flex items-center justify-between gap-2 text-[9px] font-medium text-slate-500">
+                                    <span>סטטוס Runtime</span>
+                                    <span className="truncate">{permissionRuntimeState?.effectiveModeLabel || modelPermissionSnapshot.modeLabel}</span>
+                                  </div>
+                                  <div className="mt-1 space-y-1">
+                                    {modelPermissionSnapshot.approvalLabel && (
+                                      <div className="truncate">{modelPermissionSnapshot.approvalLabel}</div>
+                                    )}
+                                    {modelPermissionSnapshot.sandboxLabel && (
+                                      <div className="truncate">{modelPermissionSnapshot.sandboxLabel}</div>
+                                    )}
+                                    {modelPermissionSnapshot.toolsLabel && (
+                                      <div className="truncate">{modelPermissionSnapshot.toolsLabel}</div>
+                                    )}
+                                    {modelPermissionSnapshot.trustLabel && (
+                                      <div className="truncate">{modelPermissionSnapshot.trustLabel}</div>
+                                    )}
+                                  </div>
+                                </div>
+                                {permissionCapabilities && (
+                                  <div className="rounded-[0.8rem] border border-slate-100/90 bg-slate-50/75 px-2 py-2 text-right">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-[9px] font-semibold text-slate-600">אישורים חיים</span>
+                                      <span className={cn(
+                                        'rounded-full px-1.5 py-0.5 text-[8px]',
+                                        permissionCapabilities.detectsLiveApprovalRequests
+                                          ? 'border border-emerald-100 bg-emerald-50 text-emerald-600'
+                                          : 'border border-slate-200 bg-white text-slate-400'
+                                      )}>
+                                        {permissionCapabilities.detectsLiveApprovalRequests ? 'מזוהה' : 'לא מזוהה'}
+                                      </span>
+                                    </div>
+                                    <div className="mt-1.5 flex items-center justify-between gap-2 text-[8px] text-slate-400">
+                                      <span>אישור מתוך UI</span>
+                                      <span>{permissionCapabilities.canApproveFromUi ? 'כן' : 'עדיין לא'}</span>
+                                    </div>
+                                    {permissionRuntimeState?.pendingApproval && (
+                                      <div className="mt-1.5 rounded-[0.75rem] border border-amber-100 bg-amber-50/80 px-2 py-1.5 text-[8px] text-amber-700">
+                                        <div className="font-semibold">{permissionRuntimeState.pendingApproval.title}</div>
+                                        {permissionRuntimeState.pendingApproval.details && (
+                                          <div className="mt-0.5 line-clamp-3">{permissionRuntimeState.pendingApproval.details}</div>
+                                        )}
+                                      </div>
+                                    )}
+                                    {permissionCapabilities.notes.length > 0 && (
+                                      <div className="mt-1.5 space-y-1 text-[8px] leading-4 text-slate-400">
+                                        {permissionCapabilities.notes.slice(0, 2).map((note) => (
+                                          <div key={note}>{note}</div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
-                              {modelPermissionSnapshot.approvalLabel && (
-                                <div className="truncate">{modelPermissionSnapshot.approvalLabel}</div>
-                              )}
-                              {modelPermissionSnapshot.sandboxLabel && (
-                                <div className="truncate">{modelPermissionSnapshot.sandboxLabel}</div>
-                              )}
-                              {modelPermissionSnapshot.toolsLabel && (
-                                <div className="truncate">{modelPermissionSnapshot.toolsLabel}</div>
-                              )}
-                              {modelPermissionSnapshot.trustLabel && (
-                                <div className="truncate">{modelPermissionSnapshot.trustLabel}</div>
-                              )}
-                            </div>
+                            )}
                           </div>
                         )}
 
-                        <div>
-                          <div className="mb-1 px-1 text-right text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                            מודלים
-                          </div>
-                          {availableModels.length === 0 ? (
-                            <div className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-3 text-right text-[11px] text-slate-500">
-                              {isModelCatalogLoading ? 'טוען מודלים...' : 'לא נמצאו מודלים זמינים לפרופיל הזה.'}
+                        <div className="overflow-hidden rounded-[0.85rem] border border-slate-100 bg-white/85">
+                          <button
+                            type="button"
+                            onClick={() => setActiveModelPanelSection((current) => current === 'models' ? 'reasoning' : 'models')}
+                            className="flex w-full items-center justify-between gap-2 px-2.5 py-2 text-right"
+                          >
+                            <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-slate-300 transition-transform', activeModelPanelSection === 'models' && 'rotate-180')} />
+                            <div className="min-w-0 flex-1">
+                              <div className="text-[10px] font-semibold text-slate-600">מודל</div>
+                              <div className="truncate text-[8px] text-slate-400">{modelPanelSectionSummary.models}</div>
                             </div>
-                          ) : (
-                            <div className="space-y-1">
-                              {availableModels.map((model) => (
-                                <button
-                                  key={model.slug}
-                                  type="button"
-                                  onClick={() => {
-                                    setSelectedModelSlug(model.slug);
-                                    setSelectedReasoningEffort(
-                                      model.defaultReasoningLevel
-                                      || model.supportedReasoningLevels[0]?.effort
-                                      || null
-                                    );
-                                    setIsAdditionsMenuOpen(false);
-                                    setIsReasoningPickerOpen(false);
-                                  }}
-                                  className={cn(
-                                    'flex w-full items-start justify-between gap-2 rounded-[0.85rem] border px-2.5 py-2 text-right transition',
-                                    selectedModelSlug === model.slug
-                                      ? 'border-violet-200/80 bg-violet-50/80 text-violet-800'
-                                      : 'border-slate-100 bg-slate-50/75 text-slate-700 hover:border-slate-200/80 hover:bg-white'
-                                  )}
-                                >
-                                  <div className="min-w-0">
-                                    <div className="flex items-center justify-end gap-1.5">
-                                      {model.isConfiguredDefault && (
-                                        <span className={cn(
-                                          'rounded-full px-1.5 py-0.5 text-[8px] font-semibold',
-                                          selectedModelSlug === model.slug
-                                            ? 'bg-white/90 text-violet-500'
-                                            : 'bg-white/90 text-slate-400'
-                                        )}>
-                                          ברירת מחדל
-                                        </span>
-                                      )}
-                                      <span className="text-[11px] font-semibold">{model.displayName}</span>
+                          </button>
+                          {activeModelPanelSection === 'models' && (
+                            <div className="space-y-1 border-t border-slate-100 px-2.5 py-2">
+                              {availableModels.length === 0 ? (
+                                <div className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-3 text-right text-[11px] text-slate-500">
+                                  {isModelCatalogLoading ? 'טוען מודלים...' : 'לא נמצאו מודלים זמינים לפרופיל הזה.'}
+                                </div>
+                              ) : (
+                                availableModels.map((model) => (
+                                  <button
+                                    key={model.slug}
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedModelSlug(model.slug);
+                                      setSelectedReasoningEffort(
+                                        model.defaultReasoningLevel
+                                        || model.supportedReasoningLevels[0]?.effort
+                                        || null
+                                      );
+                                      setActiveModelPanelSection('reasoning');
+                                      setIsAdditionsMenuOpen(false);
+                                      setIsReasoningPickerOpen(false);
+                                    }}
+                                    className={cn(
+                                      'flex w-full items-start justify-between gap-2 rounded-[0.85rem] border px-2.5 py-2 text-right transition',
+                                      selectedModelSlug === model.slug
+                                        ? 'border-violet-200/80 bg-violet-50/80 text-violet-800'
+                                        : 'border-slate-100 bg-slate-50/75 text-slate-700 hover:border-slate-200/80 hover:bg-white'
+                                    )}
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="flex items-center justify-end gap-1.5">
+                                        {model.isConfiguredDefault && (
+                                          <span className={cn(
+                                            'rounded-full px-1.5 py-0.5 text-[8px] font-semibold',
+                                            selectedModelSlug === model.slug
+                                              ? 'bg-white/90 text-violet-500'
+                                              : 'bg-white/90 text-slate-400'
+                                          )}>
+                                            ברירת מחדל
+                                          </span>
+                                        )}
+                                        <span className="text-[11px] font-semibold">{model.displayName}</span>
+                                      </div>
+                                      <div className={cn(
+                                        'mt-0.5 line-clamp-2 text-[8px] leading-4',
+                                        selectedModelSlug === model.slug ? 'text-violet-600/80' : 'text-slate-500'
+                                      )}>
+                                        {model.description || model.slug}
+                                      </div>
                                     </div>
-                                    <div className={cn(
-                                      'mt-0.5 line-clamp-2 text-[8px] leading-4',
-                                      selectedModelSlug === model.slug ? 'text-violet-600/80' : 'text-slate-500'
-                                    )}>
-                                      {model.description || model.slug}
-                                    </div>
-                                  </div>
-                                  {selectedModelSlug === model.slug && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-500" />}
-                                </button>
-                              ))}
+                                    {selectedModelSlug === model.slug && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-500" />}
+                                  </button>
+                                ))
+                              )}
                             </div>
                           )}
                         </div>
 
-                        <div>
-                          <div className="mb-1 px-1 text-right text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                            רמת חשיבה
-                          </div>
-                          {!selectedModelOption || supportedReasoningLevels.length === 0 ? (
-                            <div className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-3 text-right text-[11px] text-slate-500">
-                              בחר מודל עם רמות חשיבה נתמכות כדי לבחור effort.
+                        <div className="overflow-hidden rounded-[0.85rem] border border-slate-100 bg-white/85">
+                          <button
+                            type="button"
+                            onClick={() => setActiveModelPanelSection((current) => current === 'reasoning' ? 'models' : 'reasoning')}
+                            className="flex w-full items-center justify-between gap-2 px-2.5 py-2 text-right"
+                          >
+                            <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-slate-300 transition-transform', activeModelPanelSection === 'reasoning' && 'rotate-180')} />
+                            <div className="min-w-0 flex-1">
+                              <div className="text-[10px] font-semibold text-slate-600">רמת חשיבה</div>
+                              <div className="truncate text-[8px] text-slate-400">{modelPanelSectionSummary.reasoning}</div>
                             </div>
-                          ) : (
-                            <div className="space-y-1">
-                              {supportedReasoningLevels.map((level) => (
-                                <button
-                                  key={level.effort}
-                                  type="button"
-                                  onClick={() => {
-                                    setSelectedReasoningEffort(level.effort);
-                                    setIsAdditionsMenuOpen(false);
-                                    setIsReasoningPickerOpen(false);
-                                    setIsModelPickerOpen(false);
-                                  }}
-                                  className={cn(
-                                    'flex w-full items-start justify-between gap-2 rounded-[0.85rem] border px-2.5 py-2 text-right transition',
-                                    selectedReasoningEffort === level.effort
-                                      ? 'border-sky-200/80 bg-sky-50/80 text-sky-800'
-                                      : 'border-slate-100 bg-slate-50/75 text-slate-700 hover:border-slate-200/80 hover:bg-white'
-                                  )}
-                                >
-                                  <div className="min-w-0">
-                                    <div className="text-[11px] font-semibold">{getReasoningEffortLabel(level.effort)}</div>
-                                    {level.description && (
-                                      <div className={cn(
-                                        'mt-0.5 text-[8px] leading-4',
-                                        selectedReasoningEffort === level.effort ? 'text-sky-700/80' : 'text-slate-500'
-                                      )}>
-                                        {level.description}
-                                      </div>
+                          </button>
+                          {activeModelPanelSection === 'reasoning' && (
+                            <div className="space-y-1 border-t border-slate-100 px-2.5 py-2">
+                              {!selectedModelOption || supportedReasoningLevels.length === 0 ? (
+                                <div className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-3 text-right text-[11px] text-slate-500">
+                                  בחר מודל עם רמות חשיבה נתמכות כדי לבחור effort.
+                                </div>
+                              ) : (
+                                supportedReasoningLevels.map((level) => (
+                                  <button
+                                    key={level.effort}
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedReasoningEffort(level.effort);
+                                      setIsAdditionsMenuOpen(false);
+                                      setIsReasoningPickerOpen(false);
+                                      setIsModelPickerOpen(false);
+                                    }}
+                                    className={cn(
+                                      'flex w-full items-start justify-between gap-2 rounded-[0.85rem] border px-2.5 py-2 text-right transition',
+                                      selectedReasoningEffort === level.effort
+                                        ? 'border-sky-200/80 bg-sky-50/80 text-sky-800'
+                                        : 'border-slate-100 bg-slate-50/75 text-slate-700 hover:border-slate-200/80 hover:bg-white'
                                     )}
-                                  </div>
-                                  {selectedReasoningEffort === level.effort && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-500" />}
-                                </button>
-                              ))}
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="text-[11px] font-semibold">{getReasoningEffortLabel(level.effort)}</div>
+                                      {level.description && (
+                                        <div className={cn(
+                                          'mt-0.5 text-[8px] leading-4',
+                                          selectedReasoningEffort === level.effort ? 'text-sky-700/80' : 'text-slate-500'
+                                        )}>
+                                          {level.description}
+                                        </div>
+                                      )}
+                                    </div>
+                                    {selectedReasoningEffort === level.effort && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-500" />}
+                                  </button>
+                                ))
+                              )}
                             </div>
                           )}
                         </div>

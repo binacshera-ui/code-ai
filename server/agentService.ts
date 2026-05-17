@@ -55,10 +55,15 @@ import {
   type SessionChangeRecord,
 } from './sessionChangeTracker.js';
 import {
-  isSupportProfile,
   prepareAllSupportProfileHomes,
   prepareSupportProfileHome,
 } from './supportAgentService.js';
+import {
+  buildPermissionSnapshotFromMode,
+  getSelectedPermissionMode,
+  getSelectedPermissionModeId,
+  setSelectedPermissionModeId,
+} from './providerPermissions.js';
 
 export type AgentProfile = CodexProfile;
 
@@ -132,56 +137,22 @@ export function getProviderForProfile(profileId?: string): AppProvider {
   return resolveProfile(profileId).provider;
 }
 
-function buildProviderPermissionSnapshot(profile: AgentProfile): CodexPermissionSnapshot {
-  if (isSupportProfile(profile)) {
-    return {
-      accessLevel: 'balanced',
-      accessLabel: 'מצב תמיכה',
-      modeLabel: 'support-sandbox',
-      summary: 'מצב תמיכה מבודד: ההרצה נשמרת ב-home פנימי של code-ai, עם ארגז חול ייעודי לכתיבת קבצים.',
-      approvalLabel: 'הרצה: support envelope קבוע',
-      sandboxLabel: profile.sandboxCwd ? `Sandbox: ${profile.sandboxCwd}` : 'Sandbox: support workspace',
-      toolsLabel: 'Files: קריאה חופשית, כתיבה לפי מדיניות ארגז חול',
-      trustLabel: profile.sourceProfileId ? `Source profile: ${profile.sourceProfileId}` : 'Source profile: isolated',
-    };
-  }
-
-  if (profile.provider === 'claude') {
-    return {
-      accessLevel: 'full',
-      accessLabel: 'גישה מלאה',
-      modeLabel: 'bypassPermissions',
-      summary: 'Claude רץ בלי בקשות אישור ידניות, עם גישת tools מלאה ל־workspace.',
-      approvalLabel: 'אישורים: bypassPermissions',
-      sandboxLabel: 'Sandbox: ללא sandbox CLI',
-      toolsLabel: 'Tools: מלאים',
-      trustLabel: 'Workspace: add-dir פעיל לפי הצורך',
-    };
-  }
-
-  if (profile.provider === 'gemini') {
-    return {
-      accessLevel: 'full',
-      accessLabel: 'גישה מלאה',
-      modeLabel: 'yolo',
-      summary: 'Gemini רץ עם אישור אוטומטי לכל הפעולות ו־skip-trust פעיל.',
-      approvalLabel: 'אישורים: yolo',
-      sandboxLabel: 'Sandbox: לא הופעל דגל מפורש',
-      toolsLabel: 'Tools: auto-approve',
-      trustLabel: 'Workspace: skip-trust',
-    };
-  }
-
-  return {
-    accessLevel: 'full',
-    accessLabel: 'גישה מלאה',
-    modeLabel: 'danger-full-access',
-    summary: 'Codex רץ בלי sandbox ובלי אישורי ביניים.',
-    approvalLabel: 'אישורים: bypass / never',
-    sandboxLabel: 'Sandbox: danger-full-access',
-    toolsLabel: 'Shell: מלא',
-    trustLabel: 'Workspace: trusted',
-  };
+async function buildProviderPermissionSnapshot(profile: AgentProfile): Promise<CodexPermissionSnapshot> {
+  const selectedMode = await getSelectedPermissionMode(profile);
+  const selectedModeId = await getSelectedPermissionModeId(profile);
+  return buildPermissionSnapshotFromMode(profile, selectedMode, {
+    profileId: profile.id,
+    sessionId: null,
+    selectedModeId,
+    effectiveModeId: selectedMode.id,
+    effectiveModeLabel: selectedMode.modeLabel,
+    approvalLabel: selectedMode.approvalLabel,
+    sandboxLabel: selectedMode.sandboxLabel,
+    toolsLabel: selectedMode.toolsLabel,
+    trustLabel: selectedMode.trustLabel,
+    updatedAt: null,
+    pendingApproval: null,
+  });
 }
 
 export async function getAvailableProfiles(): Promise<AgentProfile[]> {
@@ -238,26 +209,37 @@ export async function getAgentSessionDetail(
 export async function getAgentModelCatalog(profileId?: string): Promise<CodexModelCatalog> {
   const profile = resolveProfile(profileId);
   await prepareSupportProfileHome(profile);
+  const permissions = await buildProviderPermissionSnapshot(profile);
   if (profile.provider === 'claude') {
     const catalog = await getClaudeModelCatalog(profile.id);
     return {
       ...catalog,
-      permissions: buildProviderPermissionSnapshot(profile),
+      permissions,
     };
   }
   if (profile.provider === 'gemini') {
     const catalog = await getGeminiModelCatalog(profile.id);
     return {
       ...catalog,
-      permissions: buildProviderPermissionSnapshot(profile),
+      permissions,
     };
   }
 
   const catalog = await getCodexModelCatalog(profile.id);
   return {
     ...catalog,
-    permissions: buildProviderPermissionSnapshot(profile),
+    permissions,
   };
+}
+
+export async function updateAgentPermissionMode(
+  profileId: string | undefined,
+  modeId: string
+): Promise<CodexPermissionSnapshot> {
+  const profile = resolveProfile(profileId);
+  await prepareSupportProfileHome(profile);
+  await setSelectedPermissionModeId(profile, modeId);
+  return buildProviderPermissionSnapshot(profile);
 }
 
 export async function getAgentRateLimitSnapshot(

@@ -27,6 +27,7 @@ import type {
   CodexTimelineEntry,
   CodexUploadedAttachment,
 } from './codexService.js';
+import { getSelectedPermissionMode, resolvePermissionMode } from './providerPermissions.js';
 
 interface ClaudeSessionScanRecord {
   id: string;
@@ -1406,7 +1407,8 @@ function buildPromptWithAttachments(
 function collectClaudeArgs(
   sessionId: string | undefined,
   executionConfig: CodexExecutionConfig | null | undefined,
-  additionalDirectories: string[]
+  additionalDirectories: string[],
+  permissionMode: string
 ): string[] {
   const args = [
     '-p',
@@ -1414,7 +1416,7 @@ function collectClaudeArgs(
     '--output-format',
     'stream-json',
     '--permission-mode',
-    'bypassPermissions',
+    permissionMode,
   ];
 
   for (const directory of additionalDirectories) {
@@ -1968,6 +1970,9 @@ export async function runClaudePrompt(
 
   return queueBySessionKey(queueKey, async () => {
     const previousSession = sessionId ? await resolveClaudeSessionRecord(profile, sessionId) : null;
+    const selectedPermissionMode = executionConfig.permissionModeId
+      ? resolvePermissionMode(profile, executionConfig.permissionModeId)
+      : await getSelectedPermissionMode(profile);
     const args = collectClaudeArgs(
       sessionId,
       executionConfig,
@@ -1975,7 +1980,8 @@ export async function runClaudePrompt(
         CODEX_APP_CONFIG.uploadRoot,
         CODEX_APP_CONFIG.workspaceRoot,
         profile.workspaceCwd,
-      ]))
+      ])),
+      selectedPermissionMode.modeLabel
     );
 
     return new Promise<ClaudeRunResult>((resolve, reject) => {

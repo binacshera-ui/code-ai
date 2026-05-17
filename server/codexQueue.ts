@@ -48,6 +48,7 @@ export interface CodexQueueItem {
   cwd: string | null;
   model: string | null;
   reasoningEffort: string | null;
+  permissionModeId: string | null;
   prompt: string;
   promptPreview: string;
   contextPrefix?: string | null;
@@ -83,6 +84,7 @@ interface EnqueueCodexQueueInput {
   cwd?: string | null;
   model?: string | null;
   reasoningEffort?: string | null;
+  permissionModeId?: string | null;
   prompt: string;
   promptPreview?: string | null;
   contextPrefix?: string | null;
@@ -519,6 +521,9 @@ async function loadState() {
         reasoningEffort: typeof item.reasoningEffort === 'string' && item.reasoningEffort.trim()
           ? item.reasoningEffort.trim()
           : null,
+        permissionModeId: typeof item.permissionModeId === 'string' && item.permissionModeId.trim()
+          ? item.permissionModeId.trim()
+          : null,
         promptPreview: typeof item.promptPreview === 'string' && item.promptPreview.trim()
           ? item.promptPreview.trim()
           : trimPreview(item.prompt || ''),
@@ -762,6 +767,7 @@ async function processQueueItem(item: CodexQueueItem) {
   const executionConfig: CodexExecutionConfig = {
     model: item.model,
     reasoningEffort: item.reasoningEffort,
+    permissionModeId: item.permissionModeId,
   };
   const shouldDeleteDraftFork = item.queueKey.startsWith('draft:');
   const transferDraftSidebarMetadataToRealSession = async (nextSessionId: string) => {
@@ -1008,6 +1014,9 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
       : null,
     reasoningEffort: typeof input.reasoningEffort === 'string' && input.reasoningEffort.trim()
       ? input.reasoningEffort.trim()
+      : null,
+    permissionModeId: typeof input.permissionModeId === 'string' && input.permissionModeId.trim()
+      ? input.permissionModeId.trim()
       : null,
     prompt: input.prompt.trim(),
     promptPreview: typeof input.promptPreview === 'string' && input.promptPreview.trim()

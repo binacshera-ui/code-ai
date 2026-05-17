@@ -21,6 +21,7 @@ import {
   getAvailableProfiles,
   listAgentSessions,
   runAgentPrompt,
+  updateAgentPermissionMode,
 } from './agentService.js';
 import { CLIENT_CRASH_LOG } from './codexCrashLogs.js';
 import {
@@ -69,6 +70,7 @@ import {
 } from './codexSessionContextSelections.js';
 import { buildSessionPromptAdditionsContext } from './sessionPromptAdditions.js';
 import { listUnifiedSkills } from './skillCatalogService.js';
+import { getSelectedPermissionModeId } from './providerPermissions.js';
 import {
   buildSupportPromptEnvelope,
   deleteSupportSessionRecord,
@@ -196,10 +198,14 @@ function readExecutionConfig(body: any): CodexExecutionConfig {
   const reasoningEffort = typeof body?.reasoningEffort === 'string' && body.reasoningEffort.trim()
     ? body.reasoningEffort.trim()
     : null;
+  const permissionModeId = typeof body?.permissionModeId === 'string' && body.permissionModeId.trim()
+    ? body.permissionModeId.trim()
+    : null;
 
   return {
     model,
     reasoningEffort,
+    permissionModeId,
   };
 }
 
@@ -253,6 +259,7 @@ function resolveSupportExecutionConfig(
     executionConfig: {
       model: explicitConfig.model || preset.model,
       reasoningEffort: explicitConfig.reasoningEffort || preset.reasoningEffort,
+      permissionModeId: explicitConfig.permissionModeId || null,
     },
   };
 }
@@ -980,6 +987,22 @@ router.get('/models', requireCodexAccess, async (req, res) => {
     res.json(catalog);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load Codex models' });
+  }
+});
+
+router.post('/permissions', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const modeId = typeof req.body?.modeId === 'string' ? req.body.modeId.trim() : '';
+    if (!modeId) {
+      res.status(400).json({ error: 'Permission mode is required' });
+      return;
+    }
+
+    const permissions = await updateAgentPermissionMode(profileId, modeId);
+    res.json({ permissions });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update permission mode' });
   }
 });
 
@@ -2233,6 +2256,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const sessionInstruction = typeof req.body?.sessionInstruction === 'string' ? req.body.sessionInstruction : undefined;
     const forkContext = req.body?.forkContext;
     const executionConfig = readExecutionConfig(req.body);
+    if (!executionConfig.permissionModeId) {
+      executionConfig.permissionModeId = await getSelectedPermissionModeId(configuredProfile);
+    }
     const recurrence = readRecurringConfig(req.body);
     const cwd = requestedCwd
       ? (await resolveCodexFolderPath(requestedCwd, profileId)).resolvedPath
@@ -2355,6 +2381,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       cwd,
       model: executionConfig.model,
       reasoningEffort: executionConfig.reasoningEffort,
+      permissionModeId: executionConfig.permissionModeId,
       prompt: providerPrompt,
       promptPreview: supportEnvelope?.promptPreview || promptPreview,
       contextPrefix: combinedContextPrefix || undefined,
@@ -2413,6 +2440,9 @@ async function handleSupportAskRequest(
       readExecutionConfig(req.body)
     );
     const executionConfig = supportExecution.executionConfig;
+    if (!executionConfig.permissionModeId) {
+      executionConfig.permissionModeId = await getSelectedPermissionModeId(profile);
+    }
     const cwd = requestedCwd
       ? (await resolveCodexFolderPath(requestedCwd, profile.id)).resolvedPath
       : profile.workspaceCwd;
@@ -2473,6 +2503,7 @@ async function handleSupportAskRequest(
       cwd,
       model: executionConfig.model,
       reasoningEffort: executionConfig.reasoningEffort,
+      permissionModeId: executionConfig.permissionModeId,
       prompt: envelope.compiledPrompt,
       promptPreview: envelope.promptPreview,
     });
