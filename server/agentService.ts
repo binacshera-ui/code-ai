@@ -3,6 +3,7 @@ import {
   cancelCodexRun,
   createCodexForkSession,
   deleteCodexSession,
+  deleteCodexTurn,
   getAvailableProfiles as getAvailableCodexProfiles,
   getCodexModelCatalog,
   getCodexRateLimitSnapshot,
@@ -23,6 +24,7 @@ import {
   cancelClaudeRun,
   createClaudeForkSession,
   deleteClaudeSession,
+  deleteClaudeTurn,
   getAvailableClaudeProfiles,
   getClaudeModelCatalog,
   getClaudeRateLimitSnapshot,
@@ -36,6 +38,7 @@ import {
   cancelGeminiRun,
   createGeminiForkSession,
   deleteGeminiSession,
+  deleteGeminiTurn,
   getAvailableGeminiProfiles,
   getGeminiModelCatalog,
   getGeminiRateLimitSnapshot,
@@ -397,4 +400,25 @@ export async function deleteAgentSession(
   }
 
   await deleteCodexSession(sessionId, profile.id);
+}
+
+export async function deleteAgentTurn(
+  sessionId: string,
+  entryId: string,
+  profileId?: string
+): Promise<void> {
+  const profile = resolveProfile(profileId);
+  await prepareSupportProfileHome(profile);
+
+  if (profile.provider === 'claude') {
+    await deleteClaudeTurn(sessionId, entryId, profile.id);
+    return;
+  }
+
+  if (profile.provider === 'gemini') {
+    await deleteGeminiTurn(sessionId, entryId, profile.id);
+    return;
+  }
+
+  await deleteCodexTurn(sessionId, entryId, profile.id);
 }

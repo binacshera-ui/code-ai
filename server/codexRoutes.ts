@@ -13,6 +13,7 @@ import {
 } from './codexService.js';
 import {
   createAgentForkSession,
+  deleteAgentTurn,
   deleteAgentSession,
   getAgentSessionChangeRecord,
   getAgentModelCatalog,
@@ -60,6 +61,7 @@ import {
   deleteForkSessionMetadata,
   getForkDraftSession,
   recordForkSessionMetadata,
+  updateForkDraftSession,
 } from './codexForkSessions.js';
 import { createProjectAnchor, deleteProjectAnchor, listProjectAnchors } from './codexProjectAnchors.js';
 import {
@@ -76,6 +78,15 @@ import {
   listSessionReminders,
   rebindSessionReminders,
 } from './codexSessionReminders.js';
+import {
+  createSessionTask,
+  deleteSessionTask,
+  listSessionTasks,
+  removeSessionFromTasks,
+  setTaskSessionAssignment,
+  setTaskSessionCompletion,
+  updateSessionTask,
+} from './codexSessionTasks.js';
 import { buildSessionPromptAdditionsContext } from './sessionPromptAdditions.js';
 import { listUnifiedSkills } from './skillCatalogService.js';
 import { getSelectedPermissionModeId } from './providerPermissions.js';
@@ -1373,6 +1384,7 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
     if (isDraftSessionKey(sessionId)) {
       await deleteForkDraftSession(sessionId);
       await deleteSessionMetadata(profileId, sessionId);
+      await removeSessionFromTasks(profileId, sessionId);
       res.json({
         deleted: true,
         sessionId,
@@ -1390,6 +1402,7 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
       }
     }
     await deleteSessionMetadata(profileId, sessionId);
+    await removeSessionFromTasks(profileId, sessionId);
     res.json({
       deleted: true,
       sessionId,
@@ -1463,33 +1476,38 @@ router.post('/sessions/:sessionId/delete-turn', requireCodexAccess, async (req, 
       return;
     }
 
-    const sourceSession = await normalizeSessionDetailForOperations(
-      profileId,
-      await getAgentSessionDetail(sessionId, profileId, {
-        full: true,
-      })
-    );
     const profile = CODEX_APP_CONFIG.profiles.find((candidate) => candidate.id === profileId);
     if (!profile) {
       res.status(404).json({ error: 'הפרופיל שנבחר לא קיים.' });
       return;
     }
 
-    const {
-      startIndex,
-      endExclusive,
-      turnEntries,
-      deletedUserEntryId,
-      deletedAssistantEntryId,
-    } = resolveDeletedTurnRange(sourceSession.timeline, entryId);
-
-    const filteredTimeline = [
-      ...sourceSession.timeline.slice(0, startIndex),
-      ...sourceSession.timeline.slice(endExclusive),
-    ].map((entry) => ({ ...entry }));
+    const sourceSession = await normalizeSessionDetailForOperations(
+      profileId,
+      await getAgentSessionDetail(sessionId, profileId, {
+        full: true,
+      })
+    );
+    const resolvedTurnRange = sourceSession.isDraft
+      ? resolveDeletedTurnRange(sourceSession.timeline, entryId)
+      : (() => {
+        try {
+          return resolveDeletedTurnRange(sourceSession.timeline, entryId);
+        } catch {
+          return null;
+        }
+      })();
+    const deletedUserEntryId = resolvedTurnRange?.deletedUserEntryId || entryId;
+    const deletedAssistantEntryId = resolvedTurnRange?.deletedAssistantEntryId || null;
+    const filteredTimeline = resolvedTurnRange
+      ? [
+        ...sourceSession.timeline.slice(0, resolvedTurnRange.startIndex),
+        ...sourceSession.timeline.slice(resolvedTurnRange.endExclusive),
+      ].map((entry) => ({ ...entry }))
+      : [];
 
     const activeQueueItems = (await listCodexQueueItems(profileId)).filter((item) => (
-      (item.queueKey === sourceSession.id || item.sessionId === sourceSession.id)
+      (item.queueKey === sessionId || item.sessionId === sessionId)
       && (
         item.status === 'scheduled'
         || item.status === 'queued'
@@ -1502,73 +1520,58 @@ router.post('/sessions/:sessionId/delete-turn', requireCodexAccess, async (req, 
       try {
         await cancelCodexQueueItem(item.id);
       } catch {
-        // Best effort cancellation. The cleaned draft becomes the active session either way.
+        // Best effort cancellation. Session rewrite still proceeds.
       }
     }
 
-    const sourceProviderLabel = getProviderDisplayLabel(profile.provider);
-    const baseDraftContext = sourceSession.forkDraftContext || null;
-    const promptPrefix = buildDeletedTurnPromptPrefix(sourceSession, sourceProviderLabel, filteredTimeline);
-    const latestUserEntryWithText = [...filteredTimeline]
-      .reverse()
-      .find((entry) => entry.entryType === 'message' && entry.role === 'user' && entry.text?.trim());
-    const promptPreview = clipTransferText(
-      latestUserEntryWithText?.text || sourceSession.title,
-      140
-    );
-    const draft = await createForkDraftSession({
-      sessionId: sourceSession.isDraft ? sourceSession.id : undefined,
-      profileId,
-      sourceSessionId: baseDraftContext?.sourceSessionId || sourceSession.id,
-      sourceTitle: baseDraftContext?.sourceTitle || sourceSession.title,
-      sourceCwd: baseDraftContext?.sourceCwd || sourceSession.cwd || profile.workspaceCwd,
-      forkEntryId: deletedUserEntryId,
-      transferSourceProvider: baseDraftContext?.transferSourceProvider || null,
-      transferTargetProvider: baseDraftContext?.transferTargetProvider || null,
-      promptPreview,
-      promptPrefix,
-      timeline: filteredTimeline,
+    if (sourceSession.isDraft) {
+      const draft = await getForkDraftSession(sourceSession.id);
+      if (!draft || draft.profileId !== profileId) {
+        throw new Error('טיוטת השיחה שנבחרה כבר לא קיימת.');
+      }
+
+      const sourceProviderLabel = getProviderDisplayLabel(
+        draft.transferSourceProvider || profile.provider
+      );
+      const latestUserEntryWithText = [...filteredTimeline]
+        .reverse()
+        .find((entry) => entry.entryType === 'message' && entry.role === 'user' && entry.text?.trim());
+      const promptPreview = clipTransferText(latestUserEntryWithText?.text || draft.sourceTitle, 140);
+      const promptPrefix = buildDeletedTurnPromptPrefix({
+        ...sourceSession,
+        title: draft.sourceTitle || sourceSession.title,
+        cwd: draft.sourceCwd || sourceSession.cwd,
+      }, sourceProviderLabel, filteredTimeline);
+
+      await updateForkDraftSession(sourceSession.id, {
+        promptPreview,
+        promptPrefix,
+        timeline: filteredTimeline,
+      });
+    } else {
+      await deleteAgentTurn(sourceSession.id, deletedUserEntryId, profileId);
+    }
+
+    await deleteSessionChangeRecords(sourceSession.id);
+
+    const updatedSessionBase = await getAgentSessionDetail(sourceSession.id, profileId, {
+      full: true,
     });
+    const updatedSession = await decorateSessionDetailForClient(profileId, updatedSessionBase);
+    const [topicMap, titleMap] = await Promise.all([
+      getSessionTopicMap(profileId),
+      getSessionTitleMap(profileId),
+    ]);
 
-    const draftSidebarMetadata = await copySessionSidebarMetadataToForkSession(
-      profileId,
-      profileId,
-      sourceSession,
-      draft.sessionId
-    );
-
-    if (draft.sessionId !== sourceSession.id) {
-      await setSessionHidden(profileId, sourceSession.id, true);
-    }
-
-    await setSessionHidden(profileId, draft.sessionId, false);
-
-    if (draft.sessionId !== sourceSession.id) {
-      const sourceInstruction = await getSessionInstruction(profileId, sourceSession.id);
-      if (sourceInstruction?.trim()) {
-        await setSessionInstruction(profileId, draft.sessionId, sourceInstruction);
-      }
-    }
-    await copySessionContextSelectionToSession(profileId, profileId, sourceSession.id, draft.sessionId);
-    await copySessionRemindersToSession(profileId, profileId, sourceSession.id, draft.sessionId);
-
-    const cleanedSession = await decorateSessionDetailForClient(
-      profileId,
-      await getAgentSessionDetail(draft.sessionId, profileId, {
-        full: true,
-      })
-    );
-
-    res.status(201).json({
-      sessionId: draft.sessionId,
+    res.json({
+      sessionId: sourceSession.id,
       deletedUserEntryId,
       deletedAssistantEntryId,
       cancelledQueueItemIds: activeQueueItems.map((item) => item.id),
       session: {
-        ...cleanedSession,
-        title: draftSidebarMetadata.title,
-        hidden: false,
-        topic: draftSidebarMetadata.topic,
+        ...updatedSession,
+        title: titleMap[sourceSession.id] || updatedSession.title,
+        topic: topicMap[sourceSession.id] || null,
       },
     });
   } catch (error: any) {
@@ -2150,6 +2153,116 @@ router.delete('/session-reminders/:reminderId', requireCodexAccess, async (req, 
   }
 });
 
+router.get('/tasks', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const tasks = await listSessionTasks(profileId);
+    res.json({ tasks });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load tasks' });
+  }
+});
+
+router.post('/tasks', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const taskId = typeof req.body?.taskId === 'string' && req.body.taskId.trim()
+      ? req.body.taskId.trim()
+      : null;
+    const title = typeof req.body?.title === 'string' ? req.body.title : '';
+    const description = typeof req.body?.description === 'string' ? req.body.description : '';
+    const dueAt = typeof req.body?.dueAt === 'string' ? req.body.dueAt : req.body?.dueAt === null ? null : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const task = taskId
+      ? await updateSessionTask(profileId, taskId, { title, description, dueAt })
+      : await createSessionTask(profileId, { title, description, dueAt });
+
+    res.status(taskId ? 200 : 201).json({ task });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to save task' });
+  }
+});
+
+router.delete('/tasks/:taskId', requireCodexAccess, async (req, res) => {
+  try {
+    const taskId = readRouteParam(req.params.taskId);
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+        ? req.body.profileId.trim()
+        : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    await deleteSessionTask(profileId, taskId);
+    res.json({ deleted: true, taskId });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete task' });
+  }
+});
+
+router.post('/tasks/:taskId/sessions', requireCodexAccess, async (req, res) => {
+  try {
+    const taskId = readRouteParam(req.params.taskId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+      ? req.body.sessionId.trim()
+      : undefined;
+    const assigned = req.body?.assigned !== false;
+
+    if (!profileId || !sessionId) {
+      res.status(400).json({ error: 'Profile id and session id are required' });
+      return;
+    }
+
+    const task = await setTaskSessionAssignment(profileId, taskId, sessionId, assigned);
+    res.json({ task });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update task sessions' });
+  }
+});
+
+router.post('/tasks/:taskId/sessions/:sessionId/completion', requireCodexAccess, async (req, res) => {
+  try {
+    const taskId = readRouteParam(req.params.taskId);
+    const sessionId = readRouteParam(req.params.sessionId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const completed = req.body?.completed !== false;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const task = await setTaskSessionCompletion(profileId, taskId, sessionId, completed);
+    res.json({ task });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update task completion' });
+  }
+});
+
 router.post('/queue/items', requireCodexAccess, async (req, res) => {
   try {
     const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
@@ -2171,7 +2284,11 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
       ? req.body.cwd.trim()
       : undefined;
-    const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt : '';
+    const prompt = typeof req.body?.prompt === 'string'
+      ? req.body.prompt
+      : typeof req.body?.message === 'string'
+        ? req.body.message
+        : '';
     const promptPreview = typeof req.body?.promptPreview === 'string' ? req.body.promptPreview : undefined;
     const contextPrefix = typeof req.body?.contextPrefix === 'string' ? req.body.contextPrefix : undefined;
     const sessionInstruction = typeof req.body?.sessionInstruction === 'string' ? req.body.sessionInstruction : undefined;
@@ -2333,7 +2450,11 @@ router.get('/jobs/:jobId', requireCodexAccess, async (req, res) => {
 
 router.post('/ask', requireCodexAccess, async (req, res) => {
   try {
-    const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt : '';
+    const prompt = typeof req.body?.prompt === 'string'
+      ? req.body.prompt
+      : typeof req.body?.message === 'string'
+        ? req.body.message
+        : '';
     const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
     const profileId = requestedProfileId || 'developer';
     const configuredProfile = findConfiguredProfile(profileId);

@@ -1685,6 +1685,112 @@ export async function deleteClaudeSession(
   await fs.rm(sessionRecord.path, { force: true });
 }
 
+function isClaudeToolResultUserRow(row: any): boolean {
+  return row?.type === 'user'
+    && Array.isArray(row?.message?.content)
+    && row.message.content.some((part: any) => part?.type === 'tool_result');
+}
+
+function isClaudePromptUserRow(row: any): boolean {
+  return row?.type === 'user' && !isClaudeToolResultUserRow(row);
+}
+
+export async function deleteClaudeTurn(
+  sessionId: string,
+  entryId: string,
+  profileId?: string
+): Promise<void> {
+  const profile = resolveProfile(profileId);
+  const sessionRecord = await resolveClaudeSessionRecord(profile, sessionId);
+  if (!sessionRecord) {
+    throw new Error(`Session ${sessionId} was not found`);
+  }
+
+  const rawLines = (await fs.readFile(sessionRecord.path, 'utf-8'))
+    .split('\n')
+    .filter((line, index, lines) => line.trim() || index < lines.length - 1);
+  const rows = rawLines.map((line) => safeJsonParse<any>(line));
+  const uuidToIndex = new Map<string, number>();
+
+  rows.forEach((row, index) => {
+    const uuid = normalizeString(row?.uuid);
+    if (uuid) {
+      uuidToIndex.set(uuid, index);
+    }
+  });
+
+  let selectedIndex = rows.findIndex((row) => normalizeString(row?.uuid) === entryId);
+  if (selectedIndex < 0) {
+    throw new Error('לא ניתן לאתר את זוג ההודעות שנבחר למחיקה.');
+  }
+
+  let rootPromptIndex = selectedIndex;
+  while (rootPromptIndex >= 0) {
+    const row = rows[rootPromptIndex];
+    if (isClaudePromptUserRow(row)) {
+      break;
+    }
+
+    const parentUuid = normalizeString(row?.parentUuid);
+    if (!parentUuid) {
+      rootPromptIndex = -1;
+      break;
+    }
+
+    rootPromptIndex = uuidToIndex.get(parentUuid) ?? -1;
+  }
+
+  if (rootPromptIndex < 0 || !isClaudePromptUserRow(rows[rootPromptIndex])) {
+    throw new Error('לא ניתן לאתר את הודעת המשתמש של הסבב שנבחר למחיקה.');
+  }
+
+  let startIndex = rootPromptIndex;
+  while (startIndex > 0 && rows[startIndex - 1]?.type === 'queue-operation') {
+    startIndex -= 1;
+  }
+
+  let endExclusive = rows.length;
+  let nextPromptUuid: string | null = null;
+  for (let index = rootPromptIndex + 1; index < rows.length; index += 1) {
+    if (isClaudePromptUserRow(rows[index])) {
+      endExclusive = index;
+      nextPromptUuid = normalizeString(rows[index]?.uuid);
+      break;
+    }
+  }
+
+  let previousLeafUuid: string | null = null;
+  for (let index = startIndex - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row?.type === 'last-prompt') {
+      previousLeafUuid = normalizeString(row?.leafUuid);
+      if (previousLeafUuid) {
+        break;
+      }
+    }
+    if (!previousLeafUuid) {
+      previousLeafUuid = normalizeString(row?.uuid);
+    }
+  }
+
+  const remainingRows = rows
+    .filter((_row, index) => index < startIndex || index >= endExclusive)
+    .map((row) => (row ? { ...row } : row));
+
+  if (nextPromptUuid) {
+    const nextPromptRow = remainingRows.find((row) => normalizeString(row?.uuid) === nextPromptUuid);
+    if (nextPromptRow) {
+      nextPromptRow.parentUuid = previousLeafUuid || null;
+    }
+  }
+
+  await fs.writeFile(
+    sessionRecord.path,
+    `${remainingRows.filter(Boolean).map((row) => JSON.stringify(row)).join('\n')}\n`,
+    'utf-8'
+  );
+}
+
 export async function getClaudeSessionDetail(
   sessionId: string,
   profileId?: string,

@@ -1459,6 +1459,90 @@ export async function deleteGeminiSession(
   await fs.rm(sessionRecord.path, { force: true });
 }
 
+function findGeminiTurnBounds(messages: any[], entryId: string): { start: number; endExclusive: number } | null {
+  const selectedIndex = messages.findIndex((row) => normalizeString(row?.id) === entryId);
+  if (selectedIndex < 0) {
+    return null;
+  }
+
+  let start = selectedIndex;
+  while (start >= 0 && messages[start]?.type !== 'user') {
+    start -= 1;
+  }
+
+  if (start < 0 || messages[start]?.type !== 'user') {
+    return null;
+  }
+
+  let endExclusive = messages.length;
+  for (let index = start + 1; index < messages.length; index += 1) {
+    if (messages[index]?.type === 'user') {
+      endExclusive = index;
+      break;
+    }
+  }
+
+  return { start, endExclusive };
+}
+
+export async function deleteGeminiTurn(
+  sessionId: string,
+  entryId: string,
+  profileId?: string
+): Promise<void> {
+  const profile = resolveProfile(profileId);
+  const sessionRecord = await resolveGeminiSessionRecord(profile, sessionId);
+  if (!sessionRecord) {
+    throw new Error(`Session ${sessionId} was not found`);
+  }
+
+  const nowIso = new Date().toISOString();
+
+  if (sessionRecord.path.endsWith('.json')) {
+    const raw = await fs.readFile(sessionRecord.path, 'utf-8');
+    const parsed = safeJsonParse<any>(raw);
+    if (!parsed || !Array.isArray(parsed.messages)) {
+      throw new Error('לא ניתן היה לטעון את שיחת Gemini למחיקה.');
+    }
+
+    const bounds = findGeminiTurnBounds(parsed.messages, entryId);
+    if (!bounds) {
+      throw new Error('לא ניתן לאתר את זוג ההודעות שנבחר למחיקה.');
+    }
+
+    parsed.messages = [
+      ...parsed.messages.slice(0, bounds.start),
+      ...parsed.messages.slice(bounds.endExclusive),
+    ];
+    parsed.lastUpdated = nowIso;
+    await fs.writeFile(sessionRecord.path, `${JSON.stringify(parsed, null, 2)}\n`, 'utf-8');
+    return;
+  }
+
+  const rawLines = (await fs.readFile(sessionRecord.path, 'utf-8'))
+    .split('\n')
+    .filter((line, index, lines) => line.trim() || index < lines.length - 1);
+  const rows = rawLines.map((line) => safeJsonParse<any>(line)).filter(Boolean);
+  const bounds = findGeminiTurnBounds(rows, entryId);
+  if (!bounds) {
+    throw new Error('לא ניתן לאתר את זוג ההודעות שנבחר למחיקה.');
+  }
+
+  const remainingRows = rows
+    .filter((_row, index) => index < bounds.start || index >= bounds.endExclusive)
+    .map((row) => ({ ...row }));
+
+  if (remainingRows[0] && typeof remainingRows[0] === 'object') {
+    remainingRows[0].lastUpdated = nowIso;
+  }
+
+  await fs.writeFile(
+    sessionRecord.path,
+    `${remainingRows.map((row) => JSON.stringify(row)).join('\n')}\n`,
+    'utf-8'
+  );
+}
+
 export async function getGeminiSessionDetail(
   sessionId: string,
   profileId?: string,

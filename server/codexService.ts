@@ -2106,6 +2106,109 @@ export async function deleteCodexSession(
   await fs.rm(sessionRecord.path, { force: true });
 }
 
+interface RawCodexTurnRange {
+  startLine: number;
+  endLine: number;
+  userEntryId: string | null;
+  assistantEntryIds: string[];
+}
+
+function collectRawCodexTurnRanges(rawLines: string[], sessionId: string): RawCodexTurnRange[] {
+  const turns: RawCodexTurnRange[] = [];
+  let currentTurn: RawCodexTurnRange | null = null;
+  let messageCount = 0;
+  let lastAssistantMessage: { kind: 'commentary' | 'final'; text: string } | null = null;
+
+  for (let index = 0; index < rawLines.length; index += 1) {
+    const row = safeJsonParse<any>(rawLines[index]);
+    if (!row || row.type !== 'event_msg') {
+      continue;
+    }
+
+    const payload = row.payload || {};
+    const eventType = payload.type;
+
+    if (eventType === 'task_started') {
+      if (currentTurn) {
+        currentTurn.endLine = index - 1;
+        turns.push(currentTurn);
+      }
+
+      currentTurn = {
+        startLine: index,
+        endLine: rawLines.length - 1,
+        userEntryId: null,
+        assistantEntryIds: [],
+      };
+      lastAssistantMessage = null;
+      continue;
+    }
+
+    if (!currentTurn) {
+      continue;
+    }
+
+    if (eventType === 'user_message' && typeof payload.message === 'string') {
+      currentTurn.userEntryId = `${sessionId}-user-${messageCount}`;
+      messageCount += 1;
+      continue;
+    }
+
+    if (eventType === 'agent_message' && typeof payload.message === 'string') {
+      const kind = payload.phase === 'commentary' ? 'commentary' : 'final';
+      const text = payload.message.trim();
+      currentTurn.assistantEntryIds.push(`${sessionId}-assistant-${messageCount}`);
+      messageCount += 1;
+      lastAssistantMessage = { kind, text };
+      continue;
+    }
+
+    if (eventType === 'task_complete' && typeof payload.last_agent_message === 'string') {
+      const text = payload.last_agent_message.trim();
+      if (
+        !lastAssistantMessage
+        || lastAssistantMessage.kind !== 'final'
+        || lastAssistantMessage.text !== text
+      ) {
+        currentTurn.assistantEntryIds.push(`${sessionId}-final-${messageCount}`);
+        messageCount += 1;
+        lastAssistantMessage = { kind: 'final', text };
+      }
+    }
+  }
+
+  if (currentTurn) {
+    currentTurn.endLine = rawLines.length - 1;
+    turns.push(currentTurn);
+  }
+
+  return turns;
+}
+
+export async function deleteCodexTurn(
+  sessionId: string,
+  entryId: string,
+  profileId?: string
+): Promise<void> {
+  const profile = resolveProfile(profileId);
+  const sessionRecord = await resolveSessionRecord(profile, sessionId);
+  if (!sessionRecord) {
+    throw new Error(`Session ${sessionId} was not found`);
+  }
+
+  const content = await fs.readFile(sessionRecord.path, 'utf-8');
+  const rawLines = content.split('\n').filter((line, index, lines) => line.trim() || index < lines.length - 1);
+  const turnRanges = collectRawCodexTurnRanges(rawLines, sessionId);
+  const targetTurn = turnRanges.find((turn) => turn.userEntryId === entryId || turn.assistantEntryIds.includes(entryId));
+
+  if (!targetTurn) {
+    throw new Error('לא ניתן לאתר את זוג ההודעות שנבחר למחיקה.');
+  }
+
+  const remainingLines = rawLines.filter((_, index) => index < targetTurn.startLine || index > targetTurn.endLine);
+  await fs.writeFile(sessionRecord.path, `${remainingLines.join('\n')}\n`, 'utf-8');
+}
+
 export async function getCodexSessionDetail(
   sessionId: string,
   profileId?: string,
@@ -2552,7 +2655,6 @@ async function resolveCodexExecutionConfig(
 }
 
 function collectCodexArgs(
-  prompt: string,
   permissionArgs: string[],
   sessionId?: string,
   imagePaths: string[] = [],
@@ -2571,10 +2673,10 @@ function collectCodexArgs(
   const imageArgs = imagePaths.flatMap((imagePath) => ['--image', imagePath]);
 
   if (sessionId) {
-    return [...baseArgs, 'resume', ...executionArgs, ...imageArgs, sessionId, prompt];
+    return [...baseArgs, 'resume', ...executionArgs, ...imageArgs, sessionId, '-'];
   }
 
-  return [...baseArgs, ...executionArgs, ...imageArgs, prompt];
+  return [...baseArgs, ...executionArgs, ...imageArgs, '-'];
 }
 
 async function resolveCodexPermissionArgs(
@@ -2657,13 +2759,13 @@ export async function runCodexPrompt(
   return queueBySessionKey(queueKey, async () => {
     const previousSession = sessionId ? await resolveSessionRecord(profile, sessionId) : null;
     const permissionArgs = await resolveCodexPermissionArgs(profile, executionConfig.permissionModeId);
-    const args = collectCodexArgs(promptText, permissionArgs, sessionId, imagePaths, executionConfig);
+    const args = collectCodexArgs(permissionArgs, sessionId, imagePaths, executionConfig);
 
     return new Promise<CodexRunResult>((resolve, reject) => {
       const child = spawn(CODEX_BIN, args, {
         cwd: runCwd,
         env: buildCodexProcessEnv(profile),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
       const activeRunId = options.runId;
 
@@ -2691,6 +2793,7 @@ export async function runCodexPrompt(
 
       child.stdout.setEncoding('utf-8');
       child.stderr.setEncoding('utf-8');
+      child.stdin.end(promptText);
 
       child.stdout.on('data', (chunk: string) => {
         stdoutBuffer += chunk;

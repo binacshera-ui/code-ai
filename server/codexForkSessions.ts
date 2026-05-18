@@ -293,6 +293,32 @@ export async function getForkDraftSession(sessionId: string): Promise<CodexForkD
   return draft ? cloneForkDraftSession(draft) : null;
 }
 
+export async function updateForkDraftSession(
+  sessionId: string,
+  changes: Partial<Omit<CodexForkDraftSession, 'sessionId' | 'createdAt' | 'updatedAt'>>
+): Promise<CodexForkDraftSession> {
+  await ensureLoaded();
+  const current = state.drafts[sessionId];
+  if (!current) {
+    throw new Error(`Draft session ${sessionId} was not found`);
+  }
+
+  const nextDraft: CodexForkDraftSession = {
+    ...current,
+    ...changes,
+    sessionId: current.sessionId,
+    createdAt: current.createdAt,
+    updatedAt: new Date().toISOString(),
+    timeline: Array.isArray(changes.timeline)
+      ? changes.timeline.map((entry) => ({ ...entry }))
+      : current.timeline.map((entry) => ({ ...entry })),
+  };
+
+  state.drafts[sessionId] = cloneForkDraftSession(nextDraft);
+  await persistState();
+  return cloneForkDraftSession(nextDraft);
+}
+
 export async function listForkDraftSessions(profileId?: string): Promise<CodexForkDraftSession[]> {
   await ensureLoaded();
   return Object.values(state.drafts)
