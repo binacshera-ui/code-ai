@@ -11,6 +11,7 @@ import {
   listCodexSessions,
   resolveCodexProfile,
   runCodexPrompt,
+  updateCodexResponseSpeed,
   type CodexExecutionConfig,
   type CodexModelCatalog,
   type CodexPermissionSnapshot,
@@ -32,6 +33,7 @@ import {
   listClaudeSessions,
   resolveClaudeProfile,
   runClaudePrompt,
+  updateClaudeResponseSpeed,
   ClaudeRunCancelledError,
 } from './claudeService.js';
 import {
@@ -243,6 +245,30 @@ export async function updateAgentPermissionMode(
   await prepareSupportProfileHome(profile);
   await setSelectedPermissionModeId(profile, modeId);
   return buildProviderPermissionSnapshot(profile);
+}
+
+export async function updateAgentResponseSpeed(
+  profileId: string | undefined,
+  modeId: string
+): Promise<CodexModelCatalog> {
+  const profile = resolveProfile(profileId);
+  await prepareSupportProfileHome(profile);
+  if (profile.provider === 'claude') {
+    const catalog = await updateClaudeResponseSpeed(profile.id, modeId);
+    return {
+      ...catalog,
+      permissions: await buildProviderPermissionSnapshot(profile),
+    };
+  }
+  if (profile.provider === 'gemini') {
+    throw new Error('Gemini CLI does not expose a configurable response speed mode');
+  }
+
+  const catalog = await updateCodexResponseSpeed(profile.id, modeId);
+  return {
+    ...catalog,
+    permissions: await buildProviderPermissionSnapshot(profile),
+  };
 }
 
 export async function getAgentRateLimitSnapshot(

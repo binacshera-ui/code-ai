@@ -176,6 +176,16 @@ interface CodexSessionTask {
   sessions: CodexSessionTaskAssignment[];
 }
 
+interface CodexSessionSubtask {
+  id: string;
+  profileId: string;
+  sessionId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
 interface CodexForkDraftServerContext extends ForkDraftContext {
   sessionId: string;
   profileId: string;
@@ -246,6 +256,21 @@ interface CodexModelOption {
   defaultReasoningLevel: string | null;
   supportedReasoningLevels: CodexReasoningLevelOption[];
   isConfiguredDefault: boolean;
+  availableResponseSpeedIds?: string[];
+}
+
+interface CodexResponseSpeedOptionResponse {
+  id: string;
+  label: string;
+  description: string | null;
+}
+
+interface CodexResponseSpeedSnapshotResponse {
+  selectedModeId: string | null;
+  selectedLabel: string;
+  configurable: boolean;
+  note: string | null;
+  availableModes: CodexResponseSpeedOptionResponse[];
 }
 
 interface CodexModelCatalogResponse {
@@ -253,6 +278,7 @@ interface CodexModelCatalogResponse {
   selectedModel: string | null;
   selectedReasoningEffort: string | null;
   permissions: CodexPermissionSnapshotResponse | null;
+  responseSpeed: CodexResponseSpeedSnapshotResponse | null;
 }
 
 interface CodexPermissionModeOptionResponse {
@@ -466,6 +492,10 @@ interface CodexSessionContextSelection {
 
 interface CodexSessionTasksResponse {
   tasks: CodexSessionTask[];
+}
+
+interface CodexSessionSubtasksResponse {
+  subtasks: CodexSessionSubtask[];
 }
 
 interface CodexSessionContextSelectionResponse {
@@ -1315,6 +1345,22 @@ async function saveCodexPermissionMode(
   return data.permissions;
 }
 
+async function saveCodexResponseSpeed(
+  profileId: string,
+  modeId: string
+): Promise<CodexModelCatalogResponse> {
+  return fetchJson<CodexModelCatalogResponse>('/api/codex/response-speed', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      modeId,
+    }),
+  });
+}
+
 async function fetchCodexRateLimits(profileId: string, sessionId?: string | null): Promise<CodexRateLimitSnapshotResponse | null> {
   const query = new URLSearchParams({ profile: profileId });
   if (sessionId?.trim()) {
@@ -1517,6 +1563,19 @@ async function fetchSessionTasks(profileId: string): Promise<CodexSessionTask[]>
   return data.tasks || [];
 }
 
+async function fetchSessionSubtasks(profileId: string, sessionId?: string | null): Promise<CodexSessionSubtask[]> {
+  const query = new URLSearchParams({
+    profileId,
+  });
+  if (sessionId?.trim()) {
+    query.set('sessionId', sessionId.trim());
+  }
+  const data = await fetchJson<CodexSessionSubtasksResponse>(
+    `/api/codex/session-subtasks?${query.toString()}`
+  );
+  return data.subtasks || [];
+}
+
 async function saveSessionTaskRequest(
   profileId: string,
   input: {
@@ -1588,6 +1647,52 @@ async function setTaskSessionCompletionRequest(
     }
   );
   return data.task;
+}
+
+async function createSessionSubtaskRequest(
+  profileId: string,
+  sessionId: string,
+  title: string
+): Promise<CodexSessionSubtask> {
+  const data = await fetchJson<{ subtask: CodexSessionSubtask }>('/api/codex/session-subtasks', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      sessionId,
+      title,
+    }),
+  });
+  return data.subtask;
+}
+
+async function setSessionSubtaskCompletionRequest(
+  profileId: string,
+  subtaskId: string,
+  completed: boolean
+): Promise<CodexSessionSubtask> {
+  const data = await fetchJson<{ subtask: CodexSessionSubtask }>(
+    `/api/codex/session-subtasks/${encodeURIComponent(subtaskId)}/completion`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        profileId,
+        completed,
+      }),
+    }
+  );
+  return data.subtask;
+}
+
+async function deleteSessionSubtaskRequest(profileId: string, subtaskId: string): Promise<void> {
+  await fetchJson(`/api/codex/session-subtasks/${encodeURIComponent(subtaskId)}?profileId=${encodeURIComponent(profileId)}`, {
+    method: 'DELETE',
+  });
 }
 
 async function deleteSessionPermanently(sessionId: string, profileId: string): Promise<void> {
@@ -3079,6 +3184,7 @@ function SessionCard({
   isActive,
   isArchivedView,
   taskSummary,
+  subtaskSummary,
   isDeletingPermanent,
   onSelect,
   onManageTopic,
@@ -3094,6 +3200,7 @@ function SessionCard({
   isActive: boolean;
   isArchivedView: boolean;
   taskSummary?: { assignedCount: number; completedCount: number } | null;
+  subtaskSummary?: { totalCount: number; completedCount: number } | null;
   isDeletingPermanent?: boolean;
   onSelect: () => void;
   onManageTopic: () => void;
@@ -3182,7 +3289,14 @@ function SessionCard({
             {taskSummary && taskSummary.assignedCount > 0 && (
               <div className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-700">
                 <span className="truncate">
-                  משימות {taskSummary.completedCount}/{taskSummary.assignedCount}
+                  פרוייקטים {taskSummary.completedCount}/{taskSummary.assignedCount}
+                </span>
+              </div>
+            )}
+            {subtaskSummary && subtaskSummary.totalCount > 0 && (
+              <div className="mt-1 mr-1 inline-flex max-w-full items-center gap-1 rounded-full border border-violet-100 bg-violet-50 px-2 py-0.5 text-[11px] text-violet-700">
+                <span className="truncate">
+                  צעדים {subtaskSummary.completedCount}/{subtaskSummary.totalCount}
                 </span>
               </div>
             )}
@@ -3204,7 +3318,7 @@ function SessionCard({
                 onManageTasks();
               }}
               className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-50 text-slate-400 transition-colors hover:bg-slate-100 hover:text-emerald-700"
-              title="נהל משימות"
+              title="נהל פרוייקטים וצעדי שיחה"
             >
               <ListPlus className="h-3.5 w-3.5" />
             </button>
@@ -3274,6 +3388,7 @@ function SidebarPanel({
   selectedProfile,
   workspaceMode,
   sessionTaskSummaries,
+  sessionSubtaskSummaries,
   search,
   sessions,
   groupedSessions,
@@ -3310,6 +3425,7 @@ function SidebarPanel({
   selectedProfile: CodexProfile | null;
   workspaceMode: WorkspaceMode;
   sessionTaskSummaries: Record<string, { assignedCount: number; completedCount: number }>;
+  sessionSubtaskSummaries: Record<string, { totalCount: number; completedCount: number }>;
   search: string;
   sessions: CodexSessionSummary[];
   groupedSessions: SessionFolderGroup[];
@@ -3405,7 +3521,7 @@ function SidebarPanel({
               className="flex min-w-0 flex-col items-center justify-center gap-1.5 overflow-hidden rounded-2xl border border-slate-200 bg-white px-2 py-3 text-center text-[12px] font-medium leading-4 text-slate-700 transition-colors hover:bg-slate-50 active:scale-95"
             >
               <LayoutGrid className="h-4 w-4 shrink-0" />
-              <span className="line-clamp-2 min-w-0">משימות</span>
+              <span className="line-clamp-2 min-w-0">פרוייקטים</span>
             </button>
 
             <button
@@ -3537,6 +3653,7 @@ function SidebarPanel({
                                 isActive={activeSessionIds.has(session.id)}
                                 isArchivedView={showArchived}
                                 taskSummary={sessionTaskSummaries[session.id] || null}
+                                subtaskSummary={sessionSubtaskSummaries[session.id] || null}
                                 isDeletingPermanent={deletingSessionId === session.id}
                                 onSelect={() => onSelectSession(session.id)}
                                 onManageTopic={() => onManageTopic(session)}
@@ -7510,11 +7627,11 @@ function TaskBoardDialog({
             </div>
             <div className="min-w-0">
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                Task Board
+                Project Board
               </div>
-              <div className="mt-1 text-lg font-semibold text-slate-800">לוח משימות לסשנים</div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">לוח פרוייקטים לסשנים</div>
               <div className="mt-1 text-sm leading-6 text-slate-500">
-                צור משימות גדולות, שייך אליהן סשנים, וסמן אילו שיחות כבר הושלמו כחלק מהמשימה.
+                צור פרוייקטים גדולים, שייך אליהם סשנים, וסמן אילו שיחות כבר הושלמו כחלק מהפרוייקט.
               </div>
             </div>
           </div>
@@ -7530,19 +7647,19 @@ function TaskBoardDialog({
         <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[22rem_minmax(0,1fr)]">
           <div className="border-b border-slate-100 bg-slate-50/60 px-5 py-5 lg:border-b-0 lg:border-l">
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-              {draftTaskId ? 'עריכת משימה' : 'משימה חדשה'}
+              {draftTaskId ? 'עריכת פרוייקט' : 'פרוייקט חדש'}
             </div>
             <div className="mt-3 space-y-3">
               <input
                 value={draftTitle}
                 onChange={(event) => onChangeTitle(event.target.value)}
-                placeholder="שם המשימה"
+                placeholder="שם הפרוייקט"
                 className="w-full rounded-[1.25rem] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 outline-none transition focus:border-emerald-300"
               />
               <Textarea
                 value={draftDescription}
                 onChange={(event) => onChangeDescription(event.target.value)}
-                placeholder="מה המטרה הגדולה של המשימה הזאת?"
+                placeholder="מה המטרה הגדולה של הפרוייקט הזה?"
                 rows={4}
                 className="min-h-[112px] resize-none rounded-[1.25rem] border border-slate-200 bg-white px-4 py-4 text-sm leading-7 text-slate-800 shadow-none placeholder:text-slate-300 focus-visible:ring-0"
               />
@@ -7571,7 +7688,7 @@ function TaskBoardDialog({
                   disabled={isSaving || !draftTitle.trim()}
                   className="h-11 flex-1 rounded-full bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
                 >
-                  {isSaving ? 'שומר...' : draftTaskId ? 'עדכן משימה' : 'צור משימה'}
+                  {isSaving ? 'שומר...' : draftTaskId ? 'עדכן פרוייקט' : 'צור פרוייקט'}
                 </button>
               </div>
             </div>
@@ -7588,12 +7705,12 @@ function TaskBoardDialog({
               <div className="flex min-h-[260px] items-center justify-center rounded-[1.5rem] border border-slate-100 bg-slate-50/70 text-sm text-slate-500">
                 <div className="flex items-center gap-2">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>טוען משימות...</span>
+                  <span>טוען פרוייקטים...</span>
                 </div>
               </div>
             ) : tasks.length === 0 ? (
               <div className="rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm leading-7 text-slate-500">
-                עדיין אין משימות. צור משימה ראשונה ואז תוכל לשייך אליה סשנים מהסיידבר.
+                עדיין אין פרוייקטים. צור פרוייקט ראשון ואז תוכל לשייך אליו סשנים מהסיידבר.
               </div>
             ) : (
               <div className="space-y-4">
@@ -7627,7 +7744,7 @@ function TaskBoardDialog({
                             type="button"
                             onClick={() => onEditTask(task)}
                             className="rounded-full border border-slate-200 bg-white p-2 text-slate-500 transition hover:bg-slate-50 hover:text-slate-700"
-                            title="ערוך משימה"
+                            title="ערוך פרוייקט"
                           >
                             <SquarePen className="h-4 w-4" />
                           </button>
@@ -7636,7 +7753,7 @@ function TaskBoardDialog({
                             onClick={() => onDeleteTask(task.id)}
                             disabled={deletingTaskId === task.id}
                             className="rounded-full border border-rose-100 bg-rose-50 p-2 text-rose-600 transition hover:bg-rose-100 disabled:opacity-40"
-                            title="מחק משימה"
+                            title="מחק פרוייקט"
                           >
                             {deletingTaskId === task.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                           </button>
@@ -7646,7 +7763,7 @@ function TaskBoardDialog({
                       <div className="mt-4 rounded-[1.25rem] border border-slate-100 bg-slate-50/70 px-3 py-3">
                         {task.sessions.length === 0 ? (
                           <div className="text-sm text-slate-400">
-                            עדיין אין סשנים משויכים למשימה הזאת.
+                            עדיין אין סשנים משויכים לפרוייקט הזה.
                           </div>
                         ) : (
                           <div className="space-y-2">
@@ -7714,21 +7831,43 @@ function SessionTaskAssignmentDialog({
   isOpen,
   session,
   tasks,
+  subtasks,
   isLoading,
+  isSubtasksLoading,
   error,
+  subtasksError,
   updatingTaskId,
+  subtaskDraftTitle,
+  isSubtaskSaving,
+  updatingSubtaskId,
+  deletingSubtaskId,
   onClose,
   onToggleTask,
+  onChangeSubtaskDraft,
+  onCreateSubtask,
+  onToggleSubtaskCompletion,
+  onDeleteSubtask,
   onOpenBoard,
 }: {
   isOpen: boolean;
   session: CodexSessionSummary | null;
   tasks: CodexSessionTask[];
+  subtasks: CodexSessionSubtask[];
   isLoading: boolean;
+  isSubtasksLoading: boolean;
   error: string | null;
+  subtasksError: string | null;
   updatingTaskId: string | null;
+  subtaskDraftTitle: string;
+  isSubtaskSaving: boolean;
+  updatingSubtaskId: string | null;
+  deletingSubtaskId: string | null;
   onClose: () => void;
   onToggleTask: (taskId: string, assigned: boolean) => void;
+  onChangeSubtaskDraft: (value: string) => void;
+  onCreateSubtask: () => void;
+  onToggleSubtaskCompletion: (subtaskId: string, completed: boolean) => void;
+  onDeleteSubtask: (subtaskId: string) => void;
   onOpenBoard: () => void;
 }) {
   if (!isOpen || !session) {
@@ -7757,9 +7896,9 @@ function SessionTaskAssignmentDialog({
             </div>
             <div className="min-w-0">
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                Session Tasks
+                Session Projects
               </div>
-              <div className="mt-1 text-lg font-semibold text-slate-800">שיוך שיחה למשימות</div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">שיוך שיחה לפרוייקטים</div>
               <div className="mt-1 truncate text-sm text-slate-500">
                 {getSessionDisplayTitle(session)}
               </div>
@@ -7776,14 +7915,14 @@ function SessionTaskAssignmentDialog({
 
         <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-3">
           <div className="text-xs leading-6 text-slate-500">
-            בחר אילו משימות גדולות כוללות את הסשן הזה.
+            בחר אילו פרוייקטים כוללים את הסשן הזה, והוסף צעדים קטנים ייעודיים לסשן.
           </div>
           <button
             type="button"
             onClick={onOpenBoard}
             className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 transition hover:bg-slate-50"
           >
-            פתח לוח משימות
+            פתח לוח פרוייקטים
           </button>
         </div>
 
@@ -7793,17 +7932,116 @@ function SessionTaskAssignmentDialog({
               {error}
             </div>
           )}
+          {subtasksError && (
+            <div className="mb-4 rounded-[1.25rem] border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {subtasksError}
+            </div>
+          )}
+
+          <div className="mb-5 rounded-[1.35rem] border border-violet-100 bg-violet-50/60 px-4 py-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-500">Session Steps</div>
+                <div className="mt-1 text-sm font-semibold text-slate-800">משימות קטנות של הסשן</div>
+              </div>
+              <div className="rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-violet-700">
+                {subtasks.filter((subtask) => Boolean(subtask.completedAt)).length}/{subtasks.length}
+              </div>
+            </div>
+
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                value={subtaskDraftTitle}
+                onChange={(event) => onChangeSubtaskDraft(event.target.value)}
+                placeholder="הוסף צעד קטן לסשן הזה"
+                className="h-10 min-w-0 flex-1 rounded-full border border-violet-200 bg-white px-4 text-sm text-slate-700 outline-none transition focus:border-violet-300"
+              />
+              <button
+                type="button"
+                onClick={onCreateSubtask}
+                disabled={isSubtaskSaving || !subtaskDraftTitle.trim()}
+                className="h-10 shrink-0 rounded-full bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
+              >
+                {isSubtaskSaving ? 'שומר...' : 'הוסף'}
+              </button>
+            </div>
+
+            <div className="mt-3">
+              {isSubtasksLoading ? (
+                <div className="rounded-[1rem] border border-white/90 bg-white/80 px-3 py-3 text-sm text-slate-500">
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>טוען צעדים...</span>
+                  </div>
+                </div>
+              ) : subtasks.length === 0 ? (
+                <div className="rounded-[1rem] border border-dashed border-violet-200 bg-white/70 px-3 py-4 text-sm text-slate-500">
+                  עדיין אין צעדים קטנים לסשן הזה.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {subtasks.map((subtask) => {
+                    const isCompleted = Boolean(subtask.completedAt);
+                    return (
+                      <div
+                        key={subtask.id}
+                        className={cn(
+                          'flex items-center gap-3 rounded-[1rem] border px-3 py-3 transition',
+                          isCompleted
+                            ? 'border-emerald-100 bg-emerald-50/80'
+                            : 'border-white/90 bg-white/85'
+                        )}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => onToggleSubtaskCompletion(subtask.id, !isCompleted)}
+                          disabled={updatingSubtaskId === subtask.id}
+                          className={cn(
+                            'flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition',
+                            isCompleted
+                              ? 'border-emerald-200 bg-emerald-500 text-white'
+                              : 'border-violet-200 bg-white text-violet-500 hover:border-violet-300 hover:text-violet-700'
+                          )}
+                          title={isCompleted ? 'סמן כלא הושלם' : 'סמן כהושלם'}
+                        >
+                          {updatingSubtaskId === subtask.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                        </button>
+                        <div className="min-w-0 flex-1 text-right">
+                          <div className={cn('truncate text-sm font-medium', isCompleted ? 'text-emerald-800 line-through' : 'text-slate-700')}>
+                            {subtask.title}
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-400">
+                            נוצר {formatTimestamp(subtask.createdAt)}
+                            {subtask.completedAt ? ` • הושלם ${formatTimestamp(subtask.completedAt)}` : ''}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => onDeleteSubtask(subtask.id)}
+                          disabled={deletingSubtaskId === subtask.id}
+                          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-rose-100 bg-rose-50 text-rose-600 transition hover:bg-rose-100 disabled:opacity-40"
+                          title="מחק צעד"
+                        >
+                          {deletingSubtaskId === subtask.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
 
           {isLoading ? (
             <div className="flex min-h-[220px] items-center justify-center rounded-[1.5rem] border border-slate-100 bg-slate-50/70 text-sm text-slate-500">
               <div className="flex items-center gap-2">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span>טוען משימות...</span>
+                <span>טוען פרוייקטים...</span>
               </div>
             </div>
           ) : tasks.length === 0 ? (
             <div className="rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm leading-7 text-slate-500">
-              עדיין אין משימות. צור קודם משימה בלוח המשימות ואז חזור לכאן לשיוך.
+              עדיין אין פרוייקטים. צור קודם פרוייקט בלוח הפרוייקטים ואז חזור לכאן לשיוך.
             </div>
           ) : (
             <div className="space-y-3">
@@ -8063,7 +8301,7 @@ export function CodexMobileApp() {
   const [isCreateReminderDialogOpen, setIsCreateReminderDialogOpen] = useState(false);
   const [isAnchorTargetPickerMode, setIsAnchorTargetPickerMode] = useState(false);
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
-  const [activeModelPanelSection, setActiveModelPanelSection] = useState<'permissions' | 'models' | 'reasoning'>('permissions');
+  const [activeModelPanelSection, setActiveModelPanelSection] = useState<'permissions' | 'speed' | 'models' | 'reasoning'>('permissions');
   const [isReasoningPickerOpen, setIsReasoningPickerOpen] = useState(false);
   const [isRateLimitOpen, setIsRateLimitOpen] = useState(false);
   const [isModelCatalogLoading, setIsModelCatalogLoading] = useState(false);
@@ -8102,6 +8340,7 @@ export function CodexMobileApp() {
   const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
   const [sessionReminders, setSessionReminders] = useState<CodexSessionReminder[]>([]);
   const [sessionTasks, setSessionTasks] = useState<CodexSessionTask[]>([]);
+  const [sessionSubtasks, setSessionSubtasks] = useState<CodexSessionSubtask[]>([]);
   const [isInstructionDialogOpen, setIsInstructionDialogOpen] = useState(false);
   const [isInstructionLoading, setIsInstructionLoading] = useState(false);
   const [isSessionContextSelectionLoading, setIsSessionContextSelectionLoading] = useState(false);
@@ -8110,13 +8349,17 @@ export function CodexMobileApp() {
   const [isUnifiedSkillsLoading, setIsUnifiedSkillsLoading] = useState(false);
   const [isSessionRemindersLoading, setIsSessionRemindersLoading] = useState(false);
   const [isSessionTasksLoading, setIsSessionTasksLoading] = useState(false);
+  const [isSessionSubtasksLoading, setIsSessionSubtasksLoading] = useState(false);
   const [isInstructionSaving, setIsInstructionSaving] = useState(false);
   const [isReminderSaving, setIsReminderSaving] = useState(false);
   const [isTaskSaving, setIsTaskSaving] = useState(false);
+  const [isSubtaskSaving, setIsSubtaskSaving] = useState(false);
+  const [isResponseSpeedSaving, setIsResponseSpeedSaving] = useState(false);
   const [projectAnchorsError, setProjectAnchorsError] = useState<string | null>(null);
   const [unifiedSkillsError, setUnifiedSkillsError] = useState<string | null>(null);
   const [sessionRemindersError, setSessionRemindersError] = useState<string | null>(null);
   const [sessionTasksError, setSessionTasksError] = useState<string | null>(null);
+  const [sessionSubtasksError, setSessionSubtasksError] = useState<string | null>(null);
   const [anchorDraftTargetEntry, setAnchorDraftTargetEntry] = useState<CodexFileTreeEntry | null>(null);
   const [anchorDraftName, setAnchorDraftName] = useState('');
   const [anchorDraftDescription, setAnchorDraftDescription] = useState('');
@@ -8124,6 +8367,7 @@ export function CodexMobileApp() {
   const [taskDraftTitle, setTaskDraftTitle] = useState('');
   const [taskDraftDescription, setTaskDraftDescription] = useState('');
   const [taskDraftDueAt, setTaskDraftDueAt] = useState('');
+  const [subtaskDraftTitle, setSubtaskDraftTitle] = useState('');
   const [taskTargetSession, setTaskTargetSession] = useState<CodexSessionSummary | null>(null);
   const [pendingReminderSourceEntry, setPendingReminderSourceEntry] = useState<CodexTimelineEntry | null>(null);
   const [reminderDraftName, setReminderDraftName] = useState('');
@@ -8131,7 +8375,9 @@ export function CodexMobileApp() {
   const [deletingAnchorId, setDeletingAnchorId] = useState<string | null>(null);
   const [deletingReminderId, setDeletingReminderId] = useState<string | null>(null);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [deletingSubtaskId, setDeletingSubtaskId] = useState<string | null>(null);
   const [updatingTaskAssignmentKey, setUpdatingTaskAssignmentKey] = useState<string | null>(null);
+  const [updatingSubtaskId, setUpdatingSubtaskId] = useState<string | null>(null);
   const [scheduleType, setScheduleType] = useState<'once' | 'recurring'>('once');
   const [recurringFreq, setRecurringFreq] = useState<'daily' | 'weekly'>('daily');
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -8139,6 +8385,7 @@ export function CodexMobileApp() {
   const [queueItems, setQueueItems] = useState<CodexQueueServerItem[]>([]);
   const [availableModels, setAvailableModels] = useState<CodexModelOption[]>([]);
   const [modelPermissionSnapshot, setModelPermissionSnapshot] = useState<CodexPermissionSnapshotResponse | null>(null);
+  const [modelResponseSpeedSnapshot, setModelResponseSpeedSnapshot] = useState<CodexResponseSpeedSnapshotResponse | null>(null);
   const [rateLimitSnapshot, setRateLimitSnapshot] = useState<CodexRateLimitSnapshotResponse | null>(null);
   const [selectedModelSlug, setSelectedModelSlug] = useState<string | null>(null);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
@@ -8205,6 +8452,7 @@ export function CodexMobileApp() {
   const latestUnifiedSkillsLoadTokenRef = useRef(0);
   const latestSessionRemindersLoadTokenRef = useRef(0);
   const latestSessionTasksLoadTokenRef = useRef(0);
+  const latestSessionSubtasksLoadTokenRef = useRef(0);
   const latestModelCatalogLoadTokenRef = useRef(0);
   const latestRateLimitLoadTokenRef = useRef(0);
   const currentSessionActiveCountRef = useRef(0);
@@ -8386,6 +8634,20 @@ export function CodexMobileApp() {
 
     return nextSummaries;
   }, [sessionTasks]);
+  const sessionSubtaskSummaries = useMemo(() => {
+    const nextSummaries: Record<string, { totalCount: number; completedCount: number }> = {};
+
+    for (const subtask of sessionSubtasks) {
+      const current = nextSummaries[subtask.sessionId] || { totalCount: 0, completedCount: 0 };
+      current.totalCount += 1;
+      if (subtask.completedAt) {
+        current.completedCount += 1;
+      }
+      nextSummaries[subtask.sessionId] = current;
+    }
+
+    return nextSummaries;
+  }, [sessionSubtasks]);
 
   useEffect(() => {
     const previousTitle = document.title;
@@ -10564,6 +10826,7 @@ export function CodexMobileApp() {
     if (!nextProfileId) {
       setAvailableModels([]);
       setModelPermissionSnapshot(null);
+      setModelResponseSpeedSnapshot(null);
       setSelectedModelSlug(null);
       setSelectedReasoningEffort(null);
       return;
@@ -10591,12 +10854,14 @@ export function CodexMobileApp() {
 
       setAvailableModels(data.models);
       setModelPermissionSnapshot(data.permissions || null);
+      setModelResponseSpeedSnapshot(data.responseSpeed || null);
       setSelectedModelSlug(nextModelSlug);
       setSelectedReasoningEffort(nextReasoningEffort);
     } catch (modelCatalogError: any) {
       if (requestToken === latestModelCatalogLoadTokenRef.current) {
         setAvailableModels([]);
         setModelPermissionSnapshot(null);
+        setModelResponseSpeedSnapshot(null);
         setSelectedModelSlug(null);
         setSelectedReasoningEffort(null);
         setError(modelCatalogError.message || 'Failed to load models');
@@ -10628,6 +10893,43 @@ export function CodexMobileApp() {
       setError(permissionError.message || 'Failed to update permission mode');
     } finally {
       setIsPermissionModeSaving(false);
+    }
+  }
+
+  async function handleResponseSpeedChange(nextModeId: string) {
+    if (!profileId || isResponseSpeedSaving) {
+      return;
+    }
+
+    if (selectedResponseSpeedModeId === nextModeId) {
+      return;
+    }
+
+    setIsResponseSpeedSaving(true);
+    setError(null);
+
+    try {
+      const data = await saveCodexResponseSpeed(profileId, nextModeId);
+      const nextModelSlug = data.selectedModel || data.models[0]?.slug || null;
+      const nextModelOption = nextModelSlug
+        ? data.models.find((model) => model.slug === nextModelSlug) || null
+        : null;
+      const nextReasoningEffort = data.selectedReasoningEffort
+        && nextModelOption?.supportedReasoningLevels.some((level) => level.effort === data.selectedReasoningEffort)
+          ? data.selectedReasoningEffort
+          : nextModelOption?.defaultReasoningLevel
+            || nextModelOption?.supportedReasoningLevels[0]?.effort
+            || null;
+
+      setAvailableModels(data.models);
+      setModelPermissionSnapshot(data.permissions || null);
+      setModelResponseSpeedSnapshot(data.responseSpeed || null);
+      setSelectedModelSlug(nextModelSlug);
+      setSelectedReasoningEffort(nextReasoningEffort);
+    } catch (responseSpeedError: any) {
+      setError(responseSpeedError.message || 'Failed to update response speed');
+    } finally {
+      setIsResponseSpeedSaving(false);
     }
   }
 
@@ -10861,6 +11163,34 @@ export function CodexMobileApp() {
     } finally {
       if (requestToken === latestSessionTasksLoadTokenRef.current) {
         setIsSessionTasksLoading(false);
+      }
+    }
+  }
+
+  async function loadCurrentSessionSubtasks(nextProfileId = profileId, nextSessionId = taskTargetSession?.id || null) {
+    if (!nextProfileId || !nextSessionId) {
+      setSessionSubtasks([]);
+      setSessionSubtasksError(null);
+      return;
+    }
+
+    const requestToken = ++latestSessionSubtasksLoadTokenRef.current;
+    setIsSessionSubtasksLoading(true);
+    setSessionSubtasksError(null);
+    try {
+      const subtasks = await fetchSessionSubtasks(nextProfileId, nextSessionId);
+      if (requestToken !== latestSessionSubtasksLoadTokenRef.current) {
+        return;
+      }
+      setSessionSubtasks(subtasks);
+    } catch (subtasksError: any) {
+      if (requestToken === latestSessionSubtasksLoadTokenRef.current) {
+        setSessionSubtasks([]);
+        setSessionSubtasksError(subtasksError.message || 'Failed to load session subtasks');
+      }
+    } finally {
+      if (requestToken === latestSessionSubtasksLoadTokenRef.current) {
+        setIsSessionSubtasksLoading(false);
       }
     }
   }
@@ -11100,9 +11430,11 @@ export function CodexMobileApp() {
 
   function openSessionTaskDialog(session: CodexSessionSummary) {
     setTaskTargetSession(session);
+    setSubtaskDraftTitle('');
     setIsSessionTaskDialogOpen(true);
     if (profileId) {
       void loadCurrentSessionTasks(profileId);
+      void loadCurrentSessionSubtasks(profileId, session.id);
     }
   }
 
@@ -11203,6 +11535,55 @@ export function CodexMobileApp() {
     }
   }
 
+  async function createSessionSubtaskFromDraft() {
+    if (!profileId || !taskTargetSession || !subtaskDraftTitle.trim()) {
+      return;
+    }
+
+    setIsSubtaskSaving(true);
+    try {
+      const subtask = await createSessionSubtaskRequest(profileId, taskTargetSession.id, subtaskDraftTitle.trim());
+      setSessionSubtasks((current) => [subtask, ...current.filter((candidate) => candidate.id !== subtask.id)]);
+      setSubtaskDraftTitle('');
+    } catch (subtaskError: any) {
+      setError(subtaskError.message || 'Failed to create session subtask');
+    } finally {
+      setIsSubtaskSaving(false);
+    }
+  }
+
+  async function toggleSessionSubtaskCompletion(subtaskId: string, completed: boolean) {
+    if (!profileId) {
+      return;
+    }
+
+    setUpdatingSubtaskId(subtaskId);
+    try {
+      const subtask = await setSessionSubtaskCompletionRequest(profileId, subtaskId, completed);
+      setSessionSubtasks((current) => current.map((candidate) => candidate.id === subtask.id ? subtask : candidate));
+    } catch (subtaskError: any) {
+      setError(subtaskError.message || 'Failed to update session subtask');
+    } finally {
+      setUpdatingSubtaskId(null);
+    }
+  }
+
+  async function deleteSessionSubtaskFromDialog(subtaskId: string) {
+    if (!profileId) {
+      return;
+    }
+
+    setDeletingSubtaskId(subtaskId);
+    try {
+      await deleteSessionSubtaskRequest(profileId, subtaskId);
+      setSessionSubtasks((current) => current.filter((subtask) => subtask.id !== subtaskId));
+    } catch (subtaskError: any) {
+      setError(subtaskError.message || 'Failed to delete session subtask');
+    } finally {
+      setDeletingSubtaskId(null);
+    }
+  }
+
   async function confirmPermanentDeleteSession() {
     if (!pendingPermanentDeleteSession) {
       return;
@@ -11219,6 +11600,7 @@ export function CodexMobileApp() {
         ...task,
         sessions: task.sessions.filter((assignment) => assignment.sessionId !== pendingPermanentDeleteSession.id),
       })));
+      setSessionSubtasks((current) => current.filter((subtask) => subtask.sessionId !== pendingPermanentDeleteSession.id));
       setPendingPermanentDeleteSession(null);
       await loadSessionsOnly(profileId, { silent: true });
     } catch (deleteError: any) {
@@ -11308,16 +11690,19 @@ export function CodexMobileApp() {
     [selectedReasoningEffort, supportedReasoningLevels]
   );
   const availablePermissionModes = modelPermissionSnapshot?.availableModes || [];
+  const availableResponseSpeedModes = modelResponseSpeedSnapshot?.availableModes || [];
   const selectedPermissionModeId = modelPermissionSnapshot?.selectedModeId
     || modelPermissionSnapshot?.runtime?.selectedModeId
     || null;
+  const selectedResponseSpeedModeId = modelResponseSpeedSnapshot?.selectedModeId || null;
   const permissionCapabilities = modelPermissionSnapshot?.capabilities || null;
   const permissionRuntimeState = modelPermissionSnapshot?.runtime || null;
   const modelPanelSectionSummary = useMemo(() => ({
     permissions: modelPermissionSnapshot?.accessLabel || 'ללא נתון',
+    speed: modelResponseSpeedSnapshot?.selectedLabel || 'ללא נתון',
     models: selectedModelOption?.displayName || 'ללא בחירה',
     reasoning: selectedReasoningOption ? getReasoningEffortLabel(selectedReasoningOption.effort) : 'ללא בחירה',
-  }), [modelPermissionSnapshot?.accessLabel, selectedModelOption?.displayName, selectedReasoningOption]);
+  }), [modelPermissionSnapshot?.accessLabel, modelResponseSpeedSnapshot?.selectedLabel, selectedModelOption?.displayName, selectedReasoningOption]);
   const selectedAnchorSummaries = useMemo(
     () => projectAnchors.filter((anchor) => sessionContextSelection.anchorIds.includes(anchor.id)),
     [projectAnchors, sessionContextSelection.anchorIds]
@@ -11365,11 +11750,14 @@ export function CodexMobileApp() {
     if (!profileId) {
       setSessionTasks([]);
       setSessionTasksError(null);
+      setSessionSubtasks([]);
+      setSessionSubtasksError(null);
       return;
     }
 
     void loadCurrentSessionTasks(profileId);
-  }, [profileId]);
+    void loadCurrentSessionSubtasks(profileId, taskTargetSession?.id || null);
+  }, [profileId, taskTargetSession?.id]);
 
   useEffect(() => {
     if (!profileId || !activeComposerCwd) {
@@ -11389,6 +11777,7 @@ export function CodexMobileApp() {
     if (!profileId) {
       setAvailableModels([]);
       setModelPermissionSnapshot(null);
+      setModelResponseSpeedSnapshot(null);
       setRateLimitSnapshot(null);
       setSelectedModelSlug(null);
       setSelectedReasoningEffort(null);
@@ -11631,6 +12020,7 @@ export function CodexMobileApp() {
       selectedProfile={currentProfile}
       workspaceMode={workspaceMode}
       sessionTaskSummaries={sessionTaskSummaries}
+      sessionSubtaskSummaries={sessionSubtaskSummaries}
       search={search}
       sessions={sessions}
       groupedSessions={groupedSessions}
@@ -12304,7 +12694,13 @@ export function CodexMobileApp() {
                       setIsAdditionsMenuOpen(false);
                       setIsModelPickerOpen((current) => {
                         if (!current) {
-                          setActiveModelPanelSection(modelPermissionSnapshot ? 'permissions' : 'models');
+                          setActiveModelPanelSection(
+                            modelPermissionSnapshot
+                              ? 'permissions'
+                              : modelResponseSpeedSnapshot
+                                ? 'speed'
+                                : 'models'
+                          );
                         }
                         return !current;
                       });
@@ -12360,7 +12756,7 @@ export function CodexMobileApp() {
                           <div className="overflow-hidden rounded-[0.85rem] border border-slate-100 bg-white/85">
                             <button
                               type="button"
-                              onClick={() => setActiveModelPanelSection((current) => current === 'permissions' ? 'models' : 'permissions')}
+                              onClick={() => setActiveModelPanelSection((current) => current === 'permissions' ? 'speed' : 'permissions')}
                               className="flex w-full items-center justify-between gap-2 px-2.5 py-2 text-right"
                             >
                               <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-slate-300 transition-transform', activeModelPanelSection === 'permissions' && 'rotate-180')} />
@@ -12473,6 +12869,91 @@ export function CodexMobileApp() {
                                         ))}
                                       </div>
                                     )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {modelResponseSpeedSnapshot && (
+                          <div className="overflow-hidden rounded-[0.85rem] border border-slate-100 bg-white/85">
+                            <button
+                              type="button"
+                              onClick={() => setActiveModelPanelSection((current) => current === 'speed' ? 'models' : 'speed')}
+                              className="flex w-full items-center justify-between gap-2 px-2.5 py-2 text-right"
+                            >
+                              <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-slate-300 transition-transform', activeModelPanelSection === 'speed' && 'rotate-180')} />
+                              <div className="min-w-0 flex-1">
+                                <div className="text-[10px] font-semibold text-slate-600">מהירות תגובה</div>
+                                <div className="truncate text-[8px] text-slate-400">{modelPanelSectionSummary.speed}</div>
+                              </div>
+                              <span className={cn(
+                                'rounded-full px-1.5 py-0.5 text-[9px] font-medium',
+                                modelResponseSpeedSnapshot.configurable
+                                  ? 'border border-cyan-100 bg-cyan-50 text-cyan-600'
+                                  : 'border border-slate-200 bg-slate-50 text-slate-400'
+                              )}>
+                                {modelResponseSpeedSnapshot.selectedLabel}
+                              </span>
+                            </button>
+                            {activeModelPanelSection === 'speed' && (
+                              <div className="space-y-2 border-t border-slate-100 px-2.5 py-2 text-right">
+                                <div className="rounded-[0.8rem] border border-slate-100/90 bg-slate-50/75 px-2 py-2 text-[8px] leading-4 text-slate-400">
+                                  <div className="flex items-center justify-between gap-2 text-[9px] font-medium text-slate-500">
+                                    <span>מצב פעיל</span>
+                                    <span>{modelResponseSpeedSnapshot.selectedLabel}</span>
+                                  </div>
+                                  {modelResponseSpeedSnapshot.note && (
+                                    <div className="mt-1">{modelResponseSpeedSnapshot.note}</div>
+                                  )}
+                                </div>
+                                {modelResponseSpeedSnapshot.configurable ? (
+                                  <div className="space-y-1.5">
+                                    {availableResponseSpeedModes.map((mode) => {
+                                      const isSelected = selectedResponseSpeedModeId === mode.id;
+                                      const isDisabled = (
+                                        isResponseSpeedSaving
+                                        || (selectedModelOption?.availableResponseSpeedIds?.length
+                                          ? !selectedModelOption.availableResponseSpeedIds.includes(mode.id)
+                                          : false)
+                                      );
+                                      return (
+                                        <button
+                                          key={mode.id}
+                                          type="button"
+                                          disabled={isDisabled}
+                                          onClick={() => void handleResponseSpeedChange(mode.id)}
+                                          className={cn(
+                                            'flex w-full items-start justify-between gap-2 rounded-[0.8rem] border px-2 py-2 text-right transition disabled:cursor-default disabled:opacity-60',
+                                            isSelected
+                                              ? 'border-cyan-200/90 bg-cyan-50/85 text-cyan-800'
+                                              : 'border-slate-100 bg-slate-50/80 text-slate-700 hover:border-slate-200/80 hover:bg-white'
+                                          )}
+                                        >
+                                          <div className="min-w-0 flex-1">
+                                            <div className="text-[10px] font-semibold">{mode.label}</div>
+                                            {mode.description && (
+                                              <div className={cn(
+                                                'mt-0.5 text-[8px] leading-4',
+                                                isSelected ? 'text-cyan-700/80' : 'text-slate-500'
+                                              )}>
+                                                {mode.description}
+                                              </div>
+                                            )}
+                                          </div>
+                                          {isResponseSpeedSaving && isSelected
+                                            ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-cyan-500" />
+                                            : isSelected
+                                              ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-cyan-500" />
+                                              : null}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                ) : (
+                                  <div className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-3 text-right text-[11px] text-slate-500">
+                                    {modelResponseSpeedSnapshot.note || 'ה־CLI של הפרופיל הזה לא חושף מצב מהירות תגובה מפורש.'}
                                   </div>
                                 )}
                               </div>
@@ -13139,12 +13620,21 @@ export function CodexMobileApp() {
         isOpen={isSessionTaskDialogOpen}
         session={taskTargetSession}
         tasks={sessionTasks}
+        subtasks={sessionSubtasks}
         isLoading={isSessionTasksLoading}
+        isSubtasksLoading={isSessionSubtasksLoading}
         error={sessionTasksError}
+        subtasksError={sessionSubtasksError}
         updatingTaskId={updatingTaskAssignmentKey}
+        subtaskDraftTitle={subtaskDraftTitle}
+        isSubtaskSaving={isSubtaskSaving}
+        updatingSubtaskId={updatingSubtaskId}
+        deletingSubtaskId={deletingSubtaskId}
         onClose={() => {
           setIsSessionTaskDialogOpen(false);
           setTaskTargetSession(null);
+          setSubtaskDraftTitle('');
+          setSessionSubtasks([]);
         }}
         onToggleTask={(taskId, assigned) => {
           if (!taskTargetSession) {
@@ -13152,6 +13642,10 @@ export function CodexMobileApp() {
           }
           void toggleTaskAssignment(taskId, taskTargetSession.id, assigned);
         }}
+        onChangeSubtaskDraft={setSubtaskDraftTitle}
+        onCreateSubtask={() => void createSessionSubtaskFromDraft()}
+        onToggleSubtaskCompletion={(subtaskId, completed) => void toggleSessionSubtaskCompletion(subtaskId, completed)}
+        onDeleteSubtask={(subtaskId) => void deleteSessionSubtaskFromDialog(subtaskId)}
         onOpenBoard={() => {
           setIsSessionTaskDialogOpen(false);
           openTaskBoard();

@@ -153,14 +153,30 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(publicPath, 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Bina App server running on port ${PORT}`);
+const server = app.listen(PORT);
+
+server.once('error', (error: NodeJS.ErrnoException) => {
+  console.error(`❌ Failed to start Bina App server on port ${PORT}:`, error);
+  void recordCodexServerCrash({
+    type: 'serverStartupError',
+    origin: `listen:${PORT}`,
+    message: error.message,
+    stack: error.stack || null,
+  })
+    .catch(() => {})
+    .finally(() => {
+      process.exit(1);
+    });
 });
 
-void startCodexQueueWorker()
-  .then(() => {
-    console.log('🤖 Codex queue worker started');
-  })
-  .catch((error) => {
-    console.error('❌ Failed to start Codex queue worker:', error);
-  });
+server.once('listening', () => {
+  console.log(`🚀 Bina App server running on port ${PORT}`);
+
+  void startCodexQueueWorker()
+    .then(() => {
+      console.log('🤖 Codex queue worker started');
+    })
+    .catch((error) => {
+      console.error('❌ Failed to start Codex queue worker:', error);
+    });
+});

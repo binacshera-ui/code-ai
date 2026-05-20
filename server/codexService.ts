@@ -218,12 +218,19 @@ export interface CodexReasoningLevelOption {
   description: string | null;
 }
 
+export interface CodexResponseSpeedOption {
+  id: string;
+  label: string;
+  description: string | null;
+}
+
 export interface CodexAvailableModel {
   slug: string;
   displayName: string;
   description: string | null;
   defaultReasoningLevel: string | null;
   supportedReasoningLevels: CodexReasoningLevelOption[];
+  availableResponseSpeedIds?: string[];
   isConfiguredDefault: boolean;
 }
 
@@ -242,10 +249,19 @@ export interface CodexPermissionSnapshot {
   runtime?: CodexPermissionRuntimeState | null;
 }
 
+export interface CodexResponseSpeedSnapshot {
+  selectedModeId: string | null;
+  selectedLabel: string;
+  configurable: boolean;
+  note: string | null;
+  availableModes: CodexResponseSpeedOption[];
+}
+
 export interface CodexModelCatalog {
   models: CodexAvailableModel[];
   selectedModel: string | null;
   selectedReasoningEffort: string | null;
+  responseSpeed: CodexResponseSpeedSnapshot | null;
   permissions: CodexPermissionSnapshot | null;
 }
 
@@ -284,6 +300,12 @@ interface RawCodexDebugModelsResponse {
       effort?: string;
       description?: string;
     }>;
+    additional_speed_tiers?: string[];
+    service_tiers?: Array<{
+      id?: string;
+      name?: string;
+      description?: string;
+    }>;
     visibility?: string;
   }>;
 }
@@ -298,6 +320,12 @@ interface RawSessionMetaPayload {
   source?: string;
   model_provider?: string;
   base_instructions?: unknown;
+}
+
+interface CodexConfigDefaults {
+  model: string | null;
+  reasoningEffort: string | null;
+  serviceTier: string | null;
 }
 
 interface ActiveCodexRun {
@@ -429,6 +457,28 @@ function normalizeExecutionSettingValue(value: string | null | undefined): strin
   return trimmed ? trimmed : null;
 }
 
+function normalizeCodexServiceTierValue(value: string | null | undefined): 'fast' | 'flex' | null {
+  const normalized = normalizeExecutionSettingValue(value)?.toLowerCase() || null;
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === 'standard') {
+    return 'flex';
+  }
+
+  if (normalized === 'priority') {
+    return 'fast';
+  }
+
+  return normalized === 'fast' || normalized === 'flex' ? normalized : null;
+}
+
+function normalizeCodexServiceTierConfigValue(value: string | null | undefined): 'fast' | null {
+  const normalized = normalizeCodexServiceTierValue(value);
+  return normalized === 'fast' ? 'fast' : null;
+}
+
 function buildCodexProcessEnv(profile: CodexProfile): NodeJS.ProcessEnv {
   return {
     ...process.env,
@@ -513,6 +563,64 @@ function readRootTomlString(rawToml: string, key: string): string | null {
 
   const bareMatch = rawToml.match(new RegExp(`^\\s*${escapedKey}\\s*=\\s*([^\\s#]+)`, 'm'));
   return bareMatch?.[1]?.trim() || null;
+}
+
+async function writeRootTomlString(
+  filePath: string,
+  key: string,
+  value: string | null
+): Promise<void> {
+  let raw = '';
+
+  try {
+    raw = await fs.readFile(filePath, 'utf-8');
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const linePattern = new RegExp(`^\\s*${escapedKey}\\s*=\\s*.*$`, 'm');
+  const nextLine = value ? `${key} = "${value}"` : '';
+  let nextRaw = raw;
+
+  if (linePattern.test(nextRaw)) {
+    nextRaw = nextLine
+      ? nextRaw.replace(linePattern, nextLine)
+      : nextRaw.replace(linePattern, '').replace(/\n{3,}/g, '\n\n');
+  } else if (nextLine) {
+    nextRaw = `${nextLine}\n${nextRaw}`.trimEnd() + '\n';
+  }
+
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, nextRaw, 'utf-8');
+}
+
+async function normalizeLegacyCodexServiceTierConfig(filePath: string): Promise<void> {
+  let raw = '';
+
+  try {
+    raw = await fs.readFile(filePath, 'utf-8');
+  } catch (error: any) {
+    if (error?.code === 'ENOENT' || error?.code === 'EACCES' || error?.code === 'EPERM') {
+      return;
+    }
+    throw error;
+  }
+
+  const currentValue = readRootTomlString(raw, 'service_tier');
+  if (!currentValue) {
+    return;
+  }
+
+  const normalizedValue = normalizeCodexServiceTierConfigValue(currentValue);
+  const normalizedCurrentValue = normalizeExecutionSettingValue(currentValue);
+  if (normalizedCurrentValue === normalizedValue) {
+    return;
+  }
+
+  await writeRootTomlString(filePath, 'service_tier', normalizedValue);
 }
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -2440,20 +2548,23 @@ function buildPromptWithAttachments(
   };
 }
 
-async function readCodexExecutionDefaults(profile: CodexProfile): Promise<CodexExecutionConfig> {
+async function readCodexExecutionDefaults(profile: CodexProfile): Promise<CodexConfigDefaults> {
   const configPath = path.join(profile.codexHome, 'config.toml');
 
   try {
+    await normalizeLegacyCodexServiceTierConfig(configPath);
     const raw = await fs.readFile(configPath, 'utf-8');
     return {
       model: normalizeExecutionSettingValue(readRootTomlString(raw, 'model')),
       reasoningEffort: normalizeExecutionSettingValue(readRootTomlString(raw, 'model_reasoning_effort')),
+      serviceTier: normalizeCodexServiceTierValue(readRootTomlString(raw, 'service_tier')),
     };
   } catch (error: any) {
     if (error?.code === 'ENOENT') {
       return {
         model: null,
         reasoningEffort: null,
+        serviceTier: null,
       };
     }
 
@@ -2461,6 +2572,7 @@ async function readCodexExecutionDefaults(profile: CodexProfile): Promise<CodexE
       return {
         model: null,
         reasoningEffort: null,
+        serviceTier: null,
       };
     }
 
@@ -2535,6 +2647,21 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
         description: normalizeExecutionSettingValue(entry?.description),
         defaultReasoningLevel: normalizeExecutionSettingValue(entry?.default_reasoning_level),
         supportedReasoningLevels,
+        availableResponseSpeedIds: Array.from(new Set(
+          [
+            'flex',
+            ...(Array.isArray(entry?.additional_speed_tiers) ? entry.additional_speed_tiers : []),
+            ...(Array.isArray(entry?.service_tiers)
+              ? entry.service_tiers
+                .map((tier) => normalizeCodexServiceTierValue(
+                  normalizeExecutionSettingValue(tier?.id) || normalizeExecutionSettingValue(tier?.name)
+                ))
+                .filter((value): value is string => Boolean(value))
+              : []),
+          ]
+            .map((value) => normalizeCodexServiceTierValue(normalizeExecutionSettingValue(value)) || normalizeExecutionSettingValue(value)?.toLowerCase() || null)
+            .filter((value): value is string => Boolean(value))
+        )),
         isConfiguredDefault: false,
       };
     })
@@ -2548,7 +2675,79 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
   return models.map((model) => ({
     ...model,
     supportedReasoningLevels: model.supportedReasoningLevels.map((level) => ({ ...level })),
+    availableResponseSpeedIds: [...(model.availableResponseSpeedIds || [])],
   }));
+}
+
+function buildCodexResponseSpeedSnapshot(
+  selectedModelOption: CodexAvailableModel | null,
+  defaults: CodexConfigDefaults
+): CodexResponseSpeedSnapshot {
+  if (!selectedModelOption) {
+    return {
+      selectedModeId: null,
+      selectedLabel: 'לא נתמך',
+      configurable: false,
+      note: 'בחר מודל כדי לבדוק אילו מצבי מהירות זמינים ב-Codex CLI.',
+      availableModes: [],
+    };
+  }
+
+  const supportsFast = Boolean(selectedModelOption.availableResponseSpeedIds?.includes('fast'));
+  const selectedModeId = defaults.serviceTier === 'fast' ? 'fast' : 'flex';
+  return {
+    selectedModeId,
+    selectedLabel: selectedModeId === 'fast' ? 'מהיר' : 'רגיל',
+    configurable: true,
+    note: supportsFast
+      ? 'Codex response speed נשלט דרך service_tier בקובץ config.toml.'
+      : `למודל ${selectedModelOption.displayName} יש כרגע tier רגיל בלבד.`,
+    availableModes: [
+      {
+        id: 'flex',
+        label: 'רגיל',
+        description: 'תצורת ברירת המחדל של Codex CLI ליציבות ושימוש מאוזן.',
+      },
+      ...(supportsFast
+        ? [{
+          id: 'fast',
+          label: 'מהיר',
+          description: 'מהירות תגובה גבוהה יותר עם שימוש מוגבר.',
+        }]
+        : []),
+    ],
+  };
+}
+
+export async function updateCodexResponseSpeed(profileId: string | undefined, modeId: string): Promise<CodexModelCatalog> {
+  const profile = resolveProfile(profileId);
+  const normalizedModeId = normalizeCodexServiceTierValue(modeId);
+  if (!normalizedModeId) {
+    throw new Error('Codex response speed mode is invalid');
+  }
+
+  const [models, defaults] = await Promise.all([
+    loadCodexAvailableModels(profile),
+    readCodexExecutionDefaults(profile),
+  ]);
+  const selectedModel = defaults.model && models.some((model) => model.slug === defaults.model)
+    ? defaults.model
+    : models[0]?.slug || null;
+  const selectedModelOption = selectedModel
+    ? models.find((model) => model.slug === selectedModel) || null
+    : null;
+  const supportsFast = Boolean(selectedModelOption?.availableResponseSpeedIds?.includes('fast'));
+  if (normalizedModeId === 'fast' && !supportsFast) {
+    throw new Error('Fast mode is not available for the selected Codex model');
+  }
+
+  const configPath = path.join(profile.codexHome, 'config.toml');
+  await writeRootTomlString(
+    configPath,
+    'service_tier',
+    normalizeCodexServiceTierConfigValue(normalizedModeId)
+  );
+  return getCodexModelCatalog(profile.id);
 }
 
 export async function getCodexModelCatalog(profileId?: string): Promise<CodexModelCatalog> {
@@ -2576,9 +2775,11 @@ export async function getCodexModelCatalog(profileId?: string): Promise<CodexMod
       ...model,
       isConfiguredDefault: model.slug === selectedModel,
       supportedReasoningLevels: model.supportedReasoningLevels.map((level) => ({ ...level })),
+      availableResponseSpeedIds: [...(model.availableResponseSpeedIds || [])],
     })),
     selectedModel,
     selectedReasoningEffort,
+    responseSpeed: buildCodexResponseSpeedSnapshot(selectedModelOption, defaults),
     permissions: null,
   };
 }

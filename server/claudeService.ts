@@ -21,6 +21,7 @@ import type {
   CodexRateLimitSnapshot,
   CodexRateLimitWindow,
   CodexReasoningLevelOption,
+  CodexResponseSpeedSnapshot,
   CodexSessionDetail,
   CodexSessionMessage,
   CodexSessionSummary,
@@ -43,6 +44,8 @@ interface ClaudeSettings {
   model?: unknown;
   effortLevel?: unknown;
   availableModels?: unknown;
+  fastMode?: unknown;
+  fastModePerSessionOptIn?: unknown;
 }
 
 interface ClaudeAuthStatusResponse {
@@ -782,6 +785,14 @@ async function fetchClaudeUsageWindows(
   return value;
 }
 
+function normalizeBoolean(value: unknown): boolean | null {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  return null;
+}
+
 async function readClaudeAuthStatus(profile: CodexProfile): Promise<ClaudeAuthStatusResponse | null> {
   const cached = authStatusCache.get(profile.id);
   if (cached && cached.expiresAt > Date.now()) {
@@ -825,6 +836,18 @@ async function readClaudeSettings(profile: CodexProfile): Promise<ClaudeSettings
 
     throw error;
   }
+}
+
+async function writeClaudeSettings(profile: CodexProfile, patch: Partial<ClaudeSettings>): Promise<void> {
+  const settingsPath = path.join(profile.codexHome, 'settings.json');
+  const current = await readClaudeSettings(profile);
+  const next = {
+    ...current,
+    ...patch,
+  };
+
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.writeFile(settingsPath, `${JSON.stringify(next, null, 2)}\n`, 'utf-8');
 }
 
 async function readFileChunk(filePath: string, start: number, length: number): Promise<string> {
@@ -1570,6 +1593,7 @@ export async function getClaudeModelCatalog(profileId?: string): Promise<CodexMo
 
   const selectedModel = configuredModel || models[0]?.slug || null;
   const selectedReasoningEffort = normalizeReasoningEffort(settings.effortLevel);
+  const selectedFastMode = normalizeBoolean(settings.fastMode) === true;
 
   const nextModels = models.map((model) => ({
     ...model,
@@ -1588,8 +1612,43 @@ export async function getClaudeModelCatalog(profileId?: string): Promise<CodexMo
     models: nextModels,
     selectedModel,
     selectedReasoningEffort,
+    responseSpeed: {
+      selectedModeId: selectedFastMode ? 'fast' : 'standard',
+      selectedLabel: selectedFastMode ? 'מהיר' : 'רגיל',
+      configurable: true,
+      note: normalizeBoolean(settings.fastModePerSessionOptIn)
+        ? 'Claude מוגדר ל-fast mode לפי בחירה פר-סשן.'
+        : 'Claude מהיר נשלט דרך fastMode ב-settings.json.',
+      availableModes: [
+        {
+          id: 'standard',
+          label: 'רגיל',
+          description: 'תגובה רגילה עם צריכת usage רגילה.',
+        },
+        {
+          id: 'fast',
+          label: 'מהיר',
+          description: 'תגובה מהירה יותר כאשר fast mode מופעל.',
+        },
+      ],
+    },
     permissions: null,
   };
+}
+
+export async function updateClaudeResponseSpeed(profileId: string | undefined, modeId: string): Promise<CodexModelCatalog> {
+  const profile = resolveProfile(profileId);
+  const normalizedModeId = modeId.trim().toLowerCase();
+  if (!['standard', 'fast'].includes(normalizedModeId)) {
+    throw new Error('Claude response speed mode is invalid');
+  }
+
+  await writeClaudeSettings(profile, {
+    fastMode: normalizedModeId === 'fast',
+  });
+
+  modelCatalogCache.delete(profile.id);
+  return getClaudeModelCatalog(profile.id);
 }
 
 export async function listClaudeSessions(

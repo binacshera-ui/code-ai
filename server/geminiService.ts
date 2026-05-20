@@ -1347,6 +1347,13 @@ export async function getGeminiModelCatalog(profileId?: string): Promise<CodexMo
     })),
     selectedModel,
     selectedReasoningEffort,
+    responseSpeed: {
+      selectedModeId: null,
+      selectedLabel: 'לא נתמך',
+      configurable: false,
+      note: 'Gemini CLI לא חושף כרגע מצב מהירות תגובה מפורש ב־CLI הזמין לנו.',
+      availableModes: [],
+    },
     permissions: null,
   };
 
@@ -1362,6 +1369,7 @@ export async function getGeminiModelCatalog(profileId?: string): Promise<CodexMo
     })),
     selectedModel: catalog.selectedModel,
     selectedReasoningEffort: catalog.selectedReasoningEffort,
+    responseSpeed: catalog.responseSpeed,
     permissions: null,
   };
 }

@@ -23,6 +23,7 @@ import {
   listAgentSessions,
   runAgentPrompt,
   updateAgentPermissionMode,
+  updateAgentResponseSpeed,
 } from './agentService.js';
 import { CLIENT_CRASH_LOG } from './codexCrashLogs.js';
 import {
@@ -87,6 +88,13 @@ import {
   setTaskSessionCompletion,
   updateSessionTask,
 } from './codexSessionTasks.js';
+import {
+  createSessionSubtask,
+  deleteSessionSubtask,
+  listSessionSubtasks,
+  removeSessionSubtasks,
+  setSessionSubtaskCompletion,
+} from './codexSessionSubtasks.js';
 import { buildSessionPromptAdditionsContext } from './sessionPromptAdditions.js';
 import { listUnifiedSkills } from './skillCatalogService.js';
 import { getSelectedPermissionModeId } from './providerPermissions.js';
@@ -1035,6 +1043,22 @@ router.post('/permissions', requireCodexAccess, async (req, res) => {
   }
 });
 
+router.post('/response-speed', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const modeId = typeof req.body?.modeId === 'string' ? req.body.modeId.trim() : '';
+    if (!modeId) {
+      res.status(400).json({ error: 'Response speed mode is required' });
+      return;
+    }
+
+    const catalog = await updateAgentResponseSpeed(profileId, modeId);
+    res.json(catalog);
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update response speed' });
+  }
+});
+
 router.get('/rate-limits', requireCodexAccess, async (req, res) => {
   try {
     const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
@@ -1385,6 +1409,7 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
       await deleteForkDraftSession(sessionId);
       await deleteSessionMetadata(profileId, sessionId);
       await removeSessionFromTasks(profileId, sessionId);
+      await removeSessionSubtasks(profileId, sessionId);
       res.json({
         deleted: true,
         sessionId,
@@ -1403,6 +1428,7 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
     }
     await deleteSessionMetadata(profileId, sessionId);
     await removeSessionFromTasks(profileId, sessionId);
+    await removeSessionSubtasks(profileId, sessionId);
     res.json({
       deleted: true,
       sessionId,
@@ -2260,6 +2286,90 @@ router.post('/tasks/:taskId/sessions/:sessionId/completion', requireCodexAccess,
     res.json({ task });
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to update task completion' });
+  }
+});
+
+router.get('/session-subtasks', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionId = typeof req.query.sessionId === 'string' && req.query.sessionId.trim()
+      ? req.query.sessionId.trim()
+      : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const subtasks = await listSessionSubtasks(profileId, sessionId);
+    res.json({ subtasks });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session subtasks' });
+  }
+});
+
+router.post('/session-subtasks', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+      ? req.body.sessionId.trim()
+      : undefined;
+    const title = typeof req.body?.title === 'string' ? req.body.title : '';
+
+    if (!profileId || !sessionId) {
+      res.status(400).json({ error: 'Profile id and session id are required' });
+      return;
+    }
+
+    const subtask = await createSessionSubtask(profileId, sessionId, title);
+    res.status(201).json({ subtask });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to create session subtask' });
+  }
+});
+
+router.post('/session-subtasks/:subtaskId/completion', requireCodexAccess, async (req, res) => {
+  try {
+    const subtaskId = readRouteParam(req.params.subtaskId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const completed = req.body?.completed !== false;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const subtask = await setSessionSubtaskCompletion(profileId, subtaskId, completed);
+    res.json({ subtask });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update session subtask completion' });
+  }
+});
+
+router.delete('/session-subtasks/:subtaskId', requireCodexAccess, async (req, res) => {
+  try {
+    const subtaskId = readRouteParam(req.params.subtaskId);
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+        ? req.body.profileId.trim()
+        : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    await deleteSessionSubtask(profileId, subtaskId);
+    res.json({ deleted: true, subtaskId });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete session subtask' });
   }
 });
 
