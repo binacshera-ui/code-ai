@@ -66,6 +66,25 @@ import {
 } from './codexForkSessions.js';
 import { createProjectAnchor, deleteProjectAnchor, listProjectAnchors } from './codexProjectAnchors.js';
 import {
+  approveAgentSession,
+  buildAgentExecutionPrompt,
+  buildAgentPlanPrompt,
+  createAgentSessionDraft,
+  getAgentSessionLinkForSession,
+  getAgentSessionRecord,
+  listAgentSessionLinksForSourceProfile,
+  listAgentSessionRecords,
+  markAgentSessionLaunched,
+  recordAgentSessionLinkedSession,
+  resolveAgentProviderProfileId,
+  saveAgentSessionPlan,
+  updateAgentRuntimeStatus,
+  updateAgentSessionGoal,
+  type AgentSessionAgentPlan,
+  type AgentSessionLinkRecord,
+  type AgentSessionRecord,
+} from './codexAgentSessions.js';
+import {
   deleteSessionContextSelection,
   getSessionContextSelection,
   rebindSessionContextSelection,
@@ -123,6 +142,10 @@ const CODEX_CLIENT_LOG_FILE = CLIENT_CRASH_LOG;
 const DEVICE_UNLOCK_COOKIE = 'code_ai_device_unlock';
 const FORUM_SESSION_COOKIE = 'forum.session';
 const SUPPORT_WEBHOOK_TOKEN = process.env.CODEX_SUPPORT_WEBHOOK_TOKEN?.trim() || '';
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
 
 function sanitizeFileName(fileName: string): string {
   const extension = path.extname(fileName);
@@ -303,6 +326,117 @@ function findConfiguredProfile(profileId: string | undefined) {
   return CODEX_APP_CONFIG.profiles.find((candidate) => candidate.id === profileId) || null;
 }
 
+function resolveVisibleSourceProfile(profileId: string | undefined) {
+  const configuredProfile = findConfiguredProfile(profileId);
+  if (!configuredProfile) {
+    return null;
+  }
+
+  if (configuredProfile.mode === 'standard' || !configuredProfile.sourceProfileId) {
+    return configuredProfile;
+  }
+
+  return findConfiguredProfile(configuredProfile.sourceProfileId);
+}
+
+function buildAgentSessionMeta(
+  record: AgentSessionRecord,
+  link: AgentSessionLinkRecord
+): CodexSessionSummary['agentSession'] {
+  const linkedAgent = link.agentId
+    ? record.plan?.agents.find((agent) => agent.id === link.agentId) || null
+    : null;
+
+  return {
+    id: record.id,
+    title: record.title,
+    goal: record.goal,
+    status: record.status,
+    kind: link.kind,
+    sourceProfileId: record.sourceProfileId,
+    linkedProfileId: link.profileId,
+    plannerProvider: record.plannerProvider || null,
+    topicId: record.topicId,
+    agentId: link.agentId,
+    agentName: linkedAgent?.name || null,
+    approvedAt: record.approvedAt,
+    launchedAt: record.launchedAt,
+    plannerSessionId: record.plannerSessionId,
+    sharedStatusPath: record.plan?.sharedStatusPath || record.sharedStatusPath || null,
+    eventsPath: record.plan?.eventsPath || record.eventsPath || null,
+    plan: record.plan ? {
+      title: record.plan.title,
+      goal: record.plan.goal,
+      sharedStatusPath: record.plan.sharedStatusPath,
+      eventsPath: record.plan.eventsPath,
+      coordinationRules: [...record.plan.coordinationRules],
+      agents: record.plan.agents.map((agent) => ({
+        ...agent,
+        scopePaths: [...agent.scopePaths],
+        dependsOn: [...agent.dependsOn],
+        runtimeStatus: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.runtimeStatus || null,
+        linkedSessionId: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.linkedSessionId || null,
+        queueItemId: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.queueItemId || null,
+        updatedAt: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.updatedAt || null,
+        lastMessage: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.lastMessage || null,
+        lastError: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.lastError || null,
+      })),
+    } : null,
+  };
+}
+
+async function resolveEffectiveProfileIdForSession(
+  requestedProfileId: string | undefined,
+  sessionId: string
+): Promise<string | undefined> {
+  const linked = await getAgentSessionLinkForSession(sessionId);
+  if (!linked) {
+    return requestedProfileId;
+  }
+
+  return linked.profileId;
+}
+
+async function loadAgentLinkedSessionSummaries(
+  sourceProfileId: string,
+  query: string,
+  limit?: number
+): Promise<CodexSessionSummary[]> {
+  const links = await listAgentSessionLinksForSourceProfile(sourceProfileId);
+  if (links.length === 0) {
+    return [];
+  }
+
+  const profileIds = [...new Set(links.map((link) => link.profileId))];
+  const linkedIds = new Set(links.map((link) => link.sessionId));
+  const linksBySessionId = new Map(links.map((link) => [link.sessionId, link]));
+  const recordsById = new Map<string, AgentSessionRecord>();
+  const agentSessionIds = [...new Set(links.map((link) => link.agentSessionId))];
+  await Promise.all(agentSessionIds.map(async (agentSessionId) => {
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (record) {
+      recordsById.set(agentSessionId, record);
+    }
+  }));
+
+  const results = await Promise.all(profileIds.map(async (profileId) => (
+    listAgentSessions(profileId, query, limit ? Math.max(limit * 4, 80) : 160)
+  )));
+
+  return results
+    .flat()
+    .filter((session) => linkedIds.has(session.id))
+    .map((session) => {
+      const link = linksBySessionId.get(session.id);
+      const record = link ? recordsById.get(link.agentSessionId) || null : null;
+      return {
+        ...session,
+        profileId: sourceProfileId,
+        agentSession: link && record ? buildAgentSessionMeta(record, link) : null,
+      };
+    });
+}
+
 async function decorateSessionSummaryListForClient(
   profileId: string | undefined,
   sessions: CodexSessionSummary[]
@@ -312,11 +446,29 @@ async function decorateSessionSummaryListForClient(
   }
 
   const profile = findConfiguredProfile(profileId);
+  const links = await listAgentSessionLinksForSourceProfile(profileId);
+  const recordsById = new Map<string, AgentSessionRecord>();
+  await Promise.all([...new Set(links.map((link) => link.agentSessionId))].map(async (agentSessionId) => {
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (record) {
+      recordsById.set(agentSessionId, record);
+    }
+  }));
+  const linksBySessionId = new Map(links.map((link) => [link.sessionId, link]));
+  const enriched = sessions.map((session) => {
+    const link = linksBySessionId.get(session.id);
+    const record = link ? recordsById.get(link.agentSessionId) || null : null;
+    return {
+      ...session,
+      agentSession: link && record ? buildAgentSessionMeta(record, link) : null,
+    };
+  });
+
   if (!profile || !isSupportProfile(profile)) {
-    return sessions;
+    return enriched;
   }
 
-  return Promise.all(sessions.map((session) => decorateSupportSessionSummary(profile, session)));
+  return Promise.all(enriched.map((session) => decorateSupportSessionSummary(profile, session)));
 }
 
 async function decorateSessionDetailForClient(
@@ -327,12 +479,19 @@ async function decorateSessionDetailForClient(
     return session;
   }
 
+  const linked = await getAgentSessionLinkForSession(session.id);
+  const linkedRecord = linked ? await getAgentSessionRecord(linked.agentSessionId) : null;
+  const enriched = {
+    ...session,
+    agentSession: linked && linkedRecord ? buildAgentSessionMeta(linkedRecord, linked) : null,
+  };
+
   const profile = findConfiguredProfile(profileId);
   if (!profile || !isSupportProfile(profile)) {
-    return session;
+    return enriched;
   }
 
-  return decorateSupportSessionDetail(profile, session);
+  return decorateSupportSessionDetail(profile, enriched);
 }
 
 async function normalizeSessionDetailForOperations(
@@ -717,7 +876,12 @@ async function copySessionContextSelectionToSession(
   targetSessionId: string
 ) {
   const selection = await getSessionContextSelection(sourceProfileId, sourceSessionId);
-  if (selection.anchorIds.length === 0 && selection.skillIds.length === 0 && selection.reminderIds.length === 0) {
+  if (
+    selection.anchorIds.length === 0
+    && selection.skillIds.length === 0
+    && selection.reminderIds.length === 0
+    && !selection.agentSessionDraftId
+  ) {
     return;
   }
 
@@ -821,6 +985,28 @@ function buildTransferAutoPrompt(lastEntry: CodexSessionDetail['timeline'][numbe
   }
 
   return 'המשך עכשיו מאותה נקודה בצורה טבעית, בלי לסכם את השיחה.';
+}
+
+function readAppProvider(value: unknown): AppProvider | null {
+  if (value === 'codex' || value === 'claude' || value === 'gemini') {
+    return value;
+  }
+  return null;
+}
+
+async function readAgentPlanJsonFromDisk(record: AgentSessionRecord): Promise<unknown> {
+  const raw = await fs.readFile(record.planPath, 'utf-8');
+  try {
+    return JSON.parse(raw);
+  } catch (error: any) {
+    throw new Error(`תכנית הסוכנים נכתבה אבל אינה JSON תקין: ${error?.message || 'Invalid JSON'}`);
+  }
+}
+
+function assertAgentSessionAccess(record: AgentSessionRecord, sourceProfileId: string) {
+  if (record.sourceProfileId !== sourceProfileId) {
+    throw new Error('סשן הסוכנים המבוקש לא שייך לפרופיל הפעיל.');
+  }
 }
 
 function isUserTimelineMessage(entry: CodexSessionDetail['timeline'][number] | undefined): boolean {
@@ -1301,9 +1487,15 @@ router.get('/sessions', requireCodexAccess, async (req, res) => {
     const query = typeof req.query.query === 'string' ? req.query.query : '';
     const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined;
 
+    const primarySessions = await listAgentSessions(profileId, query, limit);
+    const linkedSessions = profileId ? await loadAgentLinkedSessionSummaries(profileId, query, limit) : [];
+    const mergedSessionMap = new Map<string, CodexSessionSummary>();
+    for (const session of [...primarySessions, ...linkedSessions]) {
+      mergedSessionMap.set(session.id, session);
+    }
     const sessions = await decorateSessionSummaryListForClient(
       profileId,
-      await listAgentSessions(profileId, query, limit)
+      [...mergedSessionMap.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     );
     const hiddenIds = profileId ? await listHiddenSessionIds(profileId) : new Set<string>();
     const topicMap = profileId ? await getSessionTopicMap(profileId) : {};
@@ -1394,11 +1586,12 @@ router.post('/sessions/:sessionId/hide', requireCodexAccess, async (req, res) =>
 router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
   try {
     const sessionId = readRouteParam(req.params.sessionId);
-    const profileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+    const requestedProfileId = typeof req.query.profile === 'string' && req.query.profile.trim()
       ? req.query.profile.trim()
       : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
         ? req.body.profileId.trim()
         : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
 
     if (!profileId) {
       res.status(400).json({ error: 'Profile id is required' });
@@ -1407,13 +1600,13 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
 
     if (isDraftSessionKey(sessionId)) {
       await deleteForkDraftSession(sessionId);
-      await deleteSessionMetadata(profileId, sessionId);
-      await removeSessionFromTasks(profileId, sessionId);
-      await removeSessionSubtasks(profileId, sessionId);
+      await deleteSessionMetadata(requestedProfileId || profileId, sessionId);
+      await removeSessionFromTasks(requestedProfileId || profileId, sessionId);
+      await removeSessionSubtasks(requestedProfileId || profileId, sessionId);
       res.json({
         deleted: true,
         sessionId,
-        profileId,
+        profileId: requestedProfileId || profileId,
         draft: true,
       });
       return;
@@ -1426,13 +1619,13 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
         throw error;
       }
     }
-    await deleteSessionMetadata(profileId, sessionId);
-    await removeSessionFromTasks(profileId, sessionId);
-    await removeSessionSubtasks(profileId, sessionId);
+    await deleteSessionMetadata(requestedProfileId || profileId, sessionId);
+    await removeSessionFromTasks(requestedProfileId || profileId, sessionId);
+    await removeSessionSubtasks(requestedProfileId || profileId, sessionId);
     res.json({
       deleted: true,
       sessionId,
-      profileId,
+      profileId: requestedProfileId || profileId,
       draft: false,
     });
   } catch (error: any) {
@@ -1443,7 +1636,8 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
 router.get('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
   try {
     const sessionId = readRouteParam(req.params.sessionId);
-    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const requestedProfileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
     const tail = typeof req.query.tail === 'string'
       ? Number.parseInt(req.query.tail, 10)
       : undefined;
@@ -1459,13 +1653,17 @@ router.get('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
         full,
       })
     );
-    const topicMap = profileId ? await getSessionTopicMap(profileId) : {};
-    const titleMap = profileId ? await getSessionTitleMap(profileId) : {};
+    const visibleProfileId = requestedProfileId || profileId;
+    const topicMap = visibleProfileId ? await getSessionTopicMap(visibleProfileId) : {};
+    const titleMap = visibleProfileId ? await getSessionTitleMap(visibleProfileId) : {};
     res.json({
       session: {
         ...session,
-        title: profileId ? titleMap[session.id] || session.title : session.title,
-        topic: profileId ? topicMap[session.id] || null : null,
+        profileId: visibleProfileId || session.profileId,
+        title: visibleProfileId ? titleMap[session.id] || session.title : session.title,
+        topic: session.agentSession?.topicId
+          ? Object.values(topicMap).find((topic) => topic.id === session.agentSession?.topicId) || null
+          : visibleProfileId ? topicMap[session.id] || null : null,
       },
     });
   } catch (error: any) {
@@ -1477,9 +1675,10 @@ router.get('/sessions/:sessionId/changes/:entryId', requireCodexAccess, async (r
   try {
     const sessionId = readRouteParam(req.params.sessionId);
     const entryId = readRouteParam(req.params.entryId);
-    const profileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+    const requestedProfileId = typeof req.query.profile === 'string' && req.query.profile.trim()
       ? req.query.profile.trim()
       : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
     const record = await getAgentSessionChangeRecord(sessionId, entryId, profileId);
     res.json({ record });
   } catch (error: any) {
@@ -1490,9 +1689,10 @@ router.get('/sessions/:sessionId/changes/:entryId', requireCodexAccess, async (r
 router.post('/sessions/:sessionId/delete-turn', requireCodexAccess, async (req, res) => {
   try {
     const sessionId = readRouteParam(req.params.sessionId);
-    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
       ? req.body.profileId.trim()
       : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
     const entryId = typeof req.body?.entryId === 'string' && req.body.entryId.trim()
       ? req.body.entryId.trim()
       : undefined;
@@ -1989,10 +2189,211 @@ router.post('/session-context-selection', requireCodexAccess, async (req, res) =
       anchorIds: req.body?.anchorIds,
       skillIds: req.body?.skillIds,
       reminderIds: req.body?.reminderIds,
+      agentSessionDraftId: req.body?.agentSessionDraftId,
     });
     res.json({ selection });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to update session context selection' });
+  }
+});
+
+router.get('/agent-sessions', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const cwdInput = typeof req.query.cwd === 'string' && req.query.cwd.trim()
+      ? req.query.cwd.trim()
+      : null;
+    const cwd = cwdInput
+      ? (await resolveCodexFolderPath(cwdInput, sourceProfile.id)).resolvedPath
+      : null;
+    const agentSessions = await listAgentSessionRecords(sourceProfile.id, cwd);
+    res.json({ agentSessions });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load agent sessions' });
+  }
+});
+
+router.post('/agent-sessions', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const cwdInput = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : sourceProfile.workspaceCwd;
+    const cwd = (await resolveCodexFolderPath(cwdInput, sourceProfile.id)).resolvedPath;
+    const plannerProvider = readAppProvider(req.body?.plannerProvider) || sourceProfile.provider;
+    const title = typeof req.body?.title === 'string' && req.body.title.trim()
+      ? req.body.title.trim()
+      : `סשן סוכנים · ${path.basename(cwd) || 'workspace'}`;
+    const goal = typeof req.body?.goal === 'string' ? req.body.goal : '';
+    const topicId = typeof req.body?.topicId === 'string' && req.body.topicId.trim()
+      ? req.body.topicId.trim()
+      : null;
+
+    const agentSession = await createAgentSessionDraft({
+      sourceProfile,
+      cwd,
+      title,
+      goal,
+      plannerProvider,
+      topicId,
+    });
+
+    res.status(201).json({ agentSession });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to create agent session draft' });
+  }
+});
+
+router.get('/agent-sessions/:agentSessionId', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const agentSessionId = readRouteParam(req.params.agentSessionId);
+    const agentSession = await getAgentSessionRecord(agentSessionId);
+    if (!agentSession) {
+      res.status(404).json({ error: 'Agent session was not found' });
+      return;
+    }
+    assertAgentSessionAccess(agentSession, sourceProfile.id);
+
+    res.json({ agentSession });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to load agent session' });
+  }
+});
+
+router.post('/agent-sessions/:agentSessionId/goal', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const agentSessionId = readRouteParam(req.params.agentSessionId);
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (!record) {
+      res.status(404).json({ error: 'Agent session was not found' });
+      return;
+    }
+    assertAgentSessionAccess(record, sourceProfile.id);
+
+    const goal = typeof req.body?.goal === 'string' ? req.body.goal : '';
+    const agentSession = await updateAgentSessionGoal(agentSessionId, goal);
+    res.json({ agentSession });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update agent session goal' });
+  }
+});
+
+router.post('/agent-sessions/:agentSessionId/plan', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const agentSessionId = readRouteParam(req.params.agentSessionId);
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (!record) {
+      res.status(404).json({ error: 'Agent session was not found' });
+      return;
+    }
+    assertAgentSessionAccess(record, sourceProfile.id);
+
+    const rawPlan = req.body?.plan;
+    const agentSession = await saveAgentSessionPlan(agentSessionId, rawPlan, {
+      plannerSessionId: record.plannerSessionId,
+      plannerProfileId: record.plannerProfileId,
+    });
+    res.json({ agentSession });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to save agent session plan' });
+  }
+});
+
+router.post('/agent-sessions/:agentSessionId/approve', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const agentSessionId = readRouteParam(req.params.agentSessionId);
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (!record) {
+      res.status(404).json({ error: 'Agent session was not found' });
+      return;
+    }
+    assertAgentSessionAccess(record, sourceProfile.id);
+
+    const approvedRecord = await approveAgentSession(agentSessionId);
+    const launchItems = [];
+    const agents = approvedRecord.plan?.agents || [];
+
+    for (const agent of agents) {
+      const internalProfileId = resolveAgentProviderProfileId(sourceProfile, agent.provider);
+      const item = await enqueueCodexQueueItem({
+        profileId: internalProfileId,
+        sourceProfileId: sourceProfile.id,
+        queueKey: `agent:${approvedRecord.id}:${agent.id}:${randomUUID()}`,
+        sessionId: approvedRecord.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.linkedSessionId || undefined,
+        cwd: approvedRecord.cwd,
+        prompt: buildAgentExecutionPrompt(approvedRecord, agent),
+        promptPreview: `${approvedRecord.title} / ${agent.name}`,
+        permissionModeId: 'full',
+        agentSessionId: approvedRecord.id,
+        agentId: agent.id,
+        agentLinkKind: 'agent',
+      });
+      launchItems.push(item);
+      await updateAgentRuntimeStatus(approvedRecord.id, agent.id, {
+        runtimeStatus: 'queued',
+        queueItemId: item.id,
+        linkedSessionId: item.sessionId,
+        lastError: null,
+      });
+    }
+
+    await markAgentSessionLaunched(agentSessionId);
+    const agentSession = await getAgentSessionRecord(agentSessionId);
+    res.json({ agentSession, items: launchItems });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to approve and launch agent session' });
   }
 });
 
@@ -2376,7 +2777,13 @@ router.delete('/session-subtasks/:subtaskId', requireCodexAccess, async (req, re
 router.post('/queue/items', requireCodexAccess, async (req, res) => {
   try {
     const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
-    const profileId = requestedProfileId || 'developer';
+    const visibleProfileId = requestedProfileId || 'developer';
+    const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+      ? req.body.sessionId.trim()
+      : undefined;
+    const profileId = sessionId
+      ? await resolveEffectiveProfileIdForSession(visibleProfileId, sessionId)
+      : visibleProfileId;
     const configuredProfile = findConfiguredProfile(profileId);
     if (!configuredProfile) {
       res.status(404).json({ error: 'The selected profile was not found' });
@@ -2387,9 +2794,6 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       : randomUUID();
     const clientRequestId = typeof req.body?.clientRequestId === 'string' && req.body.clientRequestId.trim()
       ? req.body.clientRequestId.trim()
-      : undefined;
-    const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
-      ? req.body.sessionId.trim()
       : undefined;
     const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
       ? req.body.cwd.trim()
@@ -2408,7 +2812,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       : undefined;
     const recurrence = readRecurringConfig(req.body);
     const cwd = requestedCwd
-      ? (await resolveCodexFolderPath(requestedCwd, profileId)).resolvedPath
+      ? (await resolveCodexFolderPath(requestedCwd, visibleProfileId)).resolvedPath
       : undefined;
     const attachments = (Array.isArray(req.body?.attachments) ? req.body.attachments : [])
       .map((attachment: any): CodexUploadedAttachment | null => {
@@ -2438,7 +2842,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     const isDraftTarget = isDraftSessionKey(sessionId) || isDraftSessionKey(queueKey);
     const hydratedForkDraft = isDraftTarget
       ? await hydrateForkDraftRequest(
-        profileId,
+        visibleProfileId,
         queueKey,
         sessionId,
         contextPrefix,
@@ -2459,6 +2863,9 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     const effectivePromptPreview = supportEnvelope?.promptPreview || promptPreview;
     const effectiveSessionInstruction = buildSupportSessionInstruction(sessionInstruction, supportEnvelope);
     const sessionContextKey = sessionId || queueKey;
+    const sessionContextSelection = sessionContextKey
+      ? await getSessionContextSelection(visibleProfileId, sessionContextKey)
+      : { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null };
     const contextCwd = cwd || (
       sessionId
         ? (await getAgentSessionDetail(sessionId, profileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
@@ -2466,7 +2873,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     );
     const additionsPromptSuffix = sessionContextKey
       ? await buildSessionPromptAdditionsContext({
-        profileId,
+        profileId: visibleProfileId,
         sessionKey: sessionContextKey,
         cwd: contextCwd,
       })
@@ -2477,6 +2884,46 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     const combinedContextPrefix = [hydratedForkDraft.contextPrefix]
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .join('\n\n');
+
+    if (sessionContextSelection.agentSessionDraftId) {
+      const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
+      if (!sourceProfile) {
+        res.status(404).json({ error: 'The selected profile was not found' });
+        return;
+      }
+
+      const existingRecord = await getAgentSessionRecord(sessionContextSelection.agentSessionDraftId);
+      if (!existingRecord) {
+        res.status(404).json({ error: 'Agent session draft was not found' });
+        return;
+      }
+      assertAgentSessionAccess(existingRecord, sourceProfile.id);
+
+      const updatedRecord = await updateAgentSessionGoal(existingRecord.id, effectivePrompt);
+      const plannerProfileId = resolveAgentProviderProfileId(sourceProfile, updatedRecord.plannerProvider);
+      const plannerItem = await enqueueCodexQueueItem({
+        profileId: plannerProfileId,
+        sourceProfileId: sourceProfile.id,
+        queueKey,
+        clientRequestId,
+        sessionId: updatedRecord.plannerSessionId || undefined,
+        cwd: updatedRecord.cwd,
+        prompt: buildAgentPlanPrompt(updatedRecord),
+        promptPreview: `תכנית סוכנים · ${updatedRecord.title}`,
+        contextPrefix: combinedContextPrefix || undefined,
+        attachments,
+        agentSessionId: updatedRecord.id,
+        agentLinkKind: 'planner',
+        permissionModeId: 'full',
+      });
+
+      if (sessionContextKey) {
+        await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      }
+
+      res.status(202).json({ item: plannerItem, agentSession: updatedRecord });
+      return;
+    }
 
     if (supportEnvelope) {
       await recordSupportTurnRequest({
@@ -2489,6 +2936,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
 
     const item = await enqueueCodexQueueItem({
       profileId,
+      sourceProfileId: visibleProfileId,
       queueKey,
       clientRequestId,
       sessionId,
@@ -2504,7 +2952,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     });
 
     if (sessionContextKey) {
-      await deleteSessionContextSelection(profileId, sessionContextKey);
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
     }
 
     res.status(202).json({ item });
@@ -2566,12 +3014,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         ? req.body.message
         : '';
     const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
-    const profileId = requestedProfileId || 'developer';
-    const configuredProfile = findConfiguredProfile(profileId);
-    if (!configuredProfile) {
-      res.status(404).json({ error: 'The selected profile was not found' });
-      return;
-    }
+    const visibleProfileId = requestedProfileId || 'developer';
     const asyncRequested = req.headers['x-codex-async'] === '1' || req.body?.async === true;
     const queueKey = typeof req.body?.queueKey === 'string' && req.body.queueKey.trim()
       ? req.body.queueKey.trim()
@@ -2582,6 +3025,14 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
       ? req.body.sessionId.trim()
       : undefined;
+    const profileId = sessionId
+      ? await resolveEffectiveProfileIdForSession(visibleProfileId, sessionId)
+      : visibleProfileId;
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
     const effectiveQueueKey = queueKey || sessionId || randomUUID();
     const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
       ? req.body.cwd.trim()
@@ -2596,7 +3047,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     }
     const recurrence = readRecurringConfig(req.body);
     const cwd = requestedCwd
-      ? (await resolveCodexFolderPath(requestedCwd, profileId)).resolvedPath
+      ? (await resolveCodexFolderPath(requestedCwd, visibleProfileId)).resolvedPath
       : undefined;
     const attachments = (Array.isArray(req.body?.attachments) ? req.body.attachments : [])
       .map((attachment: any): CodexUploadedAttachment | null => {
@@ -2626,7 +3077,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const isDraftTarget = isDraftSessionKey(sessionId) || isDraftSessionKey(queueKey);
     const hydratedForkDraft = isDraftTarget
       ? await hydrateForkDraftRequest(
-        profileId,
+        visibleProfileId,
         queueKey,
         sessionId,
         contextPrefix,
@@ -2645,11 +3096,12 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       : null;
     const providerPrompt = supportEnvelope?.compiledPrompt || prompt;
     const sessionContextKey = sessionId || effectiveQueueKey;
+    const sessionContextSelection = await getSessionContextSelection(visibleProfileId, sessionContextKey);
     const contextCwd = cwd || (sessionId
-      ? (await getAgentSessionDetail(sessionId, profileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
+      ? (await getAgentSessionDetail(sessionId, visibleProfileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
       : configuredProfile.workspaceCwd);
     const additionsPromptSuffix = await buildSessionPromptAdditionsContext({
-      profileId,
+      profileId: visibleProfileId,
       sessionKey: sessionContextKey,
       cwd: contextCwd,
     });
@@ -2667,6 +3119,88 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       ? `${promptWithForkContext}\n\nהוראה קבועה לסשן זה. יש ליישם אותה גם אם המשתמש לא חזר עליה בהודעה הנוכחית:\n${effectiveSessionInstruction.trim()}`
       : promptWithForkContext;
 
+    if (sessionContextSelection.agentSessionDraftId) {
+      const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
+      if (!sourceProfile) {
+        res.status(404).json({ error: 'The selected profile was not found' });
+        return;
+      }
+
+      const existingRecord = await getAgentSessionRecord(sessionContextSelection.agentSessionDraftId);
+      if (!existingRecord) {
+        res.status(404).json({ error: 'Agent session draft was not found' });
+        return;
+      }
+      assertAgentSessionAccess(existingRecord, sourceProfile.id);
+
+      const updatedRecord = await updateAgentSessionGoal(existingRecord.id, effectivePrompt);
+      const plannerProfileId = resolveAgentProviderProfileId(sourceProfile, updatedRecord.plannerProvider);
+      const plannerExecutionConfig: CodexExecutionConfig = {
+        model: null,
+        reasoningEffort: null,
+        permissionModeId: 'full',
+      };
+
+      if (!asyncRequested) {
+        const result = await runAgentPrompt(
+          buildAgentPlanPrompt(updatedRecord),
+          updatedRecord.plannerSessionId,
+          plannerProfileId,
+          attachments,
+          {
+            cwd: updatedRecord.cwd,
+            injectDirectoryContext: !updatedRecord.plannerSessionId,
+            executionConfig: plannerExecutionConfig,
+          }
+        );
+        const parsedPlan = await readAgentPlanJsonFromDisk(updatedRecord);
+        const savedRecord = await saveAgentSessionPlan(updatedRecord.id, parsedPlan, {
+          plannerSessionId: result.sessionId,
+          plannerProfileId,
+        });
+        await recordAgentSessionLinkedSession({
+          sessionId: result.sessionId,
+          agentSessionId: savedRecord.id,
+          sourceProfileId: sourceProfile.id,
+          profileId: plannerProfileId,
+          provider: updatedRecord.plannerProvider,
+          kind: 'planner',
+          agentId: null,
+          createdAt: nowIso(),
+        });
+        await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+        const session = await decorateSessionDetailForClient(
+          visibleProfileId,
+          await getAgentSessionDetail(result.sessionId, plannerProfileId)
+        );
+        res.json({
+          session,
+          finalMessage: result.finalMessage,
+          agentSession: savedRecord,
+        });
+        return;
+      }
+
+      const item = await enqueueCodexQueueItem({
+        profileId: plannerProfileId,
+        sourceProfileId: sourceProfile.id,
+        queueKey: effectiveQueueKey,
+        clientRequestId,
+        sessionId: updatedRecord.plannerSessionId || undefined,
+        cwd: updatedRecord.cwd,
+        prompt: buildAgentPlanPrompt(updatedRecord),
+        promptPreview: `תכנית סוכנים · ${updatedRecord.title}`,
+        contextPrefix: combinedContextPrefix || undefined,
+        attachments,
+        agentSessionId: updatedRecord.id,
+        agentLinkKind: 'planner',
+        permissionModeId: 'full',
+      });
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      res.status(202).json({ job: item, agentSession: updatedRecord });
+      return;
+    }
+
     if (!asyncRequested) {
       const supportSessionKey = sessionId || effectiveQueueKey;
       if (supportEnvelope) {
@@ -2683,15 +3217,15 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         executionConfig,
       });
       if (!sessionId && supportSessionKey !== result.sessionId) {
-        await rebindSessionInstruction(profileId, supportSessionKey, result.sessionId);
-        await rebindSessionReminders(profileId, supportSessionKey, result.sessionId);
+        await rebindSessionInstruction(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionReminders(visibleProfileId, supportSessionKey, result.sessionId);
       }
       if (supportEnvelope && supportSessionKey !== result.sessionId) {
-        await rebindSupportSessionRecord(profileId, supportSessionKey, result.sessionId);
+        await rebindSupportSessionRecord(visibleProfileId, supportSessionKey, result.sessionId);
       }
-      await deleteSessionContextSelection(profileId, supportSessionKey);
+      await deleteSessionContextSelection(visibleProfileId, supportSessionKey);
       const session = await decorateSessionDetailForClient(
-        profileId,
+        visibleProfileId,
         await getAgentSessionDetail(result.sessionId, profileId)
       );
 
@@ -2712,6 +3246,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     }
     const item = await enqueueCodexQueueItem({
       profileId,
+      sourceProfileId: visibleProfileId,
       queueKey: effectiveQueueKey,
       clientRequestId,
       sessionId,
@@ -2728,7 +3263,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       recurrence,
     });
 
-    await deleteSessionContextSelection(profileId, sessionContextKey);
+    await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
 
     res.status(202).json({ job: item });
   } catch (error: any) {

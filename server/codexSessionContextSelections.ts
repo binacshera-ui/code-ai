@@ -6,6 +6,7 @@ export interface CodexSessionContextSelection {
   anchorIds: string[];
   skillIds: string[];
   reminderIds: string[];
+  agentSessionDraftId: string | null;
 }
 
 interface SessionContextSelectionsState {
@@ -49,6 +50,7 @@ function cloneSelection(selection: CodexSessionContextSelection): CodexSessionCo
     anchorIds: [...selection.anchorIds],
     skillIds: [...selection.skillIds],
     reminderIds: [...selection.reminderIds],
+    agentSessionDraftId: selection.agentSessionDraftId || null,
   };
 }
 
@@ -73,6 +75,9 @@ async function ensureStateLoaded() {
                   anchorIds: normalizeIdList(selection?.anchorIds),
                   skillIds: normalizeIdList(selection?.skillIds),
                   reminderIds: normalizeIdList(selection?.reminderIds),
+                  agentSessionDraftId: typeof selection?.agentSessionDraftId === 'string' && selection.agentSessionDraftId.trim()
+                    ? selection.agentSessionDraftId.trim()
+                    : null,
                 },
               ];
             })
@@ -111,7 +116,9 @@ export async function getSessionContextSelection(
 ): Promise<CodexSessionContextSelection> {
   await ensureStateLoaded();
   const selection = state.selectionsByKey[buildSelectionKey(profileId, sessionKey)];
-  return selection ? cloneSelection(selection) : { anchorIds: [], skillIds: [], reminderIds: [] };
+  return selection
+    ? cloneSelection(selection)
+    : { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null };
 }
 
 export async function setSessionContextSelection(
@@ -125,12 +132,20 @@ export async function setSessionContextSelection(
     anchorIds: normalizeIdList(selection?.anchorIds),
     skillIds: normalizeIdList(selection?.skillIds),
     reminderIds: normalizeIdList(selection?.reminderIds),
+    agentSessionDraftId: typeof selection?.agentSessionDraftId === 'string' && selection.agentSessionDraftId.trim()
+      ? selection.agentSessionDraftId.trim()
+      : null,
   };
 
-  if (normalized.anchorIds.length === 0 && normalized.skillIds.length === 0 && normalized.reminderIds.length === 0) {
+  if (
+    normalized.anchorIds.length === 0
+    && normalized.skillIds.length === 0
+    && normalized.reminderIds.length === 0
+    && !normalized.agentSessionDraftId
+  ) {
     delete state.selectionsByKey[key];
     await persistState();
-    return { anchorIds: [], skillIds: [], reminderIds: [] };
+    return { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null };
   }
 
   state.selectionsByKey[key] = normalized;

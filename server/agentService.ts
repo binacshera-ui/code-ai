@@ -64,6 +64,10 @@ import {
   prepareSupportProfileHome,
 } from './supportAgentService.js';
 import {
+  isAgentSessionProfile,
+  prepareAgentSessionProfileHome,
+} from './agentSessionProfiles.js';
+import {
   buildPermissionSnapshotFromMode,
   getSelectedPermissionMode,
   getSelectedPermissionModeId,
@@ -160,6 +164,15 @@ async function buildProviderPermissionSnapshot(profile: AgentProfile): Promise<C
   });
 }
 
+async function prepareInternalProfileHome(profile: AgentProfile): Promise<void> {
+  if (isAgentSessionProfile(profile)) {
+    await prepareAgentSessionProfileHome(profile);
+    return;
+  }
+
+  await prepareSupportProfileHome(profile);
+}
+
 export async function getAvailableProfiles(): Promise<AgentProfile[]> {
   const failedSupportProfiles = await prepareAllSupportProfileHomes();
   const [codexProfiles, claudeProfiles, geminiProfiles] = await Promise.all([
@@ -170,6 +183,8 @@ export async function getAvailableProfiles(): Promise<AgentProfile[]> {
 
   return [...codexProfiles, ...claudeProfiles, ...geminiProfiles].filter((profile) => (
     !failedSupportProfiles.has(profile.id)
+    && profile.mode !== 'agent'
+    && !profile.internalOnly
   ));
 }
 
@@ -179,7 +194,7 @@ export async function listAgentSessions(
   limit?: number
 ): Promise<CodexSessionSummary[]> {
   const profile = resolveProfile(profileId);
-  await prepareSupportProfileHome(profile);
+  await prepareInternalProfileHome(profile);
   if (profile.provider === 'claude') {
     return listClaudeSessions(profile.id, query, limit);
   }
@@ -200,7 +215,7 @@ export async function getAgentSessionDetail(
   }
 ): Promise<CodexSessionDetail> {
   const profile = resolveProfile(profileId);
-  await prepareSupportProfileHome(profile);
+  await prepareInternalProfileHome(profile);
   if (profile.provider === 'claude') {
     return getClaudeSessionDetail(sessionId, profile.id, options);
   }
@@ -213,7 +228,7 @@ export async function getAgentSessionDetail(
 
 export async function getAgentModelCatalog(profileId?: string): Promise<CodexModelCatalog> {
   const profile = resolveProfile(profileId);
-  await prepareSupportProfileHome(profile);
+  await prepareInternalProfileHome(profile);
   const permissions = await buildProviderPermissionSnapshot(profile);
   if (profile.provider === 'claude') {
     const catalog = await getClaudeModelCatalog(profile.id);
@@ -242,7 +257,7 @@ export async function updateAgentPermissionMode(
   modeId: string
 ): Promise<CodexPermissionSnapshot> {
   const profile = resolveProfile(profileId);
-  await prepareSupportProfileHome(profile);
+  await prepareInternalProfileHome(profile);
   await setSelectedPermissionModeId(profile, modeId);
   return buildProviderPermissionSnapshot(profile);
 }
@@ -252,7 +267,7 @@ export async function updateAgentResponseSpeed(
   modeId: string
 ): Promise<CodexModelCatalog> {
   const profile = resolveProfile(profileId);
-  await prepareSupportProfileHome(profile);
+  await prepareInternalProfileHome(profile);
   if (profile.provider === 'claude') {
     const catalog = await updateClaudeResponseSpeed(profile.id, modeId);
     return {
@@ -276,7 +291,7 @@ export async function getAgentRateLimitSnapshot(
   sessionId?: string
 ): Promise<CodexRateLimitSnapshot | null> {
   const profile = resolveProfile(profileId);
-  await prepareSupportProfileHome(profile);
+  await prepareInternalProfileHome(profile);
   if (profile.provider === 'claude') {
     return getClaudeRateLimitSnapshot(profile.id, sessionId);
   }
@@ -300,7 +315,7 @@ export async function runAgentPrompt(
   } = {}
 ): Promise<AgentRunResult> {
   const profile = resolveProfile(profileId);
-  await prepareSupportProfileHome(profile);
+  await prepareInternalProfileHome(profile);
   const resolvedCwd = options.cwd || (
     sessionId
       ? (await getAgentSessionDetail(sessionId, profile.id, { tail: 1 }).catch(() => null))?.cwd || profile.workspaceCwd
@@ -349,7 +364,7 @@ export async function createAgentForkSession(
   forkedAt: string;
 }> {
   const profile = resolveProfile(profileId);
-  await prepareSupportProfileHome(profile);
+  await prepareInternalProfileHome(profile);
   if (profile.provider === 'claude') {
     return createClaudeForkSession(sourceSessionId, forkEntryId, profile.id);
   }
@@ -413,7 +428,7 @@ export async function deleteAgentSession(
   profileId?: string
 ): Promise<void> {
   const profile = resolveProfile(profileId);
-  await prepareSupportProfileHome(profile);
+  await prepareInternalProfileHome(profile);
 
   if (profile.provider === 'claude') {
     await deleteClaudeSession(sessionId, profile.id);
@@ -434,7 +449,7 @@ export async function deleteAgentTurn(
   profileId?: string
 ): Promise<void> {
   const profile = resolveProfile(profileId);
-  await prepareSupportProfileHome(profile);
+  await prepareInternalProfileHome(profile);
 
   if (profile.provider === 'claude') {
     await deleteClaudeTurn(sessionId, entryId, profile.id);

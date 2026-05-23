@@ -20,12 +20,13 @@ export interface CodexProfile {
   id: string;
   label: string;
   provider: AppProvider;
-  mode?: 'standard' | 'support';
+  mode?: 'standard' | 'support' | 'agent';
   codexHome: string;
   workspaceCwd: string;
   sourceProfileId?: string;
   sandboxCwd?: string;
   defaultProfile?: boolean;
+  internalOnly?: boolean;
 }
 
 export interface CodexUploadedAttachment {
@@ -60,6 +61,54 @@ export interface CodexTimelineEntry {
   exitCode?: number | null;
 }
 
+export interface CodexAgentSessionAgentPreview {
+  id: string;
+  name: string;
+  provider: AppProvider;
+  role: string;
+  objective: string;
+  scopePaths: string[];
+  dependsOn: string[];
+  notes: string | null;
+  instructionPath: string;
+  statusPath: string;
+  runtimeStatus?: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | null;
+  linkedSessionId?: string | null;
+  queueItemId?: string | null;
+  updatedAt?: string | null;
+  lastMessage?: string | null;
+  lastError?: string | null;
+}
+
+export interface CodexAgentSessionPlanPreview {
+  title: string;
+  goal: string;
+  sharedStatusPath: string;
+  eventsPath: string;
+  coordinationRules: string[];
+  agents: CodexAgentSessionAgentPreview[];
+}
+
+export interface CodexAgentSessionMeta {
+  id: string;
+  title: string;
+  goal: string;
+  status: string;
+  kind: 'planner' | 'agent';
+  sourceProfileId: string;
+  linkedProfileId: string;
+  plannerProvider: AppProvider | null;
+  topicId: string | null;
+  agentId: string | null;
+  agentName: string | null;
+  approvedAt: string | null;
+  launchedAt: string | null;
+  plannerSessionId: string | null;
+  sharedStatusPath: string | null;
+  eventsPath: string | null;
+  plan: CodexAgentSessionPlanPreview | null;
+}
+
 export interface CodexSessionSummary {
   id: string;
   title: string;
@@ -80,6 +129,7 @@ export interface CodexSessionSummary {
   isDraft?: boolean;
   isCompactClone?: boolean;
   compactSourceSessionId?: string | null;
+  agentSession?: CodexAgentSessionMeta | null;
 }
 
 export interface CodexSessionDetail extends CodexSessionSummary {

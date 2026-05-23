@@ -2,7 +2,7 @@ import { existsSync } from 'fs';
 import path from 'path';
 
 export type AppProvider = 'codex' | 'claude' | 'gemini';
-export type AppMode = 'standard' | 'support';
+export type AppMode = 'standard' | 'support' | 'agent';
 
 export interface CodexProfileConfig {
   id: string;
@@ -14,6 +14,7 @@ export interface CodexProfileConfig {
   sourceProfileId?: string;
   sandboxCwd?: string;
   defaultProfile?: boolean;
+  internalOnly?: boolean;
 }
 
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
@@ -86,6 +87,7 @@ function normalizeProfile(profile: Partial<CodexProfileConfig>): CodexProfileCon
       ? path.resolve(profile.sandboxCwd)
       : undefined,
     defaultProfile: Boolean(profile.defaultProfile),
+    internalOnly: Boolean(profile.internalOnly),
   };
 }
 
@@ -204,12 +206,51 @@ function buildDerivedSupportProfiles(baseProfiles: CodexProfileConfig[], appRoot
   return derivedProfiles;
 }
 
+function buildDerivedAgentProfiles(baseProfiles: CodexProfileConfig[], appRoot: string): CodexProfileConfig[] {
+  const storageRoot = path.resolve(process.env.CODEX_STORAGE_ROOT || path.join(appRoot, '.code-ai'));
+  const agentRoot = path.join(storageRoot, 'agent-sessions', 'homes');
+  const derivedProfiles: CodexProfileConfig[] = [];
+
+  for (const profile of baseProfiles) {
+    if (profile.mode !== 'standard') {
+      continue;
+    }
+
+    const agentProfileId = `agent-${profile.id}`;
+    if (baseProfiles.some((candidate) => candidate.id === agentProfileId)) {
+      continue;
+    }
+
+    const profileHomeBase = path.join(agentRoot, profile.provider, profile.id);
+    const providerHome = profile.provider === 'claude'
+      ? path.join(profileHomeBase, '.claude')
+      : profile.provider === 'gemini'
+        ? path.join(profileHomeBase, '.gemini')
+        : profileHomeBase;
+
+    derivedProfiles.push({
+      id: agentProfileId,
+      label: profile.label,
+      provider: profile.provider,
+      mode: 'agent',
+      sourceProfileId: profile.id,
+      codexHome: providerHome,
+      workspaceCwd: profile.workspaceCwd,
+      defaultProfile: false,
+      internalOnly: true,
+    });
+  }
+
+  return derivedProfiles;
+}
+
 function loadProfiles(appRoot: string): CodexProfileConfig[] {
   const raw = process.env.CODEX_PROFILES_JSON?.trim();
   const finalizeProfiles = (baseProfiles: CodexProfileConfig[]): CodexProfileConfig[] => {
     const profiles = [
       ...baseProfiles,
       ...buildDerivedSupportProfiles(baseProfiles, appRoot),
+      ...buildDerivedAgentProfiles(baseProfiles, appRoot),
     ];
 
     const standardProfiles = profiles.filter((profile) => profile.mode !== 'support');

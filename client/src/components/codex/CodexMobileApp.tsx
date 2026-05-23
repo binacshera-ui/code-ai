@@ -102,7 +102,7 @@ interface CodexProfile {
   id: string;
   label: string;
   provider: 'codex' | 'claude' | 'gemini';
-  mode?: 'standard' | 'support';
+  mode?: 'standard' | 'support' | 'agent';
   codexHome: string;
   workspaceCwd: string;
   sourceProfileId?: string;
@@ -157,6 +157,7 @@ interface CodexSessionSummary {
   isDraft?: boolean;
   isCompactClone?: boolean;
   compactSourceSessionId?: string | null;
+  agentSession?: CodexAgentSessionMeta | null;
 }
 
 interface CodexSessionTaskAssignment {
@@ -203,6 +204,81 @@ interface CodexSessionDetail extends CodexSessionSummary {
   timelineWindowEnd: number;
   hasEarlierTimeline: boolean;
   forkDraftContext?: CodexForkDraftServerContext | null;
+}
+
+interface CodexAgentSessionAgentPreview {
+  id: string;
+  name: string;
+  provider: 'codex' | 'claude' | 'gemini';
+  role: string;
+  objective: string;
+  scopePaths: string[];
+  dependsOn: string[];
+  notes: string | null;
+  instructionPath: string;
+  statusPath: string;
+  runtimeStatus?: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | null;
+  linkedSessionId?: string | null;
+  queueItemId?: string | null;
+  updatedAt?: string | null;
+  lastMessage?: string | null;
+  lastError?: string | null;
+}
+
+interface CodexAgentSessionPlanPreview {
+  title: string;
+  goal: string;
+  sharedStatusPath: string;
+  eventsPath: string;
+  coordinationRules: string[];
+  agents: CodexAgentSessionAgentPreview[];
+}
+
+interface CodexAgentSessionMeta {
+  id: string;
+  title: string;
+  goal: string;
+  status: string;
+  kind: 'planner' | 'agent';
+  sourceProfileId: string;
+  linkedProfileId: string;
+  plannerProvider: 'codex' | 'claude' | 'gemini' | null;
+  topicId: string | null;
+  agentId: string | null;
+  agentName: string | null;
+  approvedAt: string | null;
+  launchedAt: string | null;
+  plannerSessionId: string | null;
+  sharedStatusPath: string | null;
+  eventsPath: string | null;
+  plan: CodexAgentSessionPlanPreview | null;
+}
+
+interface CodexAgentSessionRecord {
+  id: string;
+  sourceProfileId: string;
+  sourceProvider: 'codex' | 'claude' | 'gemini';
+  plannerProvider: 'codex' | 'claude' | 'gemini';
+  cwd: string;
+  title: string;
+  goal: string;
+  status: 'draft' | 'planned' | 'approved' | 'running' | 'completed' | 'failed';
+  topicId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  launchedAt: string | null;
+  rootPath: string;
+  planPath: string;
+  sharedStatusPath: string;
+  eventsPath: string;
+  plannerSessionId: string | null;
+  plannerProfileId: string | null;
+  plan: CodexAgentSessionPlanPreview | null;
+}
+
+interface CodexAgentSessionsResponse {
+  agentSessions: CodexAgentSessionRecord[];
 }
 
 interface CodexSessionTopic {
@@ -488,6 +564,7 @@ interface CodexSessionContextSelection {
   anchorIds: string[];
   skillIds: string[];
   reminderIds: string[];
+  agentSessionDraftId: string | null;
 }
 
 interface CodexSessionTasksResponse {
@@ -1451,7 +1528,7 @@ async function fetchSessionContextSelection(profileId: string, sessionKey: strin
   const data = await fetchJson<CodexSessionContextSelectionResponse>(
     `/api/codex/session-context-selection?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
   );
-  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [] };
+  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null };
 }
 
 async function saveSessionContextSelection(
@@ -1470,9 +1547,91 @@ async function saveSessionContextSelection(
       anchorIds: selection.anchorIds,
       skillIds: selection.skillIds,
       reminderIds: selection.reminderIds,
+      agentSessionDraftId: selection.agentSessionDraftId,
     }),
   });
-  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [] };
+  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null };
+}
+
+async function fetchAgentSessions(profileId: string, cwd?: string | null): Promise<CodexAgentSessionRecord[]> {
+  const query = new URLSearchParams({
+    profileId,
+  });
+  if (cwd?.trim()) {
+    query.set('cwd', cwd.trim());
+  }
+  const data = await fetchJson<CodexAgentSessionsResponse>(`/api/codex/agent-sessions?${query.toString()}`);
+  return data.agentSessions || [];
+}
+
+async function createAgentSessionDraftRequest(
+  profileId: string,
+  input: {
+    cwd: string;
+    title: string;
+    goal: string;
+    plannerProvider: 'codex' | 'claude' | 'gemini';
+    topicId?: string | null;
+  }
+): Promise<CodexAgentSessionRecord> {
+  const data = await fetchJson<{ agentSession: CodexAgentSessionRecord }>('/api/codex/agent-sessions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      ...input,
+    }),
+  });
+  return data.agentSession;
+}
+
+async function fetchAgentSessionRecord(profileId: string, agentSessionId: string): Promise<CodexAgentSessionRecord> {
+  const data = await fetchJson<{ agentSession: CodexAgentSessionRecord }>(
+    `/api/codex/agent-sessions/${encodeURIComponent(agentSessionId)}?profileId=${encodeURIComponent(profileId)}`
+  );
+  return data.agentSession;
+}
+
+async function saveAgentSessionPlanRequest(
+  profileId: string,
+  agentSessionId: string,
+  plan: unknown
+): Promise<CodexAgentSessionRecord> {
+  const data = await fetchJson<{ agentSession: CodexAgentSessionRecord }>(
+    `/api/codex/agent-sessions/${encodeURIComponent(agentSessionId)}/plan`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        profileId,
+        plan,
+      }),
+    }
+  );
+  return data.agentSession;
+}
+
+async function approveAgentSessionRequest(
+  profileId: string,
+  agentSessionId: string
+): Promise<CodexAgentSessionRecord> {
+  const data = await fetchJson<{ agentSession: CodexAgentSessionRecord }>(
+    `/api/codex/agent-sessions/${encodeURIComponent(agentSessionId)}/approve`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        profileId,
+      }),
+    }
+  );
+  return data.agentSession;
 }
 
 async function fetchProjectAnchors(profileId: string, cwd: string): Promise<CodexProjectAnchor[]> {
@@ -2027,11 +2186,51 @@ function getTopicColorPreset(colorKey: string) {
   return TOPIC_COLOR_PRESETS[colorKey as keyof typeof TOPIC_COLOR_PRESETS] || TOPIC_COLOR_PRESETS.slate;
 }
 
+function getAgentSessionStatusLabel(status: CodexAgentSessionRecord['status'] | CodexAgentSessionMeta['status']): string {
+  switch (status) {
+    case 'draft':
+      return 'טיוטה';
+    case 'planned':
+      return 'ממתין לאישור';
+    case 'approved':
+      return 'אושר';
+    case 'running':
+      return 'רץ';
+    case 'completed':
+      return 'הושלם';
+    case 'failed':
+      return 'נכשל';
+    default:
+      return status;
+  }
+}
+
+function getAgentRuntimeStatusLabel(status: CodexAgentSessionAgentPreview['runtimeStatus']): string {
+  switch (status) {
+    case 'pending':
+      return 'ממתין';
+    case 'queued':
+      return 'בתור';
+    case 'running':
+      return 'רץ';
+    case 'completed':
+      return 'הושלם';
+    case 'failed':
+      return 'נכשל';
+    case 'cancelled':
+      return 'בוטל';
+    default:
+      return 'ללא מצב';
+  }
+}
+
 function buildSessionTopicGroups(sessions: CodexSessionSummary[]): SessionTopicGroup[] {
   const groups = new Map<string, SessionTopicGroup>();
 
   for (const session of sessions) {
-    const key = session.topic?.id || '__untagged__';
+    const key = session.agentSession
+      ? `__agent_session__:${session.agentSession.id}`
+      : session.topic?.id || '__untagged__';
     const existing = groups.get(key);
 
     if (existing) {
@@ -2039,16 +2238,35 @@ function buildSessionTopicGroups(sessions: CodexSessionSummary[]): SessionTopicG
       continue;
     }
 
+    const syntheticTopic = session.agentSession
+      ? {
+        id: key,
+        profileId: session.profileId,
+        cwd: session.cwd || '',
+        name: session.agentSession.title,
+        icon: '🤖',
+        colorKey: 'sky',
+        createdAt: session.updatedAt,
+        updatedAt: session.updatedAt,
+      } satisfies CodexSessionTopic
+      : null;
+
     groups.set(key, {
       key,
-      topic: session.topic || null,
-      label: session.topic?.name || 'ללא נושא',
+      topic: syntheticTopic || session.topic || null,
+      label: session.agentSession
+        ? `סשן סוכנים · ${session.agentSession.title}`
+        : session.topic?.name || 'ללא נושא',
       sessions: [session],
     });
   }
 
   const ordered = [...groups.values()];
   ordered.sort((left, right) => {
+    const leftIsAgent = left.key.startsWith('__agent_session__:');
+    const rightIsAgent = right.key.startsWith('__agent_session__:');
+    if (leftIsAgent && !rightIsAgent) return -1;
+    if (!leftIsAgent && rightIsAgent) return 1;
     if (!left.topic && right.topic) return 1;
     if (left.topic && !right.topic) return -1;
     return left.label.localeCompare(right.label, 'he');
@@ -7560,6 +7778,417 @@ function CreateReminderDialog({
   );
 }
 
+function AgentSessionPlanCard({
+  record,
+  canApprove,
+  isApproving,
+  onEdit,
+  onApprove,
+}: {
+  record: CodexAgentSessionRecord | CodexAgentSessionMeta;
+  canApprove: boolean;
+  isApproving: boolean;
+  onEdit: () => void;
+  onApprove: () => void;
+}) {
+  const plan = record.plan;
+  if (!plan) {
+    return null;
+  }
+
+  return (
+    <div dir="rtl" className="mb-4 rounded-[1.6rem] border border-cyan-100 bg-gradient-to-b from-cyan-50/75 via-white to-white px-4 py-4 shadow-[0_18px_40px_-34px_rgba(8,145,178,0.35)]">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-cyan-100 text-cyan-700">
+              <Bot className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-slate-800">{record.title}</div>
+              <div className="mt-0.5 text-[11px] text-slate-400">
+                {getAgentSessionStatusLabel(record.status)}
+              </div>
+            </div>
+          </div>
+          <div className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-600">
+            {plan.goal}
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+            <span className="rounded-full bg-white px-2.5 py-1">{getProviderDisplayLabel(record.plannerProvider || 'codex')}</span>
+            <span className="rounded-full bg-white px-2.5 py-1">{plan.agents.length} סוכנים</span>
+            <span className="rounded-full bg-white px-2.5 py-1" dir="ltr">{plan.sharedStatusPath}</span>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={onEdit}
+            className="rounded-full border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-600 transition hover:bg-slate-50"
+          >
+            ערוך
+          </button>
+          {canApprove && (
+            <button
+              type="button"
+              onClick={onApprove}
+              disabled={isApproving}
+              className="rounded-full bg-slate-900 px-3 py-2 text-[11px] font-medium text-white transition hover:bg-slate-800 disabled:opacity-50"
+            >
+              {isApproving ? 'משחרר...' : 'אשר והפעל'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+        {plan.agents.map((agent) => (
+          <div key={agent.id} className="rounded-[1.15rem] border border-white bg-white/90 px-3 py-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="truncate text-sm font-semibold text-slate-700">{agent.name}</div>
+              <span className="rounded-full bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-500">
+                {getAgentRuntimeStatusLabel(agent.runtimeStatus)}
+              </span>
+            </div>
+            <div className="mt-1 text-[11px] text-cyan-700">{agent.role}</div>
+            <div className="mt-2 text-xs leading-6 text-slate-500 whitespace-pre-wrap">{agent.objective}</div>
+            <div className="mt-2 flex flex-wrap gap-1">
+              {agent.scopePaths.slice(0, 2).map((scopePath) => (
+                <span key={scopePath} className="rounded-full bg-slate-50 px-2 py-0.5 text-[10px] text-slate-400" dir="ltr">
+                  {scopePath}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AgentSessionDialog({
+  isOpen,
+  cwd,
+  agentSessions,
+  selectedAgentSessionDraftId,
+  isLoading,
+  error,
+  draftTitle,
+  draftGoal,
+  draftPlannerProvider,
+  isSaving,
+  isApproving,
+  onClose,
+  onDraftTitleChange,
+  onDraftGoalChange,
+  onDraftPlannerProviderChange,
+  onSelectDraft,
+  onCreateDraft,
+  onOpenPlan,
+  onApprove,
+}: {
+  isOpen: boolean;
+  cwd: string | null;
+  agentSessions: CodexAgentSessionRecord[];
+  selectedAgentSessionDraftId: string | null;
+  isLoading: boolean;
+  error: string | null;
+  draftTitle: string;
+  draftGoal: string;
+  draftPlannerProvider: CodexProfile['provider'];
+  isSaving: boolean;
+  isApproving: boolean;
+  onClose: () => void;
+  onDraftTitleChange: (value: string) => void;
+  onDraftGoalChange: (value: string) => void;
+  onDraftPlannerProviderChange: (value: CodexProfile['provider']) => void;
+  onSelectDraft: (agentSessionDraftId: string | null) => void;
+  onCreateDraft: () => void;
+  onOpenPlan: (agentSessionId: string) => void;
+  onApprove: (agentSessionId: string) => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[76] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close agent session dialog"
+      />
+      <div className="relative z-10 flex w-full max-w-4xl max-h-[88dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-cyan-50 text-cyan-700">
+              <Bot className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Agent Session
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">מצב סוכנים</div>
+              <div className="mt-1 truncate text-xs text-slate-500" dir="ltr" title={cwd || undefined}>
+                {cwd || 'לא נבחרה תיקייה פעילה'}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[22rem_minmax(0,1fr)]">
+          <div className="border-b border-slate-100 bg-slate-50/60 px-5 py-5 lg:border-b-0 lg:border-l">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">סשן סוכנים חדש</div>
+            <div className="mt-3 space-y-3">
+              <input
+                value={draftTitle}
+                onChange={(event) => onDraftTitleChange(event.target.value)}
+                placeholder="שם לסשן הסוכנים"
+                className="w-full rounded-[1.25rem] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 outline-none transition focus:border-cyan-300"
+              />
+              <Textarea
+                value={draftGoal}
+                onChange={(event) => onDraftGoalChange(event.target.value)}
+                placeholder="תאר את המטרה הגדולה, מה צריך לחלק בין הסוכנים, ומה חשוב שיסתנכרן ביניהם."
+                rows={5}
+                className="min-h-[140px] resize-none rounded-[1.25rem] border border-slate-200 bg-white px-4 py-4 text-sm leading-7 text-slate-800 shadow-none placeholder:text-slate-300 focus-visible:ring-0"
+              />
+              <div>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Planner provider
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {PROVIDER_DISPLAY_ORDER.map((provider) => (
+                    <button
+                      key={provider}
+                      type="button"
+                      onClick={() => onDraftPlannerProviderChange(provider)}
+                      className={cn(
+                        'rounded-full border px-3 py-2 text-[11px] font-medium transition',
+                        draftPlannerProvider === provider
+                          ? 'border-slate-900 bg-slate-900 text-white'
+                          : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                      )}
+                    >
+                      {getProviderDisplayLabel(provider)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onCreateDraft}
+                disabled={isSaving || !draftTitle.trim() || !draftGoal.trim() || !cwd}
+                className="h-11 w-full rounded-full bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
+              >
+                {isSaving ? 'יוצר...' : 'צור טיוטת סוכנים'}
+              </button>
+            </div>
+          </div>
+
+          <div className="min-h-0 overflow-y-auto px-5 py-5">
+            {error && (
+              <div className="mb-4 rounded-[1.25rem] border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {error}
+              </div>
+            )}
+
+            {isLoading ? (
+              <div className="flex min-h-[240px] items-center justify-center rounded-[1.5rem] border border-slate-100 bg-slate-50/70 text-sm text-slate-500">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>טוען סשני סוכנים...</span>
+                </div>
+              </div>
+            ) : agentSessions.length === 0 ? (
+              <div className="rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm leading-7 text-slate-500">
+                עדיין אין סשני סוכנים לתיקייה הזו.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {agentSessions.map((record) => {
+                  const isSelected = selectedAgentSessionDraftId === record.id;
+                  const isReadyToLaunch = record.status === 'planned' && Boolean(record.plan);
+                  return (
+                    <div
+                      key={record.id}
+                      className={cn(
+                        'rounded-[1.4rem] border px-4 py-4 transition',
+                        isSelected ? 'border-cyan-200 bg-cyan-50/60' : 'border-slate-100 bg-white'
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <button
+                          type="button"
+                          onClick={() => onSelectDraft(isSelected ? null : record.id)}
+                          className="flex min-w-0 flex-1 items-start gap-3 text-right"
+                        >
+                          <div className={cn(
+                            'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+                            isSelected ? 'bg-cyan-100 text-cyan-700' : 'bg-slate-100 text-slate-500'
+                          )}>
+                            <GitBranch className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <div className="truncate text-sm font-semibold text-slate-800">{record.title}</div>
+                              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-slate-500">
+                                {getAgentSessionStatusLabel(record.status)}
+                              </span>
+                              {isSelected && (
+                                <span className="rounded-full bg-cyan-600 px-2 py-0.5 text-[10px] font-medium text-white">
+                                  ייצור תכנית בשליחה הבאה
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-2 whitespace-pre-wrap text-xs leading-6 text-slate-500">{record.goal}</div>
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                              <span>{getProviderDisplayLabel(record.plannerProvider)}</span>
+                              <span>{record.plan?.agents.length || 0} סוכנים</span>
+                              <span>{formatTimestamp(record.updatedAt)}</span>
+                            </div>
+                          </div>
+                        </button>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => onOpenPlan(record.id)}
+                            className="rounded-full border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-600 transition hover:bg-slate-50"
+                          >
+                            תכנית
+                          </button>
+                          {isReadyToLaunch && (
+                            <button
+                              type="button"
+                              onClick={() => onApprove(record.id)}
+                              disabled={isApproving}
+                              className="rounded-full bg-slate-900 px-3 py-2 text-[11px] font-medium text-white transition hover:bg-slate-800 disabled:opacity-50"
+                            >
+                              {isApproving ? 'משחרר...' : 'אשר'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentPlanEditorDialog({
+  record,
+  value,
+  isSaving,
+  isApproving,
+  onChange,
+  onClose,
+  onRefresh,
+  onSave,
+  onApprove,
+}: {
+  record: CodexAgentSessionRecord | null;
+  value: string;
+  isSaving: boolean;
+  isApproving: boolean;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onRefresh: () => void;
+  onSave: () => void;
+  onApprove: () => void;
+}) {
+  if (!record) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[78] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close agent plan editor"
+      />
+      <div className="relative z-10 flex w-full max-w-4xl max-h-[88dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-cyan-50 text-cyan-700">
+              <Bot className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Agent Plan JSON
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">{record.title}</div>
+              <div className="mt-1 text-sm leading-6 text-slate-500">
+                ערוך, אשר או רענן את תכנית הסוכנים לפני שחרורם לריצה.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          <Textarea
+            dir="ltr"
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            rows={20}
+            className="min-h-[60dvh] resize-none rounded-[1.5rem] border border-slate-200 bg-slate-950 px-4 py-4 font-mono text-[12px] leading-6 text-slate-100 shadow-none focus-visible:ring-0"
+          />
+        </div>
+
+        <div className="flex items-center justify-between gap-3 border-t border-slate-100 px-5 py-4">
+          <button
+            type="button"
+            onClick={onRefresh}
+            className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+          >
+            רענן מהדיסק
+          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={isSaving}
+              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+            >
+              {isSaving ? 'שומר...' : 'שמור JSON'}
+            </button>
+            <button
+              type="button"
+              onClick={onApprove}
+              disabled={isApproving}
+              className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-50"
+            >
+              {isApproving ? 'משחרר...' : 'אשר והפעל'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TaskBoardDialog({
   isOpen,
   tasks,
@@ -8295,6 +8924,7 @@ export function CodexMobileApp() {
   const [isAnchorManagerOpen, setIsAnchorManagerOpen] = useState(false);
   const [isSkillPickerDialogOpen, setIsSkillPickerDialogOpen] = useState(false);
   const [isReminderPickerDialogOpen, setIsReminderPickerDialogOpen] = useState(false);
+  const [isAgentSessionDialogOpen, setIsAgentSessionDialogOpen] = useState(false);
   const [isTaskBoardOpen, setIsTaskBoardOpen] = useState(false);
   const [isSessionTaskDialogOpen, setIsSessionTaskDialogOpen] = useState(false);
   const [isAnchorCreateDialogOpen, setIsAnchorCreateDialogOpen] = useState(false);
@@ -8334,11 +8964,12 @@ export function CodexMobileApp() {
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
-  const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>({ anchorIds: [], skillIds: [], reminderIds: [] });
+  const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null });
   const [instructionDraft, setInstructionDraft] = useState('');
   const [projectAnchors, setProjectAnchors] = useState<CodexProjectAnchor[]>([]);
   const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
   const [sessionReminders, setSessionReminders] = useState<CodexSessionReminder[]>([]);
+  const [agentSessions, setAgentSessions] = useState<CodexAgentSessionRecord[]>([]);
   const [sessionTasks, setSessionTasks] = useState<CodexSessionTask[]>([]);
   const [sessionSubtasks, setSessionSubtasks] = useState<CodexSessionSubtask[]>([]);
   const [isInstructionDialogOpen, setIsInstructionDialogOpen] = useState(false);
@@ -8348,21 +8979,31 @@ export function CodexMobileApp() {
   const [isProjectAnchorsLoading, setIsProjectAnchorsLoading] = useState(false);
   const [isUnifiedSkillsLoading, setIsUnifiedSkillsLoading] = useState(false);
   const [isSessionRemindersLoading, setIsSessionRemindersLoading] = useState(false);
+  const [isAgentSessionsLoading, setIsAgentSessionsLoading] = useState(false);
   const [isSessionTasksLoading, setIsSessionTasksLoading] = useState(false);
   const [isSessionSubtasksLoading, setIsSessionSubtasksLoading] = useState(false);
   const [isInstructionSaving, setIsInstructionSaving] = useState(false);
   const [isReminderSaving, setIsReminderSaving] = useState(false);
   const [isTaskSaving, setIsTaskSaving] = useState(false);
   const [isSubtaskSaving, setIsSubtaskSaving] = useState(false);
+  const [isAgentSessionSaving, setIsAgentSessionSaving] = useState(false);
+  const [isAgentSessionApproving, setIsAgentSessionApproving] = useState(false);
+  const [isAgentPlanSaving, setIsAgentPlanSaving] = useState(false);
   const [isResponseSpeedSaving, setIsResponseSpeedSaving] = useState(false);
   const [projectAnchorsError, setProjectAnchorsError] = useState<string | null>(null);
   const [unifiedSkillsError, setUnifiedSkillsError] = useState<string | null>(null);
   const [sessionRemindersError, setSessionRemindersError] = useState<string | null>(null);
+  const [agentSessionsError, setAgentSessionsError] = useState<string | null>(null);
   const [sessionTasksError, setSessionTasksError] = useState<string | null>(null);
   const [sessionSubtasksError, setSessionSubtasksError] = useState<string | null>(null);
   const [anchorDraftTargetEntry, setAnchorDraftTargetEntry] = useState<CodexFileTreeEntry | null>(null);
   const [anchorDraftName, setAnchorDraftName] = useState('');
   const [anchorDraftDescription, setAnchorDraftDescription] = useState('');
+  const [agentSessionDraftTitle, setAgentSessionDraftTitle] = useState('');
+  const [agentSessionDraftGoal, setAgentSessionDraftGoal] = useState('');
+  const [agentSessionDraftPlannerProvider, setAgentSessionDraftPlannerProvider] = useState<CodexProfile['provider']>('codex');
+  const [activeAgentPlanEditorRecord, setActiveAgentPlanEditorRecord] = useState<CodexAgentSessionRecord | null>(null);
+  const [agentPlanEditorValue, setAgentPlanEditorValue] = useState('');
   const [taskDraftId, setTaskDraftId] = useState<string | null>(null);
   const [taskDraftTitle, setTaskDraftTitle] = useState('');
   const [taskDraftDescription, setTaskDraftDescription] = useState('');
@@ -8451,6 +9092,7 @@ export function CodexMobileApp() {
   const latestProjectAnchorsLoadTokenRef = useRef(0);
   const latestUnifiedSkillsLoadTokenRef = useRef(0);
   const latestSessionRemindersLoadTokenRef = useRef(0);
+  const latestAgentSessionsLoadTokenRef = useRef(0);
   const latestSessionTasksLoadTokenRef = useRef(0);
   const latestSessionSubtasksLoadTokenRef = useRef(0);
   const latestModelCatalogLoadTokenRef = useRef(0);
@@ -9750,6 +10392,7 @@ export function CodexMobileApp() {
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
     setIsReminderPickerDialogOpen(false);
+    setIsAgentSessionDialogOpen(false);
     setIsTaskBoardOpen(false);
     setIsSessionTaskDialogOpen(false);
     setIsAnchorCreateDialogOpen(false);
@@ -9758,10 +10401,13 @@ export function CodexMobileApp() {
     setAnchorDraftTargetEntry(null);
     setAnchorDraftName('');
     setAnchorDraftDescription('');
+    setActiveAgentPlanEditorRecord(null);
     resetTaskDraft();
     setTaskTargetSession(null);
     setPendingReminderSourceEntry(null);
     setReminderDraftName('');
+    setAgentSessionDraftTitle('');
+    setAgentSessionDraftGoal('');
     setSessionReminders([]);
     setSessionRemindersError(null);
     clearDraftAttachments();
@@ -9834,6 +10480,7 @@ export function CodexMobileApp() {
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
     setIsReminderPickerDialogOpen(false);
+    setIsAgentSessionDialogOpen(false);
     setIsTaskBoardOpen(false);
     setIsSessionTaskDialogOpen(false);
     setIsAnchorCreateDialogOpen(false);
@@ -9842,17 +10489,22 @@ export function CodexMobileApp() {
     setAnchorDraftTargetEntry(null);
     setAnchorDraftName('');
     setAnchorDraftDescription('');
+    setActiveAgentPlanEditorRecord(null);
     resetTaskDraft();
     setTaskTargetSession(null);
     setPendingReminderSourceEntry(null);
     setReminderDraftName('');
     setProjectAnchors([]);
     setProjectAnchorsError(null);
+    setAgentSessions([]);
+    setAgentSessionsError(null);
+    setAgentSessionDraftTitle('');
+    setAgentSessionDraftGoal('');
     setSessionReminders([]);
     setSessionRemindersError(null);
     setSessionTasks([]);
     setSessionTasksError(null);
-    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [] });
+    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null });
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
@@ -11011,7 +11663,7 @@ export function CodexMobileApp() {
 
   async function loadCurrentSessionContextSelection(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
     if (!nextProfileId || !nextSessionKey) {
-      setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [] });
+      setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null });
       return;
     }
 
@@ -11025,7 +11677,7 @@ export function CodexMobileApp() {
       setSessionContextSelection(selection);
     } catch (selectionError: any) {
       if (requestToken === latestSessionContextSelectionLoadTokenRef.current) {
-        setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [] });
+        setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null });
         setError(selectionError.message || 'Failed to load anchor, skill and reminder selection');
       }
     } finally {
@@ -11054,11 +11706,40 @@ export function CodexMobileApp() {
   }
 
   function clearSessionContextSelectionAfterSend() {
-    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [] });
+    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null });
     setIsAdditionsMenuOpen(false);
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
     setIsReminderPickerDialogOpen(false);
+    setIsAgentSessionDialogOpen(false);
+  }
+
+  async function loadCurrentAgentSessions(nextProfileId = profileId, nextCwd = activeComposerCwd) {
+    if (!nextProfileId || !nextCwd) {
+      setAgentSessions([]);
+      setAgentSessionsError(null);
+      return;
+    }
+
+    const requestToken = ++latestAgentSessionsLoadTokenRef.current;
+    setIsAgentSessionsLoading(true);
+    setAgentSessionsError(null);
+    try {
+      const rows = await fetchAgentSessions(nextProfileId, nextCwd);
+      if (requestToken !== latestAgentSessionsLoadTokenRef.current) {
+        return;
+      }
+      setAgentSessions(rows);
+    } catch (loadError: any) {
+      if (requestToken === latestAgentSessionsLoadTokenRef.current) {
+        setAgentSessions([]);
+        setAgentSessionsError(loadError.message || 'Failed to load agent sessions');
+      }
+    } finally {
+      if (requestToken === latestAgentSessionsLoadTokenRef.current) {
+        setIsAgentSessionsLoading(false);
+      }
+    }
   }
 
   async function loadCurrentProjectAnchors(nextProfileId = profileId, nextCwd = activeComposerCwd) {
@@ -11206,6 +11887,7 @@ export function CodexMobileApp() {
       anchorIds: [...currentIds],
       skillIds: sessionContextSelection.skillIds,
       reminderIds: sessionContextSelection.reminderIds,
+      agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
     });
   }
 
@@ -11220,6 +11902,7 @@ export function CodexMobileApp() {
       anchorIds: sessionContextSelection.anchorIds,
       skillIds: [...currentIds],
       reminderIds: sessionContextSelection.reminderIds,
+      agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
     });
   }
 
@@ -11234,6 +11917,7 @@ export function CodexMobileApp() {
       anchorIds: sessionContextSelection.anchorIds,
       skillIds: sessionContextSelection.skillIds,
       reminderIds: [...currentIds],
+      agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
     });
   }
 
@@ -11266,6 +11950,14 @@ export function CodexMobileApp() {
     setIsReminderPickerDialogOpen(true);
     if (profileId && currentQueueKey) {
       void loadCurrentSessionReminders(profileId, currentQueueKey);
+    }
+  }
+
+  function openAgentSessionDialog() {
+    setIsAdditionsMenuOpen(false);
+    setIsAgentSessionDialogOpen(true);
+    if (profileId && activeComposerCwd) {
+      void loadCurrentAgentSessions(profileId, activeComposerCwd);
     }
   }
 
@@ -11329,6 +12021,7 @@ export function CodexMobileApp() {
         anchorIds: nextAnchorIds,
         skillIds: sessionContextSelection.skillIds,
         reminderIds: sessionContextSelection.reminderIds,
+        agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
       });
       setIsAnchorCreateDialogOpen(false);
       setIsAnchorManagerOpen(true);
@@ -11356,6 +12049,7 @@ export function CodexMobileApp() {
           anchorIds: sessionContextSelection.anchorIds.filter((currentId) => currentId !== anchorId),
           skillIds: sessionContextSelection.skillIds,
           reminderIds: sessionContextSelection.reminderIds,
+          agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
         });
       }
     } catch (anchorError: any) {
@@ -11404,12 +12098,121 @@ export function CodexMobileApp() {
           anchorIds: sessionContextSelection.anchorIds,
           skillIds: sessionContextSelection.skillIds,
           reminderIds: sessionContextSelection.reminderIds.filter((currentId) => currentId !== reminderId),
+          agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
         });
       }
     } catch (reminderError: any) {
       setError(reminderError.message || 'Failed to delete reminder');
     } finally {
       setDeletingReminderId(null);
+    }
+  }
+
+  async function selectAgentSessionDraft(agentSessionDraftId: string | null) {
+    if (!profileId || !currentQueueKey) {
+      return;
+    }
+
+    await persistSessionContextSelection({
+      anchorIds: sessionContextSelection.anchorIds,
+      skillIds: sessionContextSelection.skillIds,
+      reminderIds: sessionContextSelection.reminderIds,
+      agentSessionDraftId,
+    });
+  }
+
+  async function createAgentSessionDraft() {
+    if (!profileId || !activeComposerCwd || !agentSessionDraftTitle.trim() || !agentSessionDraftGoal.trim()) {
+      setError('יש למלא שם, מטרה ותיקיית עבודה לסשן הסוכנים.');
+      return;
+    }
+
+    setIsAgentSessionSaving(true);
+    try {
+      const record = await createAgentSessionDraftRequest(profileId, {
+        cwd: activeComposerCwd,
+        title: agentSessionDraftTitle.trim(),
+        goal: agentSessionDraftGoal.trim(),
+        plannerProvider: agentSessionDraftPlannerProvider,
+        topicId: selectedSession?.topic?.id || null,
+      });
+      setAgentSessions((current) => [record, ...current.filter((candidate) => candidate.id !== record.id)]);
+      setAgentSessionDraftTitle('');
+      setAgentSessionDraftGoal('');
+      await selectAgentSessionDraft(record.id);
+      setIsAgentSessionDialogOpen(false);
+    } catch (agentSessionError: any) {
+      setError(agentSessionError.message || 'Failed to create agent session draft');
+    } finally {
+      setIsAgentSessionSaving(false);
+    }
+  }
+
+  async function refreshAgentSessionRecord(agentSessionId: string): Promise<CodexAgentSessionRecord | null> {
+    if (!profileId) {
+      return null;
+    }
+
+    try {
+      const freshRecord = await fetchAgentSessionRecord(profileId, agentSessionId);
+      setAgentSessions((current) => [freshRecord, ...current.filter((candidate) => candidate.id !== freshRecord.id)]);
+      if (activeAgentPlanEditorRecord?.id === freshRecord.id) {
+        setActiveAgentPlanEditorRecord(freshRecord);
+        setAgentPlanEditorValue(JSON.stringify(freshRecord.plan || {}, null, 2));
+      }
+      return freshRecord;
+    } catch (agentSessionError: any) {
+      setError(agentSessionError.message || 'Failed to refresh agent session');
+      return null;
+    }
+  }
+
+  async function openAgentPlanEditor(agentSessionId: string) {
+    const record = await refreshAgentSessionRecord(agentSessionId);
+    if (!record) {
+      return;
+    }
+    setActiveAgentPlanEditorRecord(record);
+    setAgentPlanEditorValue(JSON.stringify(record.plan || {}, null, 2));
+  }
+
+  async function saveAgentPlanEditorDraft() {
+    if (!profileId || !activeAgentPlanEditorRecord) {
+      return;
+    }
+
+    setIsAgentPlanSaving(true);
+    try {
+      const parsedPlan = JSON.parse(agentPlanEditorValue);
+      const savedRecord = await saveAgentSessionPlanRequest(profileId, activeAgentPlanEditorRecord.id, parsedPlan);
+      setAgentSessions((current) => [savedRecord, ...current.filter((candidate) => candidate.id !== savedRecord.id)]);
+      setActiveAgentPlanEditorRecord(savedRecord);
+      setAgentPlanEditorValue(JSON.stringify(savedRecord.plan || {}, null, 2));
+    } catch (agentPlanError: any) {
+      setError(agentPlanError.message || 'Failed to save agent plan');
+    } finally {
+      setIsAgentPlanSaving(false);
+    }
+  }
+
+  async function approveAgentSessionPlan(agentSessionId: string) {
+    if (!profileId) {
+      return;
+    }
+
+    setIsAgentSessionApproving(true);
+    try {
+      const approvedRecord = await approveAgentSessionRequest(profileId, agentSessionId);
+      setAgentSessions((current) => [approvedRecord, ...current.filter((candidate) => candidate.id !== approvedRecord.id)]);
+      if (activeAgentPlanEditorRecord?.id === approvedRecord.id) {
+        setActiveAgentPlanEditorRecord(approvedRecord);
+        setAgentPlanEditorValue(JSON.stringify(approvedRecord.plan || {}, null, 2));
+      }
+      setIsAgentSessionDialogOpen(false);
+    } catch (agentSessionError: any) {
+      setError(agentSessionError.message || 'Failed to approve agent session');
+    } finally {
+      setIsAgentSessionApproving(false);
     }
   }
 
@@ -11715,6 +12518,10 @@ export function CodexMobileApp() {
     () => sessionReminders.filter((reminder) => sessionContextSelection.reminderIds.includes(reminder.id)),
     [sessionContextSelection.reminderIds, sessionReminders]
   );
+  const selectedAgentSessionDraft = useMemo(
+    () => agentSessions.find((record) => record.id === sessionContextSelection.agentSessionDraftId) || null,
+    [agentSessions, sessionContextSelection.agentSessionDraftId]
+  );
   const modelPermissionTone = useMemo(
     () => getPermissionTone(modelPermissionSnapshot),
     [modelPermissionSnapshot]
@@ -11767,6 +12574,16 @@ export function CodexMobileApp() {
     }
 
     void loadCurrentProjectAnchors(profileId, activeComposerCwd);
+  }, [activeComposerCwd, profileId]);
+
+  useEffect(() => {
+    if (!profileId || !activeComposerCwd) {
+      setAgentSessions([]);
+      setAgentSessionsError(null);
+      return;
+    }
+
+    void loadCurrentAgentSessions(profileId, activeComposerCwd);
   }, [activeComposerCwd, profileId]);
 
   useEffect(() => {
@@ -12341,6 +13158,23 @@ export function CodexMobileApp() {
             </div>
           )}
 
+          {selectedSession?.agentSession?.plan && (
+            <AgentSessionPlanCard
+              record={{
+                ...selectedSession.agentSession,
+                title: selectedSession.agentSession.title,
+                goal: selectedSession.agentSession.goal,
+                status: selectedSession.agentSession.status,
+                plannerProvider: selectedSession.agentSession.plannerProvider || 'codex',
+                plan: selectedSession.agentSession.plan,
+              }}
+              canApprove={selectedSession.agentSession.kind === 'planner' && selectedSession.agentSession.status === 'planned'}
+              isApproving={isAgentSessionApproving}
+              onEdit={() => void openAgentPlanEditor(selectedSession.agentSession!.id)}
+              onApprove={() => void approveAgentSessionPlan(selectedSession.agentSession!.id)}
+            />
+          )}
+
           {timelineBlocks.map((block) => {
             if (block.type === 'tool-row') {
               return (
@@ -12471,8 +13305,18 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || isSessionContextSelectionSaving) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || isSessionContextSelectionSaving) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
+                {selectedAgentSessionDraft && (
+                  <button
+                    type="button"
+                    onClick={openAgentSessionDialog}
+                    className="inline-flex items-center gap-1 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-[11px] font-medium text-cyan-700 transition hover:bg-cyan-100"
+                  >
+                    <Bot className="h-3.5 w-3.5" />
+                    <span>{selectedAgentSessionDraft.title}</span>
+                  </button>
+                )}
                 {selectedAnchorSummaries.map((anchor) => (
                   <button
                     key={anchor.id}
@@ -13295,7 +14139,7 @@ export function CodexMobileApp() {
                           <div className="min-w-0 flex-1">
                             <div className="text-[11px] font-semibold text-slate-700">תוספות לשיחה</div>
                             <div className="truncate text-[9px] text-slate-400">
-                              קבצים, עוגנים, סקילים ותזכורות
+                              קבצים, עוגנים, סקילים, תזכורות וסוכנים
                             </div>
                           </div>
                         </div>
@@ -13353,6 +14197,19 @@ export function CodexMobileApp() {
                             </div>
                           </div>
                           <Bookmark className="h-4 w-4 shrink-0 text-violet-500" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={openAgentSessionDialog}
+                          className="flex w-full items-center justify-between gap-3 rounded-[0.9rem] border border-slate-100 bg-slate-50/80 px-3 py-2 text-right transition hover:border-cyan-200 hover:bg-cyan-50/50"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-[11px] font-semibold text-slate-700">מצב סוכנים</div>
+                            <div className="text-[9px] text-slate-400">
+                              {selectedAgentSessionDraft ? `פעיל: ${selectedAgentSessionDraft.title}` : 'תכנון והפעלה של סוכנים מתואמים'}
+                            </div>
+                          </div>
+                          <Bot className="h-4 w-4 shrink-0 text-cyan-500" />
                         </button>
                       </div>
                     </div>
@@ -13614,6 +14471,48 @@ export function CodexMobileApp() {
         onClose={() => setIsReminderPickerDialogOpen(false)}
         onToggleReminder={toggleReminderSelection}
         onDeleteReminder={(reminderId) => void deleteReminder(reminderId)}
+      />
+
+      <AgentSessionDialog
+        isOpen={isAgentSessionDialogOpen}
+        cwd={activeComposerCwd}
+        agentSessions={agentSessions}
+        selectedAgentSessionDraftId={sessionContextSelection.agentSessionDraftId}
+        isLoading={isAgentSessionsLoading || isSessionContextSelectionLoading}
+        error={agentSessionsError}
+        draftTitle={agentSessionDraftTitle}
+        draftGoal={agentSessionDraftGoal}
+        draftPlannerProvider={agentSessionDraftPlannerProvider}
+        isSaving={isAgentSessionSaving}
+        isApproving={isAgentSessionApproving}
+        onClose={() => setIsAgentSessionDialogOpen(false)}
+        onDraftTitleChange={setAgentSessionDraftTitle}
+        onDraftGoalChange={setAgentSessionDraftGoal}
+        onDraftPlannerProviderChange={setAgentSessionDraftPlannerProvider}
+        onSelectDraft={(agentSessionDraftId) => void selectAgentSessionDraft(agentSessionDraftId)}
+        onCreateDraft={() => void createAgentSessionDraft()}
+        onOpenPlan={(agentSessionId) => void openAgentPlanEditor(agentSessionId)}
+        onApprove={(agentSessionId) => void approveAgentSessionPlan(agentSessionId)}
+      />
+
+      <AgentPlanEditorDialog
+        record={activeAgentPlanEditorRecord}
+        value={agentPlanEditorValue}
+        isSaving={isAgentPlanSaving}
+        isApproving={isAgentSessionApproving}
+        onChange={setAgentPlanEditorValue}
+        onClose={() => setActiveAgentPlanEditorRecord(null)}
+        onRefresh={() => {
+          if (activeAgentPlanEditorRecord) {
+            void refreshAgentSessionRecord(activeAgentPlanEditorRecord.id);
+          }
+        }}
+        onSave={() => void saveAgentPlanEditorDraft()}
+        onApprove={() => {
+          if (activeAgentPlanEditorRecord) {
+            void approveAgentSessionPlan(activeAgentPlanEditorRecord.id);
+          }
+        }}
       />
 
       <SessionTaskAssignmentDialog

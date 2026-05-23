@@ -26,6 +26,12 @@ import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility
 import { getSessionTopicMap, setSessionTopic } from './codexSessionTopics.js';
 import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
 import { rebindSupportSessionRecord } from './supportAgentService.js';
+import {
+  getAgentSessionRecord,
+  recordAgentSessionLinkedSession,
+  saveAgentSessionPlan,
+  updateAgentRuntimeStatus,
+} from './codexAgentSessions.js';
 
 export type CodexQueueItemStatus =
   | 'scheduled'
@@ -43,6 +49,7 @@ export type CodexQueueLastRunStatus = 'completed' | 'failed';
 export interface CodexQueueItem {
   id: string;
   profileId: string;
+  sourceProfileId: string | null;
   queueKey: string;
   clientRequestId?: string | null;
   sessionId: string | null;
@@ -70,6 +77,9 @@ export interface CodexQueueItem {
   recurringTimeZone: string | null;
   lastRunAt: string | null;
   lastRunStatus: CodexQueueLastRunStatus | null;
+  agentSessionId: string | null;
+  agentId: string | null;
+  agentLinkKind: 'planner' | 'agent' | null;
 }
 
 interface CodexQueueState {
@@ -79,6 +89,7 @@ interface CodexQueueState {
 
 interface EnqueueCodexQueueInput {
   profileId: string;
+  sourceProfileId?: string | null;
   queueKey: string;
   clientRequestId?: string | null;
   sessionId?: string | null;
@@ -97,6 +108,9 @@ interface EnqueueCodexQueueInput {
     frequency: CodexQueueRecurringFrequency;
     timeZone: string;
   } | null;
+  agentSessionId?: string | null;
+  agentId?: string | null;
+  agentLinkKind?: 'planner' | 'agent' | null;
 }
 
 const QUEUE_ROOT = CODEX_APP_CONFIG.queueRoot;
@@ -510,6 +524,9 @@ async function loadState() {
     .map((item) => {
       const next: CodexQueueItem = {
         ...cloneQueueItem(item as CodexQueueItem),
+        sourceProfileId: typeof item.sourceProfileId === 'string' && item.sourceProfileId.trim()
+          ? item.sourceProfileId.trim()
+          : null,
         clientRequestId: typeof item.clientRequestId === 'string' && item.clientRequestId.trim()
           ? item.clientRequestId.trim()
           : null,
@@ -542,6 +559,15 @@ async function loadState() {
           : null,
         lastRunAt: typeof item.lastRunAt === 'string' ? item.lastRunAt : null,
         lastRunStatus: isLastRunStatus(item.lastRunStatus) ? item.lastRunStatus : null,
+        agentSessionId: typeof item.agentSessionId === 'string' && item.agentSessionId.trim()
+          ? item.agentSessionId.trim()
+          : null,
+        agentId: typeof item.agentId === 'string' && item.agentId.trim()
+          ? item.agentId.trim()
+          : null,
+        agentLinkKind: item.agentLinkKind === 'planner' || item.agentLinkKind === 'agent'
+          ? item.agentLinkKind
+          : null,
       };
 
       if (next.scheduleMode === 'recurring' && !isRecurringItem(next)) {
@@ -750,6 +776,78 @@ async function rebindQueueItemsToSession(profileId: string, queueKey: string, se
   }
 }
 
+async function persistPlannerOutputFromDisk(item: CodexQueueItem, sessionId: string) {
+  if (!item.agentSessionId || item.agentLinkKind !== 'planner') {
+    return;
+  }
+
+  const record = await getAgentSessionRecord(item.agentSessionId);
+  if (!record) {
+    throw new Error('Agent session draft was not found while saving planner output');
+  }
+
+  const rawPlan = await fs.readFile(record.planPath, 'utf-8').catch((error: any) => {
+    if (error?.code === 'ENOENT') {
+      throw new Error(`Agent planner did not create the required plan file: ${record.planPath}`);
+    }
+    throw error;
+  });
+  const parsedPlan = JSON.parse(rawPlan);
+  const savedRecord = await saveAgentSessionPlan(item.agentSessionId, parsedPlan, {
+    plannerSessionId: sessionId,
+    plannerProfileId: item.profileId,
+  });
+
+  await recordAgentSessionLinkedSession({
+    sessionId,
+    agentSessionId: savedRecord.id,
+    sourceProfileId: item.sourceProfileId || savedRecord.sourceProfileId,
+    profileId: item.profileId,
+    provider: savedRecord.plannerProvider,
+    kind: 'planner',
+    agentId: null,
+    createdAt: nowIso(),
+  });
+}
+
+async function recordAgentRuntimeCompletion(
+  item: CodexQueueItem,
+  sessionId: string,
+  finalMessage: string
+) {
+  if (!item.agentSessionId || item.agentLinkKind !== 'agent' || !item.agentId) {
+    return;
+  }
+
+  await recordAgentSessionLinkedSession({
+    sessionId,
+    agentSessionId: item.agentSessionId,
+    sourceProfileId: item.sourceProfileId || item.profileId,
+    profileId: item.profileId,
+    provider: getProviderForQueueItem(item.profileId),
+    kind: 'agent',
+    agentId: item.agentId,
+    createdAt: nowIso(),
+  });
+  await updateAgentRuntimeStatus(item.agentSessionId, item.agentId, {
+    runtimeStatus: 'completed',
+    linkedSessionId: sessionId,
+    queueItemId: item.id,
+    lastMessage: finalMessage,
+    lastError: null,
+  });
+}
+
+function getProviderForQueueItem(profileId: string): 'codex' | 'claude' | 'gemini' {
+  if (profileId.startsWith('agent-claude') || profileId.startsWith('support-claude') || profileId.startsWith('claude-')) {
+    return 'claude';
+  }
+  if (profileId.startsWith('agent-gemini') || profileId.startsWith('support-gemini') || profileId.startsWith('gemini-')) {
+    return 'gemini';
+  }
+  return 'codex';
+}
+
 async function processQueueItem(item: CodexQueueItem) {
   item.status = 'running';
   item.startedAt = nowIso();
@@ -757,6 +855,14 @@ async function processQueueItem(item: CodexQueueItem) {
   item.error = null;
   item.attempts += 1;
   await persistState();
+
+  if (item.agentSessionId && item.agentLinkKind === 'agent' && item.agentId) {
+    await updateAgentRuntimeStatus(item.agentSessionId, item.agentId, {
+      runtimeStatus: 'running',
+      queueItemId: item.id,
+      lastError: null,
+    });
+  }
 
   const resolvedSessionId = item.sessionId || state.sessionBindings[item.queueKey] || undefined;
   const shouldApplyForkPromptPrefix = isDraftSessionKey(item.sessionId) || isDraftSessionKey(item.queueKey);
@@ -822,6 +928,11 @@ async function processQueueItem(item: CodexQueueItem) {
         sessionId: result.sessionId,
         finalMessage: result.finalMessage,
       });
+      if (item.agentLinkKind === 'planner') {
+        await persistPlannerOutputFromDisk(item, result.sessionId);
+      } else if (item.agentLinkKind === 'agent') {
+        await recordAgentRuntimeCompletion(item, result.sessionId, result.finalMessage);
+      }
       await transferDraftSidebarMetadataToRealSession(result.sessionId);
       if (item.forkContext) {
         await recordForkSessionMetadata({
@@ -852,6 +963,11 @@ async function processQueueItem(item: CodexQueueItem) {
     item.updatedAt = item.completedAt;
     item.error = null;
     state.sessionBindings[item.queueKey] = result.sessionId;
+    if (item.agentLinkKind === 'planner') {
+      await persistPlannerOutputFromDisk(item, result.sessionId);
+    } else if (item.agentLinkKind === 'agent') {
+      await recordAgentRuntimeCompletion(item, result.sessionId, result.finalMessage);
+    }
     await transferDraftSidebarMetadataToRealSession(result.sessionId);
     if (item.forkContext) {
       await recordForkSessionMetadata({
@@ -879,6 +995,13 @@ async function processQueueItem(item: CodexQueueItem) {
       item.updatedAt = item.completedAt;
       item.error = null;
       item.finalMessage = null;
+      if (item.agentSessionId && item.agentLinkKind === 'agent' && item.agentId) {
+        await updateAgentRuntimeStatus(item.agentSessionId, item.agentId, {
+          runtimeStatus: 'cancelled',
+          queueItemId: item.id,
+          lastError: null,
+        });
+      }
       await persistState();
       return;
     }
@@ -895,6 +1018,13 @@ async function processQueueItem(item: CodexQueueItem) {
     item.error = error?.message || 'Codex job failed';
     item.completedAt = nowIso();
     item.updatedAt = item.completedAt;
+    if (item.agentSessionId && item.agentLinkKind === 'agent' && item.agentId) {
+      await updateAgentRuntimeStatus(item.agentSessionId, item.agentId, {
+        runtimeStatus: 'failed',
+        queueItemId: item.id,
+        lastError: item.error,
+      });
+    }
     await persistState();
   }
 }
@@ -1007,6 +1137,9 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
   const item: CodexQueueItem = {
     id: randomUUID(),
     profileId: input.profileId,
+    sourceProfileId: typeof input.sourceProfileId === 'string' && input.sourceProfileId.trim()
+      ? input.sourceProfileId.trim()
+      : null,
     queueKey: input.queueKey,
     clientRequestId,
     sessionId: input.sessionId || state.sessionBindings[input.queueKey] || null,
@@ -1046,6 +1179,15 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
     recurringTimeZone: recurrence?.timeZone || null,
     lastRunAt: null,
     lastRunStatus: null,
+    agentSessionId: typeof input.agentSessionId === 'string' && input.agentSessionId.trim()
+      ? input.agentSessionId.trim()
+      : null,
+    agentId: typeof input.agentId === 'string' && input.agentId.trim()
+      ? input.agentId.trim()
+      : null,
+    agentLinkKind: input.agentLinkKind === 'planner' || input.agentLinkKind === 'agent'
+      ? input.agentLinkKind
+      : null,
   };
 
   if (isRecurringItem(item)) {
