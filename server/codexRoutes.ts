@@ -44,8 +44,10 @@ import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility
 import { deleteSessionVisibility } from './codexSessionVisibility.js';
 import {
   createSessionTopic,
+  deleteSessionTopic,
   deleteSessionTopicAssignment,
   getSessionTopicMap,
+  listTopicAssignmentSessionIds,
   listSessionTopics,
   setSessionTopic,
 } from './codexSessionTopics.js';
@@ -912,6 +914,39 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
   ]);
 }
 
+async function deleteSessionPermanently(profileId: string, sessionId: string) {
+  if (isDraftSessionKey(sessionId)) {
+    await deleteForkDraftSession(sessionId);
+    await deleteSessionMetadata(profileId, sessionId);
+    await removeSessionFromTasks(profileId, sessionId);
+    await removeSessionSubtasks(profileId, sessionId);
+    return {
+      deleted: true,
+      sessionId,
+      profileId,
+      draft: true,
+    };
+  }
+
+  try {
+    await deleteAgentSession(sessionId, profileId);
+  } catch (error) {
+    if (!isMissingSessionError(error)) {
+      throw error;
+    }
+  }
+
+  await deleteSessionMetadata(profileId, sessionId);
+  await removeSessionFromTasks(profileId, sessionId);
+  await removeSessionSubtasks(profileId, sessionId);
+  return {
+    deleted: true,
+    sessionId,
+    profileId,
+    draft: false,
+  };
+}
+
 interface ProfessionalModeQueueSpec {
   prompt: string;
   promptPreview: string;
@@ -1595,6 +1630,42 @@ router.post('/topics', requireCodexAccess, async (req, res) => {
   }
 });
 
+router.delete('/topics/:topicId', requireCodexAccess, async (req, res) => {
+  try {
+    const topicId = readRouteParam(req.params.topicId);
+    const profileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+        ? req.body.profileId.trim()
+        : undefined;
+    const deleteSessions = req.query.deleteSessions === 'true' || req.body?.deleteSessions === true;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const affectedSessionIds = await listTopicAssignmentSessionIds(profileId, topicId);
+    const deletion = await deleteSessionTopic(profileId, topicId);
+
+    if (deleteSessions) {
+      for (const sessionId of affectedSessionIds) {
+        await deleteSessionPermanently(profileId, sessionId);
+      }
+    }
+
+    res.json({
+      deleted: true,
+      profileId,
+      topic: deletion.topic,
+      affectedSessionIds,
+      deletedSessions: deleteSessions,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete topic' });
+  }
+});
+
 router.post('/sessions/:sessionId/hide', requireCodexAccess, async (req, res) => {
   try {
     const sessionId = readRouteParam(req.params.sessionId);
@@ -1632,37 +1703,7 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
       res.status(400).json({ error: 'Profile id is required' });
       return;
     }
-
-    if (isDraftSessionKey(sessionId)) {
-      await deleteForkDraftSession(sessionId);
-      await deleteSessionMetadata(requestedProfileId || profileId, sessionId);
-      await removeSessionFromTasks(requestedProfileId || profileId, sessionId);
-      await removeSessionSubtasks(requestedProfileId || profileId, sessionId);
-      res.json({
-        deleted: true,
-        sessionId,
-        profileId: requestedProfileId || profileId,
-        draft: true,
-      });
-      return;
-    }
-
-    try {
-      await deleteAgentSession(sessionId, profileId);
-    } catch (error) {
-      if (!isMissingSessionError(error)) {
-        throw error;
-      }
-    }
-    await deleteSessionMetadata(requestedProfileId || profileId, sessionId);
-    await removeSessionFromTasks(requestedProfileId || profileId, sessionId);
-    await removeSessionSubtasks(requestedProfileId || profileId, sessionId);
-    res.json({
-      deleted: true,
-      sessionId,
-      profileId: requestedProfileId || profileId,
-      draft: false,
-    });
+    res.json(await deleteSessionPermanently(requestedProfileId || profileId, sessionId));
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to delete session permanently' });
   }

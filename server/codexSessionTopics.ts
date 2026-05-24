@@ -12,6 +12,7 @@ export interface CodexSessionTopic {
   colorKey: string;
   createdAt: string;
   updatedAt: string;
+  assignedSessionCount?: number;
 }
 
 interface CodexSessionTopicsState {
@@ -44,6 +45,20 @@ function nowIso(): string {
 
 function cloneTopic(topic: CodexSessionTopic): CodexSessionTopic {
   return { ...topic };
+}
+
+function countAssignedSessions(profileId: string, topicId: string): number {
+  const prefix = `${profileId}:`;
+  let count = 0;
+  for (const [assignmentKey, assignedTopicId] of Object.entries(state.assignments)) {
+    if (!assignmentKey.startsWith(prefix)) {
+      continue;
+    }
+    if (assignedTopicId === topicId) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 async function ensureStorageRoot() {
@@ -122,7 +137,10 @@ export async function listSessionTopics(profileId: string, cwd: string): Promise
   return state.topics
     .filter((topic) => topic.profileId === profileId && topic.cwd === cwd)
     .sort((left, right) => left.name.localeCompare(right.name, 'he'))
-    .map(cloneTopic);
+    .map((topic) => ({
+      ...cloneTopic(topic),
+      assignedSessionCount: countAssignedSessions(profileId, topic.id),
+    }));
 }
 
 export async function createSessionTopic(
@@ -209,6 +227,57 @@ export async function getSessionTopicMap(profileId: string): Promise<Record<stri
   }
 
   return result;
+}
+
+export async function listTopicAssignmentSessionIds(profileId: string, topicId: string): Promise<string[]> {
+  await ensureStateLoaded();
+  const prefix = `${profileId}:`;
+  const sessionIds: string[] = [];
+
+  for (const [assignmentKey, assignedTopicId] of Object.entries(state.assignments)) {
+    if (!assignmentKey.startsWith(prefix) || assignedTopicId !== topicId) {
+      continue;
+    }
+
+    const sessionId = assignmentKey.slice(prefix.length);
+    if (sessionId) {
+      sessionIds.push(sessionId);
+    }
+  }
+
+  return sessionIds;
+}
+
+export async function deleteSessionTopic(
+  profileId: string,
+  topicId: string
+): Promise<{ topic: CodexSessionTopic; affectedSessionIds: string[] }> {
+  await ensureStateLoaded();
+
+  const topicIndex = state.topics.findIndex((candidate) => (
+    candidate.id === topicId
+    && candidate.profileId === profileId
+  ));
+
+  if (topicIndex < 0) {
+    throw new Error('Topic was not found');
+  }
+
+  const topic = state.topics[topicIndex]!;
+  const affectedSessionIds = await listTopicAssignmentSessionIds(profileId, topicId);
+  state.topics.splice(topicIndex, 1);
+
+  for (const assignmentKey of Object.keys(state.assignments)) {
+    if (state.assignments[assignmentKey] === topicId && assignmentKey.startsWith(`${profileId}:`)) {
+      delete state.assignments[assignmentKey];
+    }
+  }
+
+  await persistState();
+  return {
+    topic: cloneTopic(topic),
+    affectedSessionIds,
+  };
 }
 
 export async function deleteSessionTopicAssignment(profileId: string, sessionId: string): Promise<void> {

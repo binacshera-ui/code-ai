@@ -290,6 +290,7 @@ interface CodexSessionTopic {
   colorKey: string;
   createdAt: string;
   updatedAt: string;
+  assignedSessionCount?: number;
 }
 
 interface CodexQueueServerItem {
@@ -1921,6 +1922,22 @@ async function createTopic(
     }),
   });
   return data.topic;
+}
+
+async function deleteTopicRequest(
+  profileId: string,
+  topicId: string,
+  deleteSessions: boolean
+): Promise<{
+  deleted: true;
+  profileId: string;
+  topic: CodexSessionTopic;
+  affectedSessionIds: string[];
+  deletedSessions: boolean;
+}> {
+  return fetchJson(`/api/codex/topics/${encodeURIComponent(topicId)}?profile=${encodeURIComponent(profileId)}&deleteSessions=${deleteSessions ? 'true' : 'false'}`, {
+    method: 'DELETE',
+  });
 }
 
 async function assignSessionTopicRequest(
@@ -7040,12 +7057,18 @@ function TopicManagerDialog({
   newTopicName,
   newTopicIcon,
   newTopicColorKey,
+  pendingDeleteTopic,
+  deletingTopicId,
   onClose,
   onAssignTopic,
   onSaveSessionTitle,
   onResetSessionTitle,
   onChangeCustomSessionTitle,
   onCreateTopic,
+  onRequestDeleteTopic,
+  onCancelDeleteTopic,
+  onDeleteTopicMoveToUntagged,
+  onDeleteTopicWithSessions,
   onChangeName,
   onChangeIcon,
   onChangeColorKey,
@@ -7059,12 +7082,18 @@ function TopicManagerDialog({
   newTopicName: string;
   newTopicIcon: string;
   newTopicColorKey: string;
+  pendingDeleteTopic: CodexSessionTopic | null;
+  deletingTopicId: string | null;
   onClose: () => void;
   onAssignTopic: (topicId: string | null) => void;
   onSaveSessionTitle: () => void;
   onResetSessionTitle: () => void;
   onChangeCustomSessionTitle: (value: string) => void;
   onCreateTopic: () => void;
+  onRequestDeleteTopic: (topic: CodexSessionTopic) => void;
+  onCancelDeleteTopic: () => void;
+  onDeleteTopicMoveToUntagged: () => void;
+  onDeleteTopicWithSessions: () => void;
   onChangeName: (value: string) => void;
   onChangeIcon: (value: string) => void;
   onChangeColorKey: (value: string) => void;
@@ -7159,23 +7188,40 @@ function TopicManagerDialog({
               topics.map((topic) => {
                 const colors = getTopicColorPreset(topic.colorKey);
                 return (
-                  <button
+                  <div
                     key={topic.id}
-                    type="button"
-                    onClick={() => onAssignTopic(topic.id)}
-                    className="flex w-full items-center justify-between rounded-[1.25rem] border px-4 py-3 text-right transition hover:opacity-90"
-                    style={{
-                      backgroundColor: colors.bg,
-                      color: colors.text,
-                      borderColor: colors.border,
-                    }}
+                    className="flex items-center gap-2"
                   >
-                    <div className="flex items-center gap-2">
-                      <span>{topic.icon}</span>
-                      <span className="text-sm font-medium">{topic.name}</span>
-                    </div>
-                    <span className="text-xs opacity-75">{topic.cwd === session.cwd ? 'תיקייה זו' : topic.cwd}</span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => onAssignTopic(topic.id)}
+                      className="flex min-w-0 flex-1 items-center justify-between rounded-[1.25rem] border px-4 py-3 text-right transition hover:opacity-90"
+                      style={{
+                        backgroundColor: colors.bg,
+                        color: colors.text,
+                        borderColor: colors.border,
+                      }}
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span>{topic.icon}</span>
+                        <span className="truncate text-sm font-medium">{topic.name}</span>
+                      </div>
+                      <span className="shrink-0 text-xs opacity-75">
+                        {typeof topic.assignedSessionCount === 'number'
+                          ? `${topic.assignedSessionCount} שיחות`
+                          : (topic.cwd === session.cwd ? 'תיקייה זו' : topic.cwd)}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRequestDeleteTopic(topic)}
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-rose-100 bg-white text-rose-500 transition hover:border-rose-200 hover:bg-rose-50"
+                      aria-label={`מחק את הנושא ${topic.name}`}
+                      title="מחק נושא"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
                 );
               })
             )}
@@ -7239,6 +7285,51 @@ function TopicManagerDialog({
             </button>
           </div>
         </div>
+
+        {pendingDeleteTopic && (
+          <div className="border-t border-slate-100 bg-white/95 px-5 py-4">
+            <div className="rounded-[1.5rem] border border-rose-100 bg-white px-4 py-4 shadow-[0_24px_60px_-36px_rgba(244,63,94,0.28)]">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-rose-50 text-rose-500">
+                  <Trash2 className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-slate-800">למחוק את הנושא {pendingDeleteTopic.name}?</div>
+                  <div className="mt-1 text-[12px] leading-6 text-slate-500">
+                    יש לנושא הזה {pendingDeleteTopic.assignedSessionCount ?? 0} שיחות משויכות. אפשר למחוק גם אותן, או להשאיר אותן ולעביר ל־ללא נושא.
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={onDeleteTopicMoveToUntagged}
+                  disabled={deletingTopicId === pendingDeleteTopic.id}
+                  className="h-11 rounded-full border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-40"
+                >
+                  מחק נושא והעבר שיחות לללא נושא
+                </button>
+                <button
+                  type="button"
+                  onClick={onDeleteTopicWithSessions}
+                  disabled={deletingTopicId === pendingDeleteTopic.id}
+                  className="h-11 rounded-full border border-rose-100 bg-rose-50 px-4 text-sm font-medium text-rose-600 transition hover:bg-rose-100 disabled:opacity-40"
+                >
+                  {deletingTopicId === pendingDeleteTopic.id ? 'מוחק...' : 'מחק גם את השיחות שבתוכו'}
+                </button>
+                <button
+                  type="button"
+                  onClick={onCancelDeleteTopic}
+                  disabled={deletingTopicId === pendingDeleteTopic.id}
+                  className="h-11 rounded-full bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
+                >
+                  בטל
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -9177,6 +9268,8 @@ export function CodexMobileApp() {
   const [folderTopics, setFolderTopics] = useState<CodexSessionTopic[]>([]);
   const [isTopicLoading, setIsTopicLoading] = useState(false);
   const [topicError, setTopicError] = useState<string | null>(null);
+  const [pendingDeleteTopic, setPendingDeleteTopic] = useState<CodexSessionTopic | null>(null);
+  const [deletingTopicId, setDeletingTopicId] = useState<string | null>(null);
   const [customSessionTitle, setCustomSessionTitle] = useState('');
   const [isSavingSessionTitle, setIsSavingSessionTitle] = useState(false);
   const [transferringEntryId, setTransferringEntryId] = useState<string | null>(null);
@@ -11404,6 +11497,8 @@ export function CodexMobileApp() {
   async function openTopicManager(session: CodexSessionSummary) {
     setTopicSession(session);
     setTopicError(null);
+    setPendingDeleteTopic(null);
+    setDeletingTopicId(null);
     setFolderTopics([]);
     setCustomSessionTitle(session.title);
     setIsSavingSessionTitle(false);
@@ -11486,6 +11581,47 @@ export function CodexMobileApp() {
       setNewTopicName('');
     } catch (createError: any) {
       setTopicError(createError.message || 'Failed to create topic');
+    }
+  }
+
+  async function deleteTopicFromManager(deleteSessions: boolean) {
+    if (!pendingDeleteTopic) {
+      return;
+    }
+
+    try {
+      setDeletingTopicId(pendingDeleteTopic.id);
+      const response = await deleteTopicRequest(profileId, pendingDeleteTopic.id, deleteSessions);
+      const affectedIds = new Set(response.affectedSessionIds);
+
+      startTransition(() => {
+        setFolderTopics((current) => current.filter((topic) => topic.id !== pendingDeleteTopic.id));
+
+        if (deleteSessions) {
+          setSessions((current) => current.filter((session) => !affectedIds.has(session.id)));
+          setSelectedSession((current) => (current && affectedIds.has(current.id) ? null : current));
+          setSelectedSessionId((current) => (current && affectedIds.has(current) ? null : current));
+        } else {
+          setSessions((current) => current.map((session) => (
+            affectedIds.has(session.id)
+              ? { ...session, topic: null }
+              : session
+          )));
+          setSelectedSession((current) => (
+            current && affectedIds.has(current.id)
+              ? { ...current, topic: null }
+              : current
+          ));
+        }
+      });
+
+      setPendingDeleteTopic(null);
+      setDeletingTopicId(null);
+      setTopicError(null);
+      setTopicSession(null);
+    } catch (deleteError: any) {
+      setTopicError(deleteError.message || 'Failed to delete topic');
+      setDeletingTopicId(null);
     }
   }
 
@@ -14856,12 +14992,27 @@ export function CodexMobileApp() {
           newTopicName={newTopicName}
           newTopicIcon={newTopicIcon}
           newTopicColorKey={newTopicColorKey}
-          onClose={() => setTopicSession(null)}
+          pendingDeleteTopic={pendingDeleteTopic}
+          deletingTopicId={deletingTopicId}
+          onClose={() => {
+            setTopicSession(null);
+            setPendingDeleteTopic(null);
+            setDeletingTopicId(null);
+          }}
           onAssignTopic={(topicId) => void assignTopicToSession(topicSession, topicId)}
           onSaveSessionTitle={() => void saveSessionTitle(topicSession, customSessionTitle)}
           onResetSessionTitle={() => void saveSessionTitle(topicSession, null)}
           onChangeCustomSessionTitle={setCustomSessionTitle}
           onCreateTopic={() => void createAndAssignTopic()}
+          onRequestDeleteTopic={setPendingDeleteTopic}
+          onCancelDeleteTopic={() => {
+            if (deletingTopicId) {
+              return;
+            }
+            setPendingDeleteTopic(null);
+          }}
+          onDeleteTopicMoveToUntagged={() => void deleteTopicFromManager(false)}
+          onDeleteTopicWithSessions={() => void deleteTopicFromManager(true)}
           onChangeName={setNewTopicName}
           onChangeIcon={setNewTopicIcon}
           onChangeColorKey={(value) => setNewTopicColorKey(value as keyof typeof TOPIC_COLOR_PRESETS)}
