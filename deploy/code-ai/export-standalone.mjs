@@ -49,6 +49,12 @@ async function copyRelativePath(outputDir, relativePath) {
   await cp(sourcePath, targetPath, { recursive: true });
 }
 
+async function copyPathToTarget(outputDir, sourcePath, targetRelativePath) {
+  const targetPath = path.join(outputDir, targetRelativePath);
+  await mkdir(path.dirname(targetPath), { recursive: true });
+  await cp(sourcePath, targetPath, { recursive: true });
+}
+
 async function writeRootWrapper(outputDir, filename, content, mode) {
   const targetPath = path.join(outputDir, filename);
   await writeFile(targetPath, content, 'utf8');
@@ -129,6 +135,12 @@ async function main() {
   for (const relativePath of pathsToCopy) {
     await copyRelativePath(outputDir, relativePath);
   }
+
+  await copyPathToTarget(
+    outputDir,
+    path.resolve(APP_ROOT, '../../.codex/skills/bina-cshera-session-trigger-integrator'),
+    '.codex/skills/bina-cshera-session-trigger-integrator'
+  );
 
   await removeExportNoise(outputDir);
   await pruneStandaloneOnlyFiles(outputDir);
