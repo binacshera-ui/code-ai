@@ -881,6 +881,7 @@ async function copySessionContextSelectionToSession(
     && selection.skillIds.length === 0
     && selection.reminderIds.length === 0
     && !selection.agentSessionDraftId
+    && !selection.professionalMode
   ) {
     return;
   }
@@ -909,6 +910,40 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
     deleteSupportSessionRecord(profileId, sessionId),
     deleteSessionChangeRecords(sessionId),
   ]);
+}
+
+interface ProfessionalModeQueueSpec {
+  prompt: string;
+  promptPreview: string;
+}
+
+function buildProfessionalModeQueueSpecs(goal: string): ProfessionalModeQueueSpec[] {
+  const trimmedGoal = goal.trim();
+  return [
+    {
+      prompt: [
+        `עליך לתכנן היטב מקצה לקצה את "${trimmedGoal}".`,
+        'חשוב קודם למפות את המטרה, התלויות, הסיכונים, שלבי העבודה, ומה הסדר המקצועי הנכון לביצוע.',
+        'אל תישאר ברמת דיבור כללית; כתוב תכנון מעשי ומדויק ואז עבור לביצוע הצעד הראשון שבאמת מקדם את המשימה.',
+      ].join('\n\n'),
+      promptPreview: `מצב מקצועי · תכנון · ${trimmedGoal}`,
+    },
+    {
+      prompt: [
+        `כעת בצע על מלא ובצורה מקצועית את "${trimmedGoal}".`,
+        'הסתמך על התכנון שכבר נבנה בשיחה, עבוד מקצה לקצה, אל תעצור באמצע, ועדכן באופן ברור מה בוצע בפועל ומה נשאר אם יש חסם אמיתי.',
+      ].join('\n\n'),
+      promptPreview: `מצב מקצועי · ביצוע · ${trimmedGoal}`,
+    },
+    {
+      prompt: [
+        `בדוק כעת מקצה לקצה את "${trimmedGoal}".`,
+        'בצע בדיקת עומק מקצועית לתוצאה שכבר הופקה: מה תקין, מה חסר, מה מסוכן, ומה עדיין דורש תיקון או אימות נוסף.',
+        'אם אתה מגלה פער, דווח עליו בצורה ישירה וברורה.',
+      ].join('\n\n'),
+      promptPreview: `מצב מקצועי · בדיקה · ${trimmedGoal}`,
+    },
+  ];
 }
 
 function getProviderDisplayLabel(provider: AppProvider): string {
@@ -2190,6 +2225,7 @@ router.post('/session-context-selection', requireCodexAccess, async (req, res) =
       skillIds: req.body?.skillIds,
       reminderIds: req.body?.reminderIds,
       agentSessionDraftId: req.body?.agentSessionDraftId,
+      professionalMode: req.body?.professionalMode,
     });
     res.json({ selection });
   } catch (error: any) {
@@ -2865,7 +2901,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     const sessionContextKey = sessionId || queueKey;
     const sessionContextSelection = sessionContextKey
       ? await getSessionContextSelection(visibleProfileId, sessionContextKey)
-      : { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null };
+      : { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false };
     const contextCwd = cwd || (
       sessionId
         ? (await getAgentSessionDetail(sessionId, profileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
@@ -2922,6 +2958,47 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       }
 
       res.status(202).json({ item: plannerItem, agentSession: updatedRecord });
+      return;
+    }
+
+    if (sessionContextSelection.professionalMode) {
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב מקצועי אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      const professionalSpecs = buildProfessionalModeQueueSpecs(basePrompt);
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of professionalSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          scheduledAt,
+          attachments: index === 0 ? attachments : [],
+        });
+        queuedItems.push(nextItem);
+      }
+
+      if (sessionContextKey) {
+        await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      }
+
+      res.status(202).json({ items: queuedItems });
       return;
     }
 

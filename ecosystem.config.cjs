@@ -8,7 +8,10 @@ module.exports = {
       instances: 1,
       autorestart: true,
       watch: false,
-      max_memory_restart: '500M',
+      // The code-ai process can legitimately spike above 500M while loading
+      // profiles, sessions, and queue state. Keep PM2 from killing active
+      // requests during normal workload bursts.
+      max_memory_restart: '2G',
       interpreter: 'node',
       interpreter_args: '--env-file=.env',
       env: {

@@ -7,6 +7,7 @@ export interface CodexSessionContextSelection {
   skillIds: string[];
   reminderIds: string[];
   agentSessionDraftId: string | null;
+  professionalMode: boolean;
 }
 
 interface SessionContextSelectionsState {
@@ -51,6 +52,7 @@ function cloneSelection(selection: CodexSessionContextSelection): CodexSessionCo
     skillIds: [...selection.skillIds],
     reminderIds: [...selection.reminderIds],
     agentSessionDraftId: selection.agentSessionDraftId || null,
+    professionalMode: selection.professionalMode === true,
   };
 }
 
@@ -78,6 +80,7 @@ async function ensureStateLoaded() {
                   agentSessionDraftId: typeof selection?.agentSessionDraftId === 'string' && selection.agentSessionDraftId.trim()
                     ? selection.agentSessionDraftId.trim()
                     : null,
+                  professionalMode: selection?.professionalMode === true,
                 },
               ];
             })
@@ -118,7 +121,7 @@ export async function getSessionContextSelection(
   const selection = state.selectionsByKey[buildSelectionKey(profileId, sessionKey)];
   return selection
     ? cloneSelection(selection)
-    : { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null };
+    : { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false };
 }
 
 export async function setSessionContextSelection(
@@ -135,6 +138,7 @@ export async function setSessionContextSelection(
     agentSessionDraftId: typeof selection?.agentSessionDraftId === 'string' && selection.agentSessionDraftId.trim()
       ? selection.agentSessionDraftId.trim()
       : null,
+    professionalMode: selection?.professionalMode === true,
   };
 
   if (
@@ -142,10 +146,11 @@ export async function setSessionContextSelection(
     && normalized.skillIds.length === 0
     && normalized.reminderIds.length === 0
     && !normalized.agentSessionDraftId
+    && !normalized.professionalMode
   ) {
     delete state.selectionsByKey[key];
     await persistState();
-    return { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null };
+    return { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false };
   }
 
   state.selectionsByKey[key] = normalized;

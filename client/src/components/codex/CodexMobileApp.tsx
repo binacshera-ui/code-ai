@@ -497,6 +497,11 @@ interface CodexQueueItemsResponse {
   items: CodexQueueServerItem[];
 }
 
+interface CodexQueueCreateResponse {
+  item?: CodexQueueServerItem;
+  items?: CodexQueueServerItem[];
+}
+
 interface CodexQueueItemResponse {
   item: CodexQueueServerItem;
   session: CodexSessionDetail | null;
@@ -565,6 +570,7 @@ interface CodexSessionContextSelection {
   skillIds: string[];
   reminderIds: string[];
   agentSessionDraftId: string | null;
+  professionalMode: boolean;
 }
 
 interface CodexSessionTasksResponse {
@@ -1528,7 +1534,7 @@ async function fetchSessionContextSelection(profileId: string, sessionKey: strin
   const data = await fetchJson<CodexSessionContextSelectionResponse>(
     `/api/codex/session-context-selection?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
   );
-  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null };
+  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false };
 }
 
 async function saveSessionContextSelection(
@@ -1548,9 +1554,10 @@ async function saveSessionContextSelection(
       skillIds: selection.skillIds,
       reminderIds: selection.reminderIds,
       agentSessionDraftId: selection.agentSessionDraftId,
+      professionalMode: selection.professionalMode,
     }),
   });
-  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null };
+  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false };
 }
 
 async function fetchAgentSessions(profileId: string, cwd?: string | null): Promise<CodexAgentSessionRecord[]> {
@@ -8089,6 +8096,126 @@ function AgentSessionDialog({
   );
 }
 
+function ModePickerDialog({
+  isOpen,
+  isProfessionalModeSelected,
+  selectedAgentSessionDraft,
+  onClose,
+  onToggleProfessionalMode,
+  onOpenAgentSessions,
+}: {
+  isOpen: boolean;
+  isProfessionalModeSelected: boolean;
+  selectedAgentSessionDraft: CodexAgentSessionRecord | null;
+  onClose: () => void;
+  onToggleProfessionalMode: () => void;
+  onOpenAgentSessions: () => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[77] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close modes dialog"
+      />
+      <div className="relative z-10 flex w-full max-w-sm flex-col overflow-hidden rounded-[1.7rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-indigo-600">
+              <LayoutGrid className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Modes
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">מצבים</div>
+              <div className="mt-1 text-xs text-slate-500">
+                בחר את מצב העבודה שיצור את השליחה או את זרימת הסוכנים.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="space-y-3 px-5 py-5">
+          <button
+            type="button"
+            onClick={onToggleProfessionalMode}
+            className={cn(
+              'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
+              isProfessionalModeSelected
+                ? 'border-emerald-200 bg-emerald-50/80'
+                : 'border-slate-100 bg-slate-50/80 hover:border-emerald-200 hover:bg-emerald-50/50'
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-800">מצב מקצועי</div>
+                {isProfessionalModeSelected && (
+                  <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-medium text-white">
+                    פעיל
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">
+                יוצר 3 משימות רצופות: תכנון, ביצוע ובדיקה.
+              </div>
+            </div>
+            <div className={cn(
+              'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+              isProfessionalModeSelected ? 'bg-emerald-100 text-emerald-600' : 'bg-white text-emerald-500'
+            )}>
+              <Zap className="h-4 w-4" />
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenAgentSessions}
+            className={cn(
+              'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
+              selectedAgentSessionDraft
+                ? 'border-cyan-200 bg-cyan-50/80'
+                : 'border-slate-100 bg-slate-50/80 hover:border-cyan-200 hover:bg-cyan-50/50'
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-800">מצב סוכנים</div>
+                {selectedAgentSessionDraft && (
+                  <span className="rounded-full bg-cyan-600 px-2 py-0.5 text-[10px] font-medium text-white">
+                    {selectedAgentSessionDraft.title}
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">
+                תכנון והפעלה של סוכנים מתואמים לאותה משימה גדולה.
+              </div>
+            </div>
+            <div className={cn(
+              'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+              selectedAgentSessionDraft ? 'bg-cyan-100 text-cyan-700' : 'bg-white text-cyan-500'
+            )}>
+              <Bot className="h-4 w-4" />
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AgentPlanEditorDialog({
   record,
   value,
@@ -8924,6 +9051,7 @@ export function CodexMobileApp() {
   const [isAnchorManagerOpen, setIsAnchorManagerOpen] = useState(false);
   const [isSkillPickerDialogOpen, setIsSkillPickerDialogOpen] = useState(false);
   const [isReminderPickerDialogOpen, setIsReminderPickerDialogOpen] = useState(false);
+  const [isModePickerDialogOpen, setIsModePickerDialogOpen] = useState(false);
   const [isAgentSessionDialogOpen, setIsAgentSessionDialogOpen] = useState(false);
   const [isTaskBoardOpen, setIsTaskBoardOpen] = useState(false);
   const [isSessionTaskDialogOpen, setIsSessionTaskDialogOpen] = useState(false);
@@ -8964,7 +9092,13 @@ export function CodexMobileApp() {
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
-  const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null });
+  const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>({
+    anchorIds: [],
+    skillIds: [],
+    reminderIds: [],
+    agentSessionDraftId: null,
+    professionalMode: false,
+  });
   const [instructionDraft, setInstructionDraft] = useState('');
   const [projectAnchors, setProjectAnchors] = useState<CodexProjectAnchor[]>([]);
   const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
@@ -10392,6 +10526,7 @@ export function CodexMobileApp() {
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
     setIsReminderPickerDialogOpen(false);
+    setIsModePickerDialogOpen(false);
     setIsAgentSessionDialogOpen(false);
     setIsTaskBoardOpen(false);
     setIsSessionTaskDialogOpen(false);
@@ -10480,6 +10615,7 @@ export function CodexMobileApp() {
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
     setIsReminderPickerDialogOpen(false);
+    setIsModePickerDialogOpen(false);
     setIsAgentSessionDialogOpen(false);
     setIsTaskBoardOpen(false);
     setIsSessionTaskDialogOpen(false);
@@ -10504,7 +10640,7 @@ export function CodexMobileApp() {
     setSessionRemindersError(null);
     setSessionTasks([]);
     setSessionTasksError(null);
-    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null });
+    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false });
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
@@ -11008,7 +11144,7 @@ export function CodexMobileApp() {
     setError(null);
 
     try {
-      const data = await fetchJson<{ item: CodexQueueServerItem }>('/api/codex/queue/items', {
+      const data = await fetchJson<CodexQueueCreateResponse>('/api/codex/queue/items', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -11043,13 +11179,29 @@ export function CodexMobileApp() {
         }),
       });
 
+      const createdItems = data.items && data.items.length > 0
+        ? data.items
+        : data.item
+          ? [data.item]
+          : [];
+
+      if (createdItems.length === 0) {
+        throw new Error('השרת לא החזיר משימות חדשות לתור.');
+      }
+
       startTransition(() => {
-        setQueueItems((current) => [data.item, ...current.filter((item) => item.id !== data.item.id)]);
+        setQueueItems((current) => {
+          const nextById = new Map(current.map((item) => [item.id, item]));
+          for (const item of createdItems) {
+            nextById.set(item.id, item);
+          }
+          return sortQueueItemsForDisplay([...nextById.values()]);
+        });
       });
       if (!selectedSessionId) {
         draftQueueItemIdsRef.current[currentQueueKey] = Array.from(new Set([
           ...(draftQueueItemIdsRef.current[currentQueueKey] || []),
-          data.item.id,
+          ...createdItems.map((item) => item.id),
         ]));
       }
       setPrompt('');
@@ -11060,8 +11212,8 @@ export function CodexMobileApp() {
       clearDraftAttachments();
       sendDedupRef.current = null;
       recordCodexBreadcrumb('queue-enqueue-succeeded', {
-        itemId: data.item.id,
-        status: data.item.status,
+        itemIds: createdItems.map((item) => item.id),
+        statuses: createdItems.map((item) => item.status),
       });
       await loadQueueItems(profileId, { silent: true });
     } catch (sendError: any) {
@@ -11663,7 +11815,7 @@ export function CodexMobileApp() {
 
   async function loadCurrentSessionContextSelection(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
     if (!nextProfileId || !nextSessionKey) {
-      setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null });
+      setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false });
       return;
     }
 
@@ -11677,7 +11829,7 @@ export function CodexMobileApp() {
       setSessionContextSelection(selection);
     } catch (selectionError: any) {
       if (requestToken === latestSessionContextSelectionLoadTokenRef.current) {
-        setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null });
+        setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false });
         setError(selectionError.message || 'Failed to load anchor, skill and reminder selection');
       }
     } finally {
@@ -11706,11 +11858,12 @@ export function CodexMobileApp() {
   }
 
   function clearSessionContextSelectionAfterSend() {
-    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null });
+    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false });
     setIsAdditionsMenuOpen(false);
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
     setIsReminderPickerDialogOpen(false);
+    setIsModePickerDialogOpen(false);
     setIsAgentSessionDialogOpen(false);
   }
 
@@ -11888,6 +12041,7 @@ export function CodexMobileApp() {
       skillIds: sessionContextSelection.skillIds,
       reminderIds: sessionContextSelection.reminderIds,
       agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
+      professionalMode: sessionContextSelection.professionalMode,
     });
   }
 
@@ -11903,6 +12057,7 @@ export function CodexMobileApp() {
       skillIds: [...currentIds],
       reminderIds: sessionContextSelection.reminderIds,
       agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
+      professionalMode: sessionContextSelection.professionalMode,
     });
   }
 
@@ -11918,6 +12073,7 @@ export function CodexMobileApp() {
       skillIds: sessionContextSelection.skillIds,
       reminderIds: [...currentIds],
       agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
+      professionalMode: sessionContextSelection.professionalMode,
     });
   }
 
@@ -11953,12 +12109,32 @@ export function CodexMobileApp() {
     }
   }
 
+  function openModePickerDialog() {
+    setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(true);
+  }
+
   function openAgentSessionDialog() {
     setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(false);
     setIsAgentSessionDialogOpen(true);
     if (profileId && activeComposerCwd) {
       void loadCurrentAgentSessions(profileId, activeComposerCwd);
     }
+  }
+
+  function toggleProfessionalMode() {
+    void persistSessionContextSelection({
+      anchorIds: sessionContextSelection.anchorIds,
+      skillIds: sessionContextSelection.skillIds,
+      reminderIds: sessionContextSelection.reminderIds,
+      agentSessionDraftId: sessionContextSelection.professionalMode
+        ? sessionContextSelection.agentSessionDraftId
+        : null,
+      professionalMode: !sessionContextSelection.professionalMode,
+    });
+    setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(false);
   }
 
   function openCreateReminderDialog(entry: CodexTimelineEntry) {
@@ -12022,6 +12198,7 @@ export function CodexMobileApp() {
         skillIds: sessionContextSelection.skillIds,
         reminderIds: sessionContextSelection.reminderIds,
         agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
+        professionalMode: sessionContextSelection.professionalMode,
       });
       setIsAnchorCreateDialogOpen(false);
       setIsAnchorManagerOpen(true);
@@ -12050,6 +12227,7 @@ export function CodexMobileApp() {
           skillIds: sessionContextSelection.skillIds,
           reminderIds: sessionContextSelection.reminderIds,
           agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
+          professionalMode: sessionContextSelection.professionalMode,
         });
       }
     } catch (anchorError: any) {
@@ -12099,6 +12277,7 @@ export function CodexMobileApp() {
           skillIds: sessionContextSelection.skillIds,
           reminderIds: sessionContextSelection.reminderIds.filter((currentId) => currentId !== reminderId),
           agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
+          professionalMode: sessionContextSelection.professionalMode,
         });
       }
     } catch (reminderError: any) {
@@ -12118,6 +12297,7 @@ export function CodexMobileApp() {
       skillIds: sessionContextSelection.skillIds,
       reminderIds: sessionContextSelection.reminderIds,
       agentSessionDraftId,
+      professionalMode: false,
     });
   }
 
@@ -12518,6 +12698,7 @@ export function CodexMobileApp() {
     () => sessionReminders.filter((reminder) => sessionContextSelection.reminderIds.includes(reminder.id)),
     [sessionContextSelection.reminderIds, sessionReminders]
   );
+  const isProfessionalModeSelected = sessionContextSelection.professionalMode === true;
   const selectedAgentSessionDraft = useMemo(
     () => agentSessions.find((record) => record.id === sessionContextSelection.agentSessionDraftId) || null,
     [agentSessions, sessionContextSelection.agentSessionDraftId]
@@ -13305,8 +13486,18 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || isSessionContextSelectionSaving) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || isProfessionalModeSelected || isSessionContextSelectionSaving) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
+                {isProfessionalModeSelected && (
+                  <button
+                    type="button"
+                    onClick={toggleProfessionalMode}
+                    className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100"
+                  >
+                    <Zap className="h-3.5 w-3.5" />
+                    <span>מצב מקצועי · 3 שלבים</span>
+                  </button>
+                )}
                 {selectedAgentSessionDraft && (
                   <button
                     type="button"
@@ -14139,7 +14330,7 @@ export function CodexMobileApp() {
                           <div className="min-w-0 flex-1">
                             <div className="text-[11px] font-semibold text-slate-700">תוספות לשיחה</div>
                             <div className="truncate text-[9px] text-slate-400">
-                              קבצים, עוגנים, סקילים, תזכורות וסוכנים
+                              קבצים, עוגנים, סקילים, תזכורות ומצבים
                             </div>
                           </div>
                         </div>
@@ -14200,16 +14391,25 @@ export function CodexMobileApp() {
                         </button>
                         <button
                           type="button"
-                          onClick={openAgentSessionDialog}
-                          className="flex w-full items-center justify-between gap-3 rounded-[0.9rem] border border-slate-100 bg-slate-50/80 px-3 py-2 text-right transition hover:border-cyan-200 hover:bg-cyan-50/50"
+                          onClick={openModePickerDialog}
+                          className={cn(
+                            'flex w-full items-center justify-between gap-3 rounded-[0.9rem] border px-3 py-2 text-right transition',
+                            isProfessionalModeSelected || selectedAgentSessionDraft
+                              ? 'border-indigo-200 bg-indigo-50/70'
+                              : 'border-slate-100 bg-slate-50/80 hover:border-indigo-200 hover:bg-indigo-50/50'
+                          )}
                         >
                           <div className="min-w-0">
-                            <div className="text-[11px] font-semibold text-slate-700">מצב סוכנים</div>
+                            <div className="text-[11px] font-semibold text-slate-700">מצבים</div>
                             <div className="text-[9px] text-slate-400">
-                              {selectedAgentSessionDraft ? `פעיל: ${selectedAgentSessionDraft.title}` : 'תכנון והפעלה של סוכנים מתואמים'}
+                              {selectedAgentSessionDraft
+                                ? `סוכנים: ${selectedAgentSessionDraft.title}`
+                                : isProfessionalModeSelected
+                                  ? 'מקצועי · תכנון, ביצוע ובדיקה'
+                                  : 'מצב מקצועי או מצב סוכנים'}
                             </div>
                           </div>
-                          <Bot className="h-4 w-4 shrink-0 text-cyan-500" />
+                          <LayoutGrid className={cn('h-4 w-4 shrink-0', isProfessionalModeSelected || selectedAgentSessionDraft ? 'text-indigo-600' : 'text-indigo-500')} />
                         </button>
                       </div>
                     </div>
@@ -14471,6 +14671,15 @@ export function CodexMobileApp() {
         onClose={() => setIsReminderPickerDialogOpen(false)}
         onToggleReminder={toggleReminderSelection}
         onDeleteReminder={(reminderId) => void deleteReminder(reminderId)}
+      />
+
+      <ModePickerDialog
+        isOpen={isModePickerDialogOpen}
+        isProfessionalModeSelected={isProfessionalModeSelected}
+        selectedAgentSessionDraft={selectedAgentSessionDraft}
+        onClose={() => setIsModePickerDialogOpen(false)}
+        onToggleProfessionalMode={toggleProfessionalMode}
+        onOpenAgentSessions={openAgentSessionDialog}
       />
 
       <AgentSessionDialog
