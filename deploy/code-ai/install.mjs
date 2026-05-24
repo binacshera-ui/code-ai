@@ -14,6 +14,27 @@ function getDefaultCodexBin() {
   return IS_WINDOWS ? 'codex.cmd' : 'codex';
 }
 
+function getDefaultPm2Bin() {
+  const fromEnv = process.env.PM2_BIN;
+  if (fromEnv) {
+    return fromEnv;
+  }
+
+  const explicitName = IS_WINDOWS ? 'pm2.cmd' : 'pm2';
+  if (commandExists(explicitName)) {
+    return explicitName;
+  }
+
+  const bundledCandidate = path.join(path.dirname(process.execPath), explicitName);
+  if (existsSync(bundledCandidate)) {
+    return bundledCandidate;
+  }
+
+  throw new Error(
+    'PM2 binary not found. Install PM2 on the machine or pass --pm2-bin /absolute/path/to/pm2.',
+  );
+}
+
 function getCommandName(command) {
   if (!IS_WINDOWS) {
     return command;
@@ -32,6 +53,7 @@ function printUsage() {
 Options:
   --app-name NAME            Process name (default: code-ai-app)
   --port PORT                Service port (default: 4000)
+  --pm2-bin PATH             PM2 binary/path
   --codex-home PATH          Codex home for the default profile
   --workspace PATH           Workspace directory for the default profile
   --profile-id ID            Default profile id (default: default)
@@ -58,6 +80,7 @@ function parseArgs(argv) {
   const defaults = {
     appName: process.env.PM2_APP_NAME || 'code-ai-app',
     port: process.env.PORT || '4000',
+    pm2Bin: getDefaultPm2Bin(),
     codexHome: process.env.CODEX_HOME_PATH || path.join(HOME_DIR, '.codex'),
     workspace: process.env.WORKSPACE_PATH || APP_ROOT,
     profileId: process.env.PROFILE_ID || 'default',
@@ -98,6 +121,9 @@ function parseArgs(argv) {
         break;
       case '--port':
         options.port = readValue();
+        break;
+      case '--pm2-bin':
+        options.pm2Bin = readValue();
         break;
       case '--codex-home':
         options.codexHome = readValue();
@@ -232,7 +258,7 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   const nodeCommand = process.execPath;
   const npmCommand = getCommandName('npm');
-  const npxCommand = getCommandName('npx');
+  const pm2Command = getCommandName(options.pm2Bin);
   const codexCommand = options.codexBin;
 
   if (!commandExists(nodeCommand)) {
@@ -241,8 +267,8 @@ async function main() {
   if (!commandExists(npmCommand)) {
     throw new Error('npm was not found in this environment');
   }
-  if (!commandExists(npxCommand)) {
-    throw new Error('npx was not found in this environment');
+  if (!commandExists(pm2Command)) {
+    throw new Error(`PM2 was not found at: ${options.pm2Bin}`);
   }
   if (!commandExists(codexCommand)) {
     throw new Error(`Codex CLI was not found at: ${codexCommand}`);
@@ -323,26 +349,26 @@ async function main() {
   if (!options.skipPm2) {
     let hasExistingPm2App = false;
     try {
-      run(npxCommand, ['--yes', 'pm2', 'describe', options.appName], { cwd: APP_ROOT, capture: true });
+      run(pm2Command, ['describe', options.appName], { cwd: APP_ROOT, capture: true });
       hasExistingPm2App = true;
     } catch {
       hasExistingPm2App = false;
     }
 
     if (hasExistingPm2App) {
-      run(npxCommand, ['--yes', 'pm2', 'restart', options.appName, '--update-env'], {
+      run(pm2Command, ['restart', options.appName, '--update-env'], {
         cwd: APP_ROOT,
         env: { PM2_APP_NAME: options.appName },
       });
     } else {
-      run(npxCommand, ['--yes', 'pm2', 'start', 'ecosystem.config.cjs', '--update-env'], {
+      run(pm2Command, ['start', 'ecosystem.config.cjs', '--update-env'], {
         cwd: APP_ROOT,
         env: { PM2_APP_NAME: options.appName },
       });
     }
 
     try {
-      run(npxCommand, ['--yes', 'pm2', 'save'], { cwd: APP_ROOT });
+      run(pm2Command, ['save'], { cwd: APP_ROOT });
     } catch {
       // PM2 save is best effort.
     }

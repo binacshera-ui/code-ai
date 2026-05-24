@@ -51,6 +51,13 @@ import {
   listSessionTopics,
   setSessionTopic,
 } from './codexSessionTopics.js';
+import {
+  deleteSessionTrigger,
+  getSessionTrigger,
+  recordSessionTriggerInvocation,
+  resolveTriggerInvocation,
+  upsertSessionTrigger,
+} from './codexSessionTriggers.js';
 import { deleteSessionCustomTitle, getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
 import {
   deleteSessionInstruction,
@@ -908,6 +915,7 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
     deleteSessionInstruction(profileId, sessionId),
     deleteSessionContextSelection(profileId, sessionId),
     deleteSessionReminders(profileId, sessionId),
+    deleteSessionTrigger(profileId, sessionId),
     deleteForkSessionMetadata(sessionId),
     deleteSupportSessionRecord(profileId, sessionId),
     deleteSessionChangeRecords(sessionId),
@@ -991,6 +999,65 @@ function getProviderDisplayLabel(provider: AppProvider): string {
   }
 
   return 'Codex';
+}
+
+function readTriggerToken(req: Request): string {
+  const queryToken = typeof req.query.token === 'string' ? req.query.token.trim() : '';
+  const headerToken = typeof req.headers['x-code-ai-trigger-token'] === 'string'
+    ? req.headers['x-code-ai-trigger-token'].trim()
+    : '';
+  return queryToken || headerToken;
+}
+
+function serializeTriggerPayload(value: unknown, limit = 12000): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  try {
+    const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    return text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}\n…` : text;
+  } catch {
+    return null;
+  }
+}
+
+function buildSessionTriggerPrompt(
+  triggerLabel: string,
+  body: any
+): { prompt: string; preview: string; payloadPreview: string | null } {
+  const primaryText = typeof body?.prompt === 'string'
+    ? body.prompt
+    : typeof body?.message === 'string'
+      ? body.message
+      : typeof body?.content === 'string'
+        ? body.content
+        : '';
+  const source = typeof body?.source === 'string' && body.source.trim()
+    ? body.source.trim()
+    : typeof body?.service === 'string' && body.service.trim()
+      ? body.service.trim()
+      : null;
+  const payloadText = serializeTriggerPayload(body?.payload ?? body?.data ?? body?.details);
+  const trimmedPrimary = primaryText.trim();
+
+  if (!trimmedPrimary && !payloadText) {
+    throw new Error('Trigger request must include content, message, prompt, or payload');
+  }
+
+  const prompt = [
+    'הופעל טריגר חיצוני עבור הסשן הזה.',
+    `שם הטריגר: ${triggerLabel}`,
+    source ? `מקור הטריגר: ${source}` : null,
+    trimmedPrimary ? `תוכן המשימה:\n${trimmedPrimary}` : null,
+    payloadText ? `Payload נלווה:\n${payloadText}` : null,
+    'טפל בזה כמשימה חדשה בתוך אותו סשן, בלי לאבד את ההקשר הקיים של השיחה.',
+  ].filter(Boolean).join('\n\n');
+
+  return {
+    prompt,
+    preview: `טריגר · ${triggerLabel}`,
+    payloadPreview: trimmedPrimary || payloadText || null,
+  };
 }
 
 function clipTransferText(text: string, limit = 6_000): string {
@@ -2154,6 +2221,125 @@ router.post('/sessions/:sessionId/topic', requireCodexAccess, async (req, res) =
     });
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to update session topic' });
+  }
+});
+
+router.get('/sessions/:sessionId/trigger', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const requestedProfileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const trigger = await getSessionTrigger(requestedProfileId || profileId, sessionId);
+    res.json({ trigger });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to load session trigger' });
+  }
+});
+
+router.post('/sessions/:sessionId/trigger', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const label = typeof req.body?.label === 'string' ? req.body.label : '';
+    const rotateToken = req.body?.rotateToken === true;
+    const trigger = await upsertSessionTrigger(requestedProfileId || profileId, sessionId, label, {
+      rotateToken,
+    });
+    res.status(201).json({ trigger });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to save session trigger' });
+  }
+});
+
+router.delete('/sessions/:sessionId/trigger', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const requestedProfileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+        ? req.body.profileId.trim()
+        : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    await deleteSessionTrigger(requestedProfileId || profileId, sessionId);
+    res.json({ deleted: true, sessionId, profileId: requestedProfileId || profileId });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete session trigger' });
+  }
+});
+
+router.post('/session-triggers/:triggerId/fire', async (req, res) => {
+  try {
+    const triggerId = readRouteParam(req.params.triggerId);
+    const token = readTriggerToken(req);
+    if (!token) {
+      res.status(401).json({ error: 'Trigger token is required' });
+      return;
+    }
+
+    const trigger = await resolveTriggerInvocation(triggerId, token);
+    if (!trigger) {
+      res.status(401).json({ error: 'Trigger token is invalid' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(trigger.profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const executionConfig = readExecutionConfig(req.body);
+    if (!executionConfig.permissionModeId) {
+      executionConfig.permissionModeId = await getSelectedPermissionModeId(configuredProfile);
+    }
+
+    const detail = await getAgentSessionDetail(trigger.sessionId, trigger.profileId, { tail: 1 });
+    const sessionInstruction = await getSessionInstruction(trigger.profileId, trigger.sessionId);
+    const triggerPrompt = buildSessionTriggerPrompt(trigger.label, req.body);
+    const item = await enqueueCodexQueueItem({
+      profileId: trigger.profileId,
+      queueKey: trigger.sessionId,
+      sessionId: trigger.sessionId,
+      cwd: detail.cwd || configuredProfile.workspaceCwd,
+      model: executionConfig.model,
+      reasoningEffort: executionConfig.reasoningEffort,
+      permissionModeId: executionConfig.permissionModeId,
+      prompt: triggerPrompt.prompt,
+      promptPreview: triggerPrompt.preview,
+      sessionInstruction: sessionInstruction || undefined,
+    });
+
+    await recordSessionTriggerInvocation(trigger.profileId, trigger.sessionId, triggerPrompt.payloadPreview);
+    res.status(202).json({
+      accepted: true,
+      trigger: await getSessionTrigger(trigger.profileId, trigger.sessionId),
+      item,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to fire session trigger' });
   }
 });
 

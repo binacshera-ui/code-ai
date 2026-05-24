@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
-import { createReadStream, promises as fs } from 'fs';
+import { createReadStream, existsSync, promises as fs } from 'fs';
 import path from 'path';
 import readline from 'readline';
 import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
@@ -31,6 +31,7 @@ import { getSelectedPermissionMode, resolvePermissionMode } from './providerPerm
 interface GeminiSessionScanRecord {
   id: string;
   path: string;
+  fileSize: number;
   updatedAt: string;
   createdAt: string | null;
   cwd: string | null;
@@ -82,7 +83,42 @@ interface GeminiRunResult {
   finalMessage: string;
 }
 
-const GEMINI_BIN = process.env.GEMINI_BIN || 'gemini';
+function resolveGeminiBinary(): string {
+  const explicitBin = normalizeString(process.env.GEMINI_BIN);
+  if (explicitBin) {
+    return explicitBin;
+  }
+
+  const candidateHomes = new Set<string>();
+  candidateHomes.add('/home/developer');
+  candidateHomes.add('/home/developer2');
+
+  const envHome = normalizeString(process.env.HOME);
+  if (envHome) {
+    candidateHomes.add(envHome);
+  }
+
+  for (const profile of CODEX_APP_CONFIG.profiles) {
+    if (profile.provider !== 'gemini') {
+      continue;
+    }
+    const profileHome = normalizeString(profile.codexHome ? path.dirname(profile.codexHome) : null);
+    if (profileHome) {
+      candidateHomes.add(profileHome);
+    }
+  }
+
+  for (const homeDir of candidateHomes) {
+    const candidate = path.join(homeDir, '.local', 'bin', 'gemini');
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return 'gemini';
+}
+
+const GEMINI_BIN = resolveGeminiBinary();
 const MAX_SESSIONS = 80;
 const MAX_TOOL_TEXT = 12_000;
 const GEMINI_RUNTIME_STATE_FILE = path.join(CODEX_APP_CONFIG.queueRoot, 'gemini-runtime-state.json');
@@ -590,7 +626,7 @@ async function scanGeminiSessionFiles(
   } = {}
 ): Promise<GeminiSessionScanRecord[]> {
   const projectRoots = await readGeminiProjectRoots(profile, options);
-  const rows: GeminiSessionScanRecord[] = [];
+  const rowsBySessionId = new Map<string, GeminiSessionScanRecord>();
 
   for (const projectRoot of projectRoots) {
     const chatsRoot = path.join(projectRoot, 'chats');
@@ -609,18 +645,35 @@ async function scanGeminiSessionFiles(
       const header = await readGeminiSessionHeader(filePath);
       const sessionId = header.sessionId || entry.name.replace(/\.(jsonl|json)$/i, '');
 
-      rows.push({
+      const nextRow: GeminiSessionScanRecord = {
         id: sessionId,
         path: filePath,
+        fileSize: stats.size,
         updatedAt: header.lastUpdated || stats.mtime.toISOString(),
         createdAt: header.startTime,
         cwd: profile.workspaceCwd,
         modelProvider: header.modelProvider,
         source: 'gemini-session',
-      });
+      };
+
+      const previous = rowsBySessionId.get(sessionId);
+      if (!previous) {
+        rowsBySessionId.set(sessionId, nextRow);
+        continue;
+      }
+
+      if (nextRow.fileSize > previous.fileSize) {
+        rowsBySessionId.set(sessionId, nextRow);
+        continue;
+      }
+
+      if (nextRow.fileSize === previous.fileSize && nextRow.updatedAt > previous.updatedAt) {
+        rowsBySessionId.set(sessionId, nextRow);
+      }
     }
   }
 
+  const rows = [...rowsBySessionId.values()];
   rows.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   return rows;
 }

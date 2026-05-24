@@ -293,6 +293,18 @@ interface CodexSessionTopic {
   assignedSessionCount?: number;
 }
 
+interface CodexSessionTrigger {
+  id: string;
+  profileId: string;
+  sessionId: string;
+  label: string;
+  token: string;
+  createdAt: string;
+  updatedAt: string;
+  lastTriggeredAt: string | null;
+  lastPayloadPreview: string | null;
+}
+
 interface CodexQueueServerItem {
   id: string;
   profileId: string;
@@ -1958,6 +1970,47 @@ async function assignSessionTopicRequest(
     }),
   });
   return data.topic;
+}
+
+async function fetchSessionTrigger(
+  profileId: string,
+  sessionId: string
+): Promise<CodexSessionTrigger | null> {
+  const data = await fetchJson<{ trigger: CodexSessionTrigger | null }>(
+    `/api/codex/sessions/${encodeURIComponent(sessionId)}/trigger?profile=${encodeURIComponent(profileId)}`
+  );
+  return data.trigger;
+}
+
+async function saveSessionTriggerRequest(
+  profileId: string,
+  sessionId: string,
+  payload: {
+    label: string;
+    rotateToken?: boolean;
+  }
+): Promise<CodexSessionTrigger> {
+  const data = await fetchJson<{ trigger: CodexSessionTrigger }>(
+    `/api/codex/sessions/${encodeURIComponent(sessionId)}/trigger`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        profileId,
+        label: payload.label,
+        rotateToken: payload.rotateToken === true,
+      }),
+    }
+  );
+  return data.trigger;
+}
+
+async function deleteSessionTriggerRequest(profileId: string, sessionId: string): Promise<void> {
+  await fetchJson(`/api/codex/sessions/${encodeURIComponent(sessionId)}/trigger?profile=${encodeURIComponent(profileId)}`, {
+    method: 'DELETE',
+  });
 }
 
 async function updateSessionTitleRequest(
@@ -7057,6 +7110,11 @@ function TopicManagerDialog({
   newTopicName,
   newTopicIcon,
   newTopicColorKey,
+  sessionTrigger,
+  triggerLabel,
+  isTriggerLoading,
+  isSavingTrigger,
+  triggerBaseUrl,
   pendingDeleteTopic,
   deletingTopicId,
   onClose,
@@ -7065,6 +7123,10 @@ function TopicManagerDialog({
   onResetSessionTitle,
   onChangeCustomSessionTitle,
   onCreateTopic,
+  onChangeTriggerLabel,
+  onSaveTrigger,
+  onRotateTrigger,
+  onDeleteTrigger,
   onRequestDeleteTopic,
   onCancelDeleteTopic,
   onDeleteTopicMoveToUntagged,
@@ -7082,6 +7144,11 @@ function TopicManagerDialog({
   newTopicName: string;
   newTopicIcon: string;
   newTopicColorKey: string;
+  sessionTrigger: CodexSessionTrigger | null;
+  triggerLabel: string;
+  isTriggerLoading: boolean;
+  isSavingTrigger: boolean;
+  triggerBaseUrl: string;
   pendingDeleteTopic: CodexSessionTopic | null;
   deletingTopicId: string | null;
   onClose: () => void;
@@ -7090,6 +7157,10 @@ function TopicManagerDialog({
   onResetSessionTitle: () => void;
   onChangeCustomSessionTitle: (value: string) => void;
   onCreateTopic: () => void;
+  onChangeTriggerLabel: (value: string) => void;
+  onSaveTrigger: () => void;
+  onRotateTrigger: () => void;
+  onDeleteTrigger: () => void;
   onRequestDeleteTopic: (topic: CodexSessionTopic) => void;
   onCancelDeleteTopic: () => void;
   onDeleteTopicMoveToUntagged: () => void;
@@ -7098,6 +7169,10 @@ function TopicManagerDialog({
   onChangeIcon: (value: string) => void;
   onChangeColorKey: (value: string) => void;
 }) {
+  const triggerUrl = sessionTrigger
+    ? `${triggerBaseUrl}/api/codex/session-triggers/${encodeURIComponent(sessionTrigger.id)}/fire?token=${encodeURIComponent(sessionTrigger.token)}`
+    : '';
+
   return (
     <div className="fixed inset-0 z-[76] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
       <button
@@ -7166,6 +7241,85 @@ function TopicManagerDialog({
               >
                 חזור לשם אוטומטי
               </button>
+            </div>
+          </div>
+
+          <div className="rounded-[1.5rem] border border-slate-100 bg-slate-50/70 p-4">
+            <div className="text-sm font-semibold text-slate-800">טריגר חיצוני לסשן</div>
+            <div className="mt-1 text-xs leading-6 text-slate-500">
+              קריאה לנקודת הקצה תיצור משימה חדשה בתוך אותו סשן. מתאים להתראות, שגיאות או אוטומציות שירות.
+            </div>
+            <input
+              value={triggerLabel}
+              onChange={(event) => onChangeTriggerLabel(event.target.value)}
+              placeholder="שם לטריגר, לדוגמה התראות MAKE2"
+              className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-700 outline-none transition focus:border-indigo-300"
+            />
+
+            {isTriggerLoading ? (
+              <div className="mt-3 flex items-center justify-center rounded-[1.25rem] border border-slate-100 bg-white px-4 py-4 text-sm text-slate-500">
+                <Loader2 className="ml-2 h-4 w-4 animate-spin" />
+                טוען טריגר...
+              </div>
+            ) : sessionTrigger ? (
+              <div className="mt-3 rounded-[1.25rem] border border-slate-200 bg-white p-3">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  Trigger URL
+                </div>
+                <div className="mt-2 rounded-2xl border border-slate-100 bg-slate-50 px-3 py-3 text-[11px] leading-6 text-slate-600" dir="ltr">
+                  {triggerUrl}
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                  {sessionTrigger.lastTriggeredAt && (
+                    <span>הופעל לאחרונה: {formatDateTimeDisplay(sessionTrigger.lastTriggeredAt)}</span>
+                  )}
+                  {sessionTrigger.lastPayloadPreview && (
+                    <span className="truncate">אחרון: {sessionTrigger.lastPayloadPreview}</span>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={onSaveTrigger}
+                disabled={isSavingTrigger || !triggerLabel.trim()}
+                className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSavingTrigger ? 'שומר...' : sessionTrigger ? 'שמור טריגר' : 'צור טריגר'}
+              </button>
+              {sessionTrigger && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (navigator?.clipboard) {
+                        void navigator.clipboard.writeText(triggerUrl);
+                      }
+                    }}
+                    className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+                  >
+                    העתק URL
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onRotateTrigger}
+                    disabled={isSavingTrigger}
+                    className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-700 transition hover:bg-amber-100 disabled:opacity-50"
+                  >
+                    סובב קישור
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onDeleteTrigger}
+                    disabled={isSavingTrigger}
+                    className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-600 transition hover:bg-rose-100 disabled:opacity-50"
+                  >
+                    מחק טריגר
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
@@ -9268,6 +9422,10 @@ export function CodexMobileApp() {
   const [folderTopics, setFolderTopics] = useState<CodexSessionTopic[]>([]);
   const [isTopicLoading, setIsTopicLoading] = useState(false);
   const [topicError, setTopicError] = useState<string | null>(null);
+  const [sessionTrigger, setSessionTrigger] = useState<CodexSessionTrigger | null>(null);
+  const [triggerLabelDraft, setTriggerLabelDraft] = useState('');
+  const [isTriggerLoading, setIsTriggerLoading] = useState(false);
+  const [isSavingTrigger, setIsSavingTrigger] = useState(false);
   const [pendingDeleteTopic, setPendingDeleteTopic] = useState<CodexSessionTopic | null>(null);
   const [deletingTopicId, setDeletingTopicId] = useState<string | null>(null);
   const [customSessionTitle, setCustomSessionTitle] = useState('');
@@ -11499,9 +11657,12 @@ export function CodexMobileApp() {
     setTopicError(null);
     setPendingDeleteTopic(null);
     setDeletingTopicId(null);
+    setSessionTrigger(null);
+    setTriggerLabelDraft('');
     setFolderTopics([]);
     setCustomSessionTitle(session.title);
     setIsSavingSessionTitle(false);
+    setIsSavingTrigger(false);
     setNewTopicName('');
     setNewTopicIcon(session.topic?.icon || TOPIC_ICON_PRESETS[0]);
     setNewTopicColorKey((session.topic?.colorKey as keyof typeof TOPIC_COLOR_PRESETS) || 'sky');
@@ -11512,13 +11673,20 @@ export function CodexMobileApp() {
     }
 
     setIsTopicLoading(true);
+    setIsTriggerLoading(true);
     try {
-      const topics = await fetchTopics(profileId, session.cwd);
+      const [topics, trigger] = await Promise.all([
+        fetchTopics(profileId, session.cwd),
+        fetchSessionTrigger(profileId, session.id),
+      ]);
       setFolderTopics(topics);
+      setSessionTrigger(trigger);
+      setTriggerLabelDraft(trigger?.label || '');
     } catch (topicLoadError: any) {
       setTopicError(topicLoadError.message || 'Failed to load topics');
     } finally {
       setIsTopicLoading(false);
+      setIsTriggerLoading(false);
     }
   }
 
@@ -11622,6 +11790,45 @@ export function CodexMobileApp() {
     } catch (deleteError: any) {
       setTopicError(deleteError.message || 'Failed to delete topic');
       setDeletingTopicId(null);
+    }
+  }
+
+  async function saveSessionTrigger(rotateToken = false) {
+    if (!topicSession) {
+      return;
+    }
+
+    try {
+      setIsSavingTrigger(true);
+      const trigger = await saveSessionTriggerRequest(profileId, topicSession.id, {
+        label: triggerLabelDraft,
+        rotateToken,
+      });
+      setSessionTrigger(trigger);
+      setTriggerLabelDraft(trigger.label);
+      setTopicError(null);
+    } catch (triggerError: any) {
+      setTopicError(triggerError.message || 'Failed to save session trigger');
+    } finally {
+      setIsSavingTrigger(false);
+    }
+  }
+
+  async function removeSessionTrigger() {
+    if (!topicSession) {
+      return;
+    }
+
+    try {
+      setIsSavingTrigger(true);
+      await deleteSessionTriggerRequest(profileId, topicSession.id);
+      setSessionTrigger(null);
+      setTriggerLabelDraft('');
+      setTopicError(null);
+    } catch (triggerError: any) {
+      setTopicError(triggerError.message || 'Failed to delete session trigger');
+    } finally {
+      setIsSavingTrigger(false);
     }
   }
 
@@ -14992,18 +15199,29 @@ export function CodexMobileApp() {
           newTopicName={newTopicName}
           newTopicIcon={newTopicIcon}
           newTopicColorKey={newTopicColorKey}
+          sessionTrigger={sessionTrigger}
+          triggerLabel={triggerLabelDraft}
+          isTriggerLoading={isTriggerLoading}
+          isSavingTrigger={isSavingTrigger}
+          triggerBaseUrl={window.location.origin}
           pendingDeleteTopic={pendingDeleteTopic}
           deletingTopicId={deletingTopicId}
           onClose={() => {
             setTopicSession(null);
             setPendingDeleteTopic(null);
             setDeletingTopicId(null);
+            setSessionTrigger(null);
+            setTriggerLabelDraft('');
           }}
           onAssignTopic={(topicId) => void assignTopicToSession(topicSession, topicId)}
           onSaveSessionTitle={() => void saveSessionTitle(topicSession, customSessionTitle)}
           onResetSessionTitle={() => void saveSessionTitle(topicSession, null)}
           onChangeCustomSessionTitle={setCustomSessionTitle}
           onCreateTopic={() => void createAndAssignTopic()}
+          onChangeTriggerLabel={setTriggerLabelDraft}
+          onSaveTrigger={() => void saveSessionTrigger(false)}
+          onRotateTrigger={() => void saveSessionTrigger(true)}
+          onDeleteTrigger={() => void removeSessionTrigger()}
           onRequestDeleteTopic={setPendingDeleteTopic}
           onCancelDeleteTopic={() => {
             if (deletingTopicId) {
