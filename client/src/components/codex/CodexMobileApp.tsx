@@ -2351,8 +2351,21 @@ function buildSessionTopicGroups(sessions: CodexSessionSummary[]): SessionTopicG
   return ordered;
 }
 
+function safeDecodeLocalFileHref(href: string): string {
+  try {
+    return decodeURIComponent(href);
+  } catch {
+    try {
+      // Preserve literal percent signs while still decoding valid %XX escapes.
+      return decodeURIComponent(href.replace(/%(?![0-9A-Fa-f]{2})/g, '%25'));
+    } catch {
+      return href;
+    }
+  }
+}
+
 function parseLocalFileHref(href: string): { rawPath: string } | null {
-  const decoded = decodeURIComponent(href).trim();
+  const decoded = safeDecodeLocalFileHref(href).trim();
   if (
     !decoded
     || decoded.startsWith('#')
