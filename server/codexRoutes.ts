@@ -63,6 +63,7 @@ import { deleteSessionCustomTitle, getSessionTitleMap, setSessionCustomTitle } f
 import {
   deleteSessionInstruction,
   getSessionInstruction,
+  getSessionInstructionRecord,
   rebindSessionInstruction,
   setSessionInstruction,
 } from './codexSessionInstructions.js';
@@ -2496,8 +2497,8 @@ router.get('/session-instruction', requireCodexAccess, async (req, res) => {
       return;
     }
 
-    const instruction = await getSessionInstruction(profileId, sessionKey);
-    res.json({ instruction });
+    const instructionState = await getSessionInstructionRecord(profileId, sessionKey);
+    res.json(instructionState);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load session instruction' });
   }
@@ -2512,14 +2513,18 @@ router.post('/session-instruction', requireCodexAccess, async (req, res) => {
       ? req.body.sessionKey.trim()
       : undefined;
     const instruction = typeof req.body?.instruction === 'string' ? req.body.instruction : null;
+    const enabled = typeof req.body?.enabled === 'boolean' ? req.body.enabled : true;
 
     if (!profileId || !sessionKey) {
       res.status(400).json({ error: 'Profile id and session key are required' });
       return;
     }
 
-    const savedInstruction = await setSessionInstruction(profileId, sessionKey, instruction);
-    res.json({ instruction: savedInstruction });
+    const savedInstruction = await setSessionInstruction(profileId, sessionKey, instruction, enabled);
+    res.json({
+      instruction: savedInstruction?.instruction || null,
+      enabled: savedInstruction?.enabled ?? true,
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to update session instruction' });
   }

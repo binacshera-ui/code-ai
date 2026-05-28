@@ -3,7 +3,12 @@ import path from 'path';
 import { CODEX_APP_CONFIG } from './config.js';
 
 interface SessionInstructionsState {
-  instructionsByKey: Record<string, string>;
+  instructionsByKey: Record<string, string | SessionInstructionRecord>;
+}
+
+export interface SessionInstructionRecord {
+  instruction: string;
+  enabled: boolean;
 }
 
 const INSTRUCTIONS_FILE = path.join(CODEX_APP_CONFIG.storageRoot, 'session-instructions.json');
@@ -22,6 +27,41 @@ function normalizeInstruction(value: string): string {
   return value.replace(/\s+/g, ' ').trim().slice(0, 1200);
 }
 
+function normalizeSessionInstructionRecord(
+  value: unknown
+): SessionInstructionRecord | null {
+  if (typeof value === 'string') {
+    const normalizedInstruction = normalizeInstruction(value);
+    if (!normalizedInstruction) {
+      return null;
+    }
+
+    return {
+      instruction: normalizedInstruction,
+      enabled: true,
+    };
+  }
+
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const rawInstruction = typeof (value as any).instruction === 'string'
+    ? (value as any).instruction
+    : '';
+  const normalizedInstruction = normalizeInstruction(rawInstruction);
+  if (!normalizedInstruction) {
+    return null;
+  }
+
+  return {
+    instruction: normalizedInstruction,
+    enabled: typeof (value as any).enabled === 'boolean'
+      ? (value as any).enabled
+      : true,
+  };
+}
+
 async function ensureStateLoaded() {
   if (stateLoadedPromise) {
     return stateLoadedPromise;
@@ -31,10 +71,20 @@ async function ensureStateLoaded() {
     try {
       const raw = await fs.readFile(INSTRUCTIONS_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
+      const nextInstructionsByKey: Record<string, SessionInstructionRecord> = {};
+      const parsedInstructionsByKey = parsed.instructionsByKey && typeof parsed.instructionsByKey === 'object'
+        ? parsed.instructionsByKey as Record<string, unknown>
+        : {};
+
+      for (const [key, value] of Object.entries(parsedInstructionsByKey)) {
+        const normalizedRecord = normalizeSessionInstructionRecord(value);
+        if (normalizedRecord) {
+          nextInstructionsByKey[key] = normalizedRecord;
+        }
+      }
+
       state = {
-        instructionsByKey: parsed.instructionsByKey && typeof parsed.instructionsByKey === 'object'
-          ? parsed.instructionsByKey as Record<string, string>
-          : {},
+        instructionsByKey: nextInstructionsByKey,
       };
     } catch (error: any) {
       if (error?.code !== 'ENOENT') {
@@ -60,16 +110,35 @@ async function persistState() {
 }
 
 export async function getSessionInstruction(profileId: string, sessionKey: string): Promise<string | null> {
+  const record = await getSessionInstructionRecord(profileId, sessionKey);
+  if (!record.instruction || !record.enabled) {
+    return null;
+  }
+
+  return record.instruction;
+}
+
+export async function getSessionInstructionRecord(
+  profileId: string,
+  sessionKey: string
+): Promise<{ instruction: string | null; enabled: boolean }> {
   await ensureStateLoaded();
-  const instruction = state.instructionsByKey[buildInstructionKey(profileId, sessionKey)];
-  return instruction || null;
+  const record = normalizeSessionInstructionRecord(
+    state.instructionsByKey[buildInstructionKey(profileId, sessionKey)]
+  );
+
+  return {
+    instruction: record?.instruction || null,
+    enabled: record?.enabled ?? true,
+  };
 }
 
 export async function setSessionInstruction(
   profileId: string,
   sessionKey: string,
-  instruction: string | null
-): Promise<string | null> {
+  instruction: string | null,
+  enabled = true
+): Promise<SessionInstructionRecord | null> {
   await ensureStateLoaded();
   const key = buildInstructionKey(profileId, sessionKey);
   const normalized = typeof instruction === 'string' ? normalizeInstruction(instruction) : '';
@@ -80,9 +149,13 @@ export async function setSessionInstruction(
     return null;
   }
 
-  state.instructionsByKey[key] = normalized;
+  const nextRecord: SessionInstructionRecord = {
+    instruction: normalized,
+    enabled,
+  };
+  state.instructionsByKey[key] = nextRecord;
   await persistState();
-  return normalized;
+  return nextRecord;
 }
 
 export async function rebindSessionInstruction(
@@ -98,7 +171,7 @@ export async function rebindSessionInstruction(
 
   const fromKey = buildInstructionKey(profileId, fromSessionKey);
   const toKey = buildInstructionKey(profileId, toSessionKey);
-  const value = state.instructionsByKey[fromKey];
+  const value = normalizeSessionInstructionRecord(state.instructionsByKey[fromKey]);
 
   if (!value) {
     return;

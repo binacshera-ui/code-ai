@@ -559,6 +559,7 @@ interface CodexDeleteTurnResponse {
 
 interface CodexSessionInstructionResponse {
   instruction: string | null;
+  enabled: boolean;
 }
 
 interface CodexProjectAnchor {
@@ -1535,14 +1536,25 @@ async function fetchFilePreview(rawPath: string): Promise<CodexFilePreviewLookup
   };
 }
 
-async function fetchSessionInstruction(profileId: string, sessionKey: string): Promise<string | null> {
+async function fetchSessionInstruction(
+  profileId: string,
+  sessionKey: string
+): Promise<CodexSessionInstructionResponse> {
   const data = await fetchJson<CodexSessionInstructionResponse>(
     `/api/codex/session-instruction?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
   );
-  return data.instruction || null;
+  return {
+    instruction: data.instruction || null,
+    enabled: typeof data.enabled === 'boolean' ? data.enabled : true,
+  };
 }
 
-async function saveSessionInstruction(profileId: string, sessionKey: string, instruction: string | null): Promise<string | null> {
+async function saveSessionInstruction(
+  profileId: string,
+  sessionKey: string,
+  instruction: string | null,
+  enabled: boolean
+): Promise<CodexSessionInstructionResponse> {
   const data = await fetchJson<CodexSessionInstructionResponse>('/api/codex/session-instruction', {
     method: 'POST',
     headers: {
@@ -1552,9 +1564,13 @@ async function saveSessionInstruction(profileId: string, sessionKey: string, ins
       profileId,
       sessionKey,
       instruction,
+      enabled,
     }),
   });
-  return data.instruction || null;
+  return {
+    instruction: data.instruction || null,
+    enabled: typeof data.enabled === 'boolean' ? data.enabled : true,
+  };
 }
 
 async function fetchSessionContextSelection(profileId: string, sessionKey: string): Promise<CodexSessionContextSelection> {
@@ -9519,6 +9535,7 @@ export function CodexMobileApp() {
   const [gameSessionCompletionSignal, setGameSessionCompletionSignal] = useState(0);
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
+  const [isSessionInstructionEnabled, setIsSessionInstructionEnabled] = useState(true);
   const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>({
     anchorIds: [],
     skillIds: [],
@@ -11513,6 +11530,7 @@ export function CodexMobileApp() {
         setSelectedReasoningEffort(null);
         setSessionInstruction(null);
         setInstructionDraft('');
+        setIsSessionInstructionEnabled(true);
         setSessionWindowSize(Math.max(INITIAL_TIMELINE_WINDOW_SIZE, data.session.timeline.length));
         setIsFullTimelineLoaded(data.session.totalTimelineEntries <= data.session.timeline.length);
       });
@@ -11544,6 +11562,7 @@ export function CodexMobileApp() {
       return;
     }
 
+    const effectiveSessionInstruction = isSessionInstructionEnabled ? sessionInstruction : null;
     const payloadFingerprint = JSON.stringify({
       profileId,
       queueKey: currentQueueKey,
@@ -11558,7 +11577,7 @@ export function CodexMobileApp() {
       scheduledFor,
       scheduleType,
       recurringFreq,
-      sessionInstruction: sessionInstruction || null,
+      sessionInstruction: effectiveSessionInstruction || null,
       attachments: draftAttachments.map((attachment) => attachment.id),
     });
     const now = Date.now();
@@ -11598,7 +11617,7 @@ export function CodexMobileApp() {
           clientRequestId,
           prompt: trimmedPrompt,
           promptPreview: trimmedPrompt,
-          sessionInstruction: sessionInstruction || undefined,
+          sessionInstruction: effectiveSessionInstruction || undefined,
           sessionId: selectedSessionId,
           queueKey: currentQueueKey,
           profileId,
@@ -11685,6 +11704,7 @@ export function CodexMobileApp() {
 
     const continuationPrompt = 'Continue from the exact point where the previous turn was aborted. Continue the same task without restarting, do not repeat completed work, and finish the response fully until the task is complete.';
     const clientRequestId = buildQueueId();
+    const effectiveSessionInstruction = isSessionInstructionEnabled ? sessionInstruction : null;
 
     recordCodexBreadcrumb('session-aborted-continue-requested', {
       profileId,
@@ -11706,7 +11726,7 @@ export function CodexMobileApp() {
           clientRequestId,
           prompt: continuationPrompt,
           promptPreview: 'המשך את הסבב שנקטע עד הסוף',
-          sessionInstruction: sessionInstruction || undefined,
+          sessionInstruction: effectiveSessionInstruction || undefined,
           sessionId: selectedSessionId,
           queueKey: currentQueueKey,
           profileId,
@@ -12309,20 +12329,23 @@ export function CodexMobileApp() {
     if (!nextProfileId || !nextSessionKey) {
       setSessionInstruction(null);
       setInstructionDraft('');
+      setIsSessionInstructionEnabled(true);
       return;
     }
 
     const requestToken = ++latestInstructionLoadTokenRef.current;
     setSessionInstruction(null);
     setInstructionDraft('');
+    setIsSessionInstructionEnabled(true);
     setIsInstructionLoading(true);
     try {
-      const instruction = await fetchSessionInstruction(nextProfileId, nextSessionKey);
+      const instructionState = await fetchSessionInstruction(nextProfileId, nextSessionKey);
       if (requestToken !== latestInstructionLoadTokenRef.current) {
         return;
       }
-      setSessionInstruction(instruction);
-      setInstructionDraft(instruction || '');
+      setSessionInstruction(instructionState.instruction);
+      setInstructionDraft(instructionState.instruction || '');
+      setIsSessionInstructionEnabled(instructionState.enabled);
     } catch (instructionError: any) {
       setError(instructionError.message || 'Failed to load session instruction');
     } finally {
@@ -12339,9 +12362,15 @@ export function CodexMobileApp() {
 
     setIsInstructionSaving(true);
     try {
-      const instruction = await saveSessionInstruction(profileId, currentQueueKey, instructionDraft);
-      setSessionInstruction(instruction);
-      setInstructionDraft(instruction || '');
+      const instructionState = await saveSessionInstruction(
+        profileId,
+        currentQueueKey,
+        instructionDraft,
+        isSessionInstructionEnabled
+      );
+      setSessionInstruction(instructionState.instruction);
+      setInstructionDraft(instructionState.instruction || '');
+      setIsSessionInstructionEnabled(instructionState.enabled);
       setIsInstructionDialogOpen(false);
     } catch (instructionError: any) {
       setError(instructionError.message || 'Failed to save session instruction');
@@ -13149,6 +13178,7 @@ export function CodexMobileApp() {
 
     if (isGoalCommand && !command.args) {
       setInstructionDraft(sessionInstruction || '');
+      setIsSessionInstructionEnabled(sessionInstruction ? isSessionInstructionEnabled : true);
       setIsInstructionDialogOpen(true);
       setPrompt('');
       return true;
@@ -13160,10 +13190,12 @@ export function CodexMobileApp() {
       const nextInstruction = await saveSessionInstruction(
         profileId,
         currentQueueKey,
-        shouldClearGoal ? null : command.args
+        shouldClearGoal ? null : command.args,
+        shouldClearGoal ? true : true
       );
-      setSessionInstruction(nextInstruction);
-      setInstructionDraft(nextInstruction || '');
+      setSessionInstruction(nextInstruction.instruction);
+      setInstructionDraft(nextInstruction.instruction || '');
+      setIsSessionInstructionEnabled(nextInstruction.enabled);
       setPrompt('');
     } catch (instructionError: any) {
       setError(instructionError.message || 'Failed to handle /goal');
@@ -13727,7 +13759,7 @@ export function CodexMobileApp() {
                 Support workspace
               </div>
             )}
-            {sessionInstruction && (
+            {sessionInstruction && isSessionInstructionEnabled && (
               <div className="mt-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
                 הוראה קבועה פעילה
               </div>
@@ -13781,6 +13813,7 @@ export function CodexMobileApp() {
                   onClick={() => {
                     setIsHeaderActionsOpen(false);
                     setInstructionDraft(sessionInstruction || '');
+                    setIsSessionInstructionEnabled(sessionInstruction ? isSessionInstructionEnabled : true);
                     setIsInstructionDialogOpen(true);
                   }}
                   className="flex flex-col items-center justify-center gap-2 rounded-[1.25rem] bg-amber-50 px-3 py-4 text-center text-amber-700 transition hover:bg-amber-100"
@@ -15111,6 +15144,26 @@ export function CodexMobileApp() {
                   <div className="mt-1 text-sm leading-6 text-slate-500">
                     הטקסט כאן יתווסף אוטומטית לכל הודעה חדשה שתישלח מהשיחה הפעילה.
                   </div>
+                  <div className="mt-3 flex items-center gap-3">
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isSessionInstructionEnabled}
+                      onClick={() => setIsSessionInstructionEnabled((current) => !current)}
+                      className={`relative inline-flex h-7 w-12 items-center rounded-full transition ${
+                        isSessionInstructionEnabled ? 'bg-amber-400/90' : 'bg-slate-200'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-5 w-5 rounded-full bg-white shadow transition ${
+                          isSessionInstructionEnabled ? 'translate-x-1' : 'translate-x-6'
+                        }`}
+                      />
+                    </button>
+                    <div className="text-xs font-medium text-slate-500">
+                      {isSessionInstructionEnabled ? 'ההוראה פעילה' : 'ההוראה כבויה'}
+                    </div>
+                  </div>
                 </div>
               </div>
               <button
@@ -15141,9 +15194,10 @@ export function CodexMobileApp() {
 
                     setIsInstructionSaving(true);
                     try {
-                      const nextInstruction = await saveSessionInstruction(profileId, currentQueueKey, null);
-                      setSessionInstruction(nextInstruction);
+                      const nextInstruction = await saveSessionInstruction(profileId, currentQueueKey, null, true);
+                      setSessionInstruction(nextInstruction.instruction);
                       setInstructionDraft('');
+                      setIsSessionInstructionEnabled(true);
                       setIsInstructionDialogOpen(false);
                     } catch (instructionError: any) {
                       setError(instructionError.message || 'Failed to delete session instruction');
