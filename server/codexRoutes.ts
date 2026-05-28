@@ -5,6 +5,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
 import type { AppMode, AppProvider } from './config.js';
 import {
+  copyCodexSessionToProfile,
   CodexExecutionConfig,
   CodexSessionDetail,
   CodexSessionSummary,
@@ -830,7 +831,10 @@ async function copySessionSidebarMetadataToForkSession(
   sourceProfileId: string,
   targetProfileId: string,
   sourceSession: CodexSessionDetail,
-  targetSessionId: string
+  targetSessionId: string,
+  options?: {
+    preserveHidden?: boolean;
+  }
 ) {
   const [hiddenIds, topicMap, titleMap] = await Promise.all([
     listHiddenSessionIds(sourceProfileId),
@@ -840,7 +844,7 @@ async function copySessionSidebarMetadataToForkSession(
 
   const sourceTopic = topicMap[sourceSession.id] || null;
   const sourceCustomTitle = titleMap[sourceSession.id] || null;
-  const nextHidden = hiddenIds.has(sourceSession.id);
+  const nextHidden = options?.preserveHidden !== false && hiddenIds.has(sourceSession.id);
   let assignedTopic: CodexSessionTopic | null = null;
 
   if (sourceTopic) {
@@ -876,6 +880,20 @@ async function copySessionSidebarMetadataToForkSession(
     topic: assignedTopic,
     title: sourceCustomTitle || sourceSession.title,
   };
+}
+
+async function copySessionInstructionToSession(
+  sourceProfileId: string,
+  targetProfileId: string,
+  sourceSessionId: string,
+  targetSessionId: string
+) {
+  const instruction = await getSessionInstruction(sourceProfileId, sourceSessionId);
+  if (!instruction?.trim()) {
+    return null;
+  }
+
+  return setSessionInstruction(targetProfileId, targetSessionId, instruction);
 }
 
 async function copySessionContextSelectionToSession(
@@ -1647,6 +1665,101 @@ router.get('/sessions', requireCodexAccess, async (req, res) => {
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load Codex sessions' });
+  }
+});
+
+router.post('/sessions/copy', requireCodexAccess, async (req, res) => {
+  try {
+    const sourceProfileId = typeof req.body?.sourceProfileId === 'string' && req.body.sourceProfileId.trim()
+      ? req.body.sourceProfileId.trim()
+      : undefined;
+    const targetProfileId = typeof req.body?.targetProfileId === 'string' && req.body.targetProfileId.trim()
+      ? req.body.targetProfileId.trim()
+      : undefined;
+    const sessionIds = Array.isArray(req.body?.sessionIds)
+      ? req.body.sessionIds
+        .filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+        .map((value) => value.trim())
+      : [];
+
+    if (!sourceProfileId || !targetProfileId || sessionIds.length === 0) {
+      res.status(400).json({ error: 'Source profile, target profile and session ids are required' });
+      return;
+    }
+
+    const sourceProfile = CODEX_APP_CONFIG.profiles.find((profile) => profile.id === sourceProfileId);
+    const targetProfile = CODEX_APP_CONFIG.profiles.find((profile) => profile.id === targetProfileId);
+
+    if (!sourceProfile || !targetProfile) {
+      res.status(404).json({ error: 'אחד המשתמשים שנבחרו לא קיים.' });
+      return;
+    }
+
+    if (sourceProfile.provider !== 'codex' || targetProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'העתקת שיחות בין משתמשים נתמכת כרגע רק ב-Codex.' });
+      return;
+    }
+
+    if (sourceProfile.mode !== 'standard' || targetProfile.mode !== 'standard') {
+      res.status(400).json({ error: 'העתקת שיחות זמינה רק בין משתמשים רגילים.' });
+      return;
+    }
+
+    if (sourceProfile.id === targetProfile.id) {
+      res.status(400).json({ error: 'בחר משתמש יעד שונה מהמשתמש הנוכחי.' });
+      return;
+    }
+
+    const copied: Array<{ sessionId: string; title: string; targetProfileId: string }> = [];
+    const skipped: Array<{ sessionId: string; reason: string }> = [];
+    const uniqueSessionIds = [...new Set(sessionIds)];
+
+    for (const sessionId of uniqueSessionIds) {
+      if (sessionId.startsWith('draft:')) {
+        skipped.push({ sessionId, reason: 'אי אפשר להעתיק draft. פתח את השיחה הרגילה או המשך אותה קודם.' });
+        continue;
+      }
+
+      try {
+        const sourceSession = await getAgentSessionDetail(sessionId, sourceProfileId, { tail: 1, full: false });
+        if (sourceSession.isDraft || sourceSession.agentSession) {
+          skipped.push({ sessionId, reason: 'אי אפשר להעתיק draft או סשן סוכנים במצב הזה.' });
+          continue;
+        }
+
+        await copyCodexSessionToProfile(sessionId, sourceProfileId, targetProfileId);
+        await copySessionSidebarMetadataToForkSession(
+          sourceProfileId,
+          targetProfileId,
+          sourceSession,
+          sessionId,
+          { preserveHidden: false }
+        );
+        await copySessionInstructionToSession(sourceProfileId, targetProfileId, sessionId, sessionId);
+        await copySessionContextSelectionToSession(sourceProfileId, targetProfileId, sessionId, sessionId);
+        await copySessionRemindersToSession(sourceProfileId, targetProfileId, sessionId, sessionId);
+
+        copied.push({
+          sessionId,
+          title: sourceSession.title,
+          targetProfileId,
+        });
+      } catch (error: any) {
+        skipped.push({
+          sessionId,
+          reason: error?.message || 'העתקת השיחה נכשלה.',
+        });
+      }
+    }
+
+    res.json({
+      copied,
+      skipped,
+      sourceProfileId,
+      targetProfileId,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to copy sessions between users' });
   }
 });
 

@@ -187,6 +187,20 @@ interface CodexSessionSubtask {
   completedAt: string | null;
 }
 
+interface CodexSessionCopyResponse {
+  copied: Array<{
+    sessionId: string;
+    title: string;
+    targetProfileId: string;
+  }>;
+  skipped: Array<{
+    sessionId: string;
+    reason: string;
+  }>;
+  sourceProfileId: string;
+  targetProfileId: string;
+}
+
 interface CodexForkDraftServerContext extends ForkDraftContext {
   sessionId: string;
   profileId: string;
@@ -1847,6 +1861,24 @@ async function createSessionSubtaskRequest(
   return data.subtask;
 }
 
+async function copySessionsToProfileRequest(
+  sourceProfileId: string,
+  targetProfileId: string,
+  sessionIds: string[]
+): Promise<CodexSessionCopyResponse> {
+  return fetchJson<CodexSessionCopyResponse>('/api/codex/sessions/copy', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sourceProfileId,
+      targetProfileId,
+      sessionIds,
+    }),
+  });
+}
+
 async function setSessionSubtaskCompletionRequest(
   profileId: string,
   subtaskId: string,
@@ -3491,10 +3523,14 @@ function SessionCard({
   isSelected,
   isActive,
   isArchivedView,
+  isCopyMode,
+  isMarkedForCopy,
+  canCopy,
   taskSummary,
   subtaskSummary,
   isDeletingPermanent,
   onSelect,
+  onToggleMarkedForCopy,
   onManageTopic,
   onManageTasks,
   onToggleHidden,
@@ -3507,10 +3543,14 @@ function SessionCard({
   isSelected: boolean;
   isActive: boolean;
   isArchivedView: boolean;
+  isCopyMode: boolean;
+  isMarkedForCopy: boolean;
+  canCopy: boolean;
   taskSummary?: { assignedCount: number; completedCount: number } | null;
   subtaskSummary?: { totalCount: number; completedCount: number } | null;
   isDeletingPermanent?: boolean;
   onSelect: () => void;
+  onToggleMarkedForCopy: () => void;
   onManageTopic: () => void;
   onManageTasks: () => void;
   onToggleHidden: (hidden: boolean) => void;
@@ -3613,6 +3653,31 @@ function SessionCard({
             </div>
           </div>
           <div className="flex shrink-0 items-start gap-1.5">
+            {isCopyMode && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (!canCopy) {
+                    return;
+                  }
+                  onToggleMarkedForCopy();
+                }}
+                disabled={!canCopy}
+                className={cn(
+                  'mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition-colors',
+                  canCopy
+                    ? (isMarkedForCopy
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                      : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50 hover:text-indigo-700')
+                    : 'cursor-not-allowed border-slate-100 bg-slate-50 text-slate-300'
+                )}
+                title={canCopy ? (isMarkedForCopy ? 'הסר מסימון העתקה' : 'סמן להעתקה') : 'העתקה זמינה רק לשיחות Codex רגילות'}
+              >
+                <Check className="h-3.5 w-3.5" />
+              </button>
+            )}
             {isActive && (
               <div className="mt-0.5 flex h-6 w-6 items-center justify-center rounded-full bg-emerald-50 text-emerald-600">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -3695,6 +3760,12 @@ function SidebarPanel({
   selectedProvider,
   selectedProfile,
   workspaceMode,
+  copyableTargetProfiles,
+  sessionCopyTargetProfileId,
+  isSessionCopyMode,
+  selectedSessionCopyCount,
+  isCopyingSessions,
+  sessionCopyNotice,
   sessionTaskSummaries,
   sessionSubtaskSummaries,
   search,
@@ -3709,6 +3780,7 @@ function SidebarPanel({
   onClose,
   onProviderChange,
   onProfileChange,
+  onSessionCopyTargetProfileChange,
   onSearchChange,
   onRefresh,
   onInstallApp,
@@ -3718,9 +3790,14 @@ function SidebarPanel({
   onChooseFolder,
   onOpenTaskBoard,
   onToggleWorkspaceMode,
+  onToggleSessionCopyMode,
+  onConfirmCopySessions,
   onManageTopic,
   onManageSessionTasks,
   onToggleArchived,
+  isSessionCopySelectable,
+  isSessionMarkedForCopy,
+  onToggleSessionMarkedForCopy,
   onToggleSessionHidden,
   onDeleteSessionPermanently,
   onSelectSession,
@@ -3732,6 +3809,12 @@ function SidebarPanel({
   selectedProvider: CodexProfile['provider'];
   selectedProfile: CodexProfile | null;
   workspaceMode: WorkspaceMode;
+  copyableTargetProfiles: CodexProfile[];
+  sessionCopyTargetProfileId: string;
+  isSessionCopyMode: boolean;
+  selectedSessionCopyCount: number;
+  isCopyingSessions: boolean;
+  sessionCopyNotice: string | null;
   sessionTaskSummaries: Record<string, { assignedCount: number; completedCount: number }>;
   sessionSubtaskSummaries: Record<string, { totalCount: number; completedCount: number }>;
   search: string;
@@ -3746,6 +3829,7 @@ function SidebarPanel({
   onClose?: () => void;
   onProviderChange: (value: CodexProfile['provider']) => void;
   onProfileChange: (value: string) => void;
+  onSessionCopyTargetProfileChange: (value: string) => void;
   onSearchChange: (value: string) => void;
   onRefresh: () => void;
   onInstallApp: () => void;
@@ -3755,9 +3839,14 @@ function SidebarPanel({
   onChooseFolder: () => void;
   onOpenTaskBoard: () => void;
   onToggleWorkspaceMode: () => void;
+  onToggleSessionCopyMode: () => void;
+  onConfirmCopySessions: () => void;
   onManageTopic: (session: CodexSessionSummary) => void;
   onManageSessionTasks: (session: CodexSessionSummary) => void;
   onToggleArchived: () => void;
+  isSessionCopySelectable: (session: CodexSessionSummary) => boolean;
+  isSessionMarkedForCopy: (sessionId: string) => boolean;
+  onToggleSessionMarkedForCopy: (sessionId: string) => void;
   onToggleSessionHidden: (sessionId: string, hidden: boolean) => void;
   onDeleteSessionPermanently: (session: CodexSessionSummary) => void;
   onSelectSession: (sessionId: string) => void;
@@ -3866,6 +3955,39 @@ function SidebarPanel({
             className="block w-full min-w-0 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-right text-sm text-slate-700 outline-none transition focus:border-indigo-300"
           />
 
+          {isSessionCopyMode && (
+            <div className="rounded-2xl border border-indigo-100 bg-indigo-50/70 px-4 py-3 text-right">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-indigo-800">מצב העתקת שיחות</div>
+                  <div className="mt-1 text-[11px] text-indigo-600">
+                    {selectedSessionCopyCount > 0
+                      ? `נבחרו ${selectedSessionCopyCount} שיחות להעתקה`
+                      : 'סמן שיחות מהרשימה ואז בצע העתקה למשתמש היעד'}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onToggleSessionCopyMode}
+                    className="rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-50"
+                  >
+                    בטל
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onConfirmCopySessions}
+                    disabled={isCopyingSessions || selectedSessionCopyCount === 0 || !sessionCopyTargetProfileId}
+                    className="inline-flex items-center gap-1 rounded-full bg-indigo-700 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isCopyingSessions ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Copy className="h-3.5 w-3.5" />}
+                    <span>העתק מסומנות</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="mt-4 flex flex-col gap-2">
             <span className="block w-full px-2 text-right text-xs font-semibold tracking-wide text-slate-400">
               {showArchived ? 'שיחות מוסתרות' : 'קודם לכן'}
@@ -3960,10 +4082,14 @@ function SidebarPanel({
                                 isSelected={selectedSessionId === session.id}
                                 isActive={activeSessionIds.has(session.id)}
                                 isArchivedView={showArchived}
+                                isCopyMode={isSessionCopyMode}
+                                isMarkedForCopy={isSessionMarkedForCopy(session.id)}
+                                canCopy={isSessionCopySelectable(session)}
                                 taskSummary={sessionTaskSummaries[session.id] || null}
                                 subtaskSummary={sessionSubtaskSummaries[session.id] || null}
                                 isDeletingPermanent={deletingSessionId === session.id}
                                 onSelect={() => onSelectSession(session.id)}
+                                onToggleMarkedForCopy={() => onToggleSessionMarkedForCopy(session.id)}
                                 onManageTopic={() => onManageTopic(session)}
                                 onManageTasks={() => onManageSessionTasks(session)}
                                 onToggleHidden={(hidden) => onToggleSessionHidden(session.id, hidden)}
@@ -4024,6 +4150,44 @@ function SidebarPanel({
                 </option>
               ))}
             </select>
+            {selectedProfile?.provider === 'codex' && selectedProfile.mode === 'standard' && copyableTargetProfiles.length > 0 && (
+              <>
+                <div className="mt-4 text-[11px] font-semibold tracking-[0.18em] text-slate-500">
+                  העברת שיחות בין משתמשים
+                </div>
+                <select
+                  value={sessionCopyTargetProfileId}
+                  onChange={(event) => onSessionCopyTargetProfileChange(event.target.value)}
+                  className="mt-2 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-3 text-right text-sm text-slate-700 outline-none transition focus:border-indigo-300"
+                >
+                  <option value="">בחר משתמש יעד</option>
+                  {copyableTargetProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={onToggleSessionCopyMode}
+                  disabled={!sessionCopyTargetProfileId && !isSessionCopyMode}
+                  className={cn(
+                    'mt-3 flex w-full items-center justify-start gap-2 rounded-xl border px-3 py-2 text-right text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-60',
+                    isSessionCopyMode
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  )}
+                >
+                  {isSessionCopyMode ? 'סיים סימון שיחות' : 'בחר שיחות להעתקה'}
+                  <Copy className="h-4 w-4" />
+                </button>
+                {sessionCopyNotice && (
+                  <div className="mt-2 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs leading-6 text-emerald-700">
+                    {sessionCopyNotice}
+                  </div>
+                )}
+              </>
+            )}
               <button
                 onClick={onRefresh}
                 disabled={isRefreshing}
@@ -9296,6 +9460,11 @@ export function CodexMobileApp() {
   const [devicePassword, setDevicePassword] = useState('');
   const [isUnlockingDevice, setIsUnlockingDevice] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [isSessionCopyMode, setIsSessionCopyMode] = useState(false);
+  const [sessionCopyTargetProfileId, setSessionCopyTargetProfileId] = useState('');
+  const [markedSessionIdsForCopy, setMarkedSessionIdsForCopy] = useState<string[]>([]);
+  const [isCopyingSessions, setIsCopyingSessions] = useState(false);
+  const [sessionCopyNotice, setSessionCopyNotice] = useState<string | null>(null);
   const [isBooting, setIsBooting] = useState(true);
   const [isCheckingAccess, setIsCheckingAccess] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -9524,6 +9693,14 @@ export function CodexMobileApp() {
   const effectiveDraftCwd = draftCwd || null;
   const activeSessionCwd = selectedSession?.cwd || null;
   const currentProfile = visibleProfiles.find((profile) => profile.id === profileId) || null;
+  const copyableCodexTargetProfiles = useMemo(
+    () => visibleProfiles.filter((profile) => (
+      profile.provider === 'codex'
+      && profile.mode === 'standard'
+      && profile.id !== profileId
+    )),
+    [profileId, visibleProfiles]
+  );
   const selectedProfileWorkspaceCwd = currentProfile?.workspaceCwd || null;
   const activeComposerCwd = selectedSessionId ? activeSessionCwd : (effectiveDraftCwd || selectedProfileWorkspaceCwd);
   const selectedConversationId = selectedSessionId || (isDraftConversation ? draftSidebarSessionId : null);
@@ -10786,6 +10963,7 @@ export function CodexMobileApp() {
     setPrompt('');
     setSearch('');
     setError(null);
+    setSessionCopyNotice(null);
     setIsAdditionsMenuOpen(false);
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
@@ -10857,6 +11035,9 @@ export function CodexMobileApp() {
     closeFilePreview();
     setIsDraftConversation(false);
     setForkDraftContext(null);
+    setIsSessionCopyMode(false);
+    setMarkedSessionIdsForCopy([]);
+    setSessionCopyNotice(null);
     setSelectedSessionId(null);
     setSelectedSession(null);
     setSessions([]);
@@ -13046,6 +13227,10 @@ export function CodexMobileApp() {
     () => projectAnchors.filter((anchor) => sessionContextSelection.anchorIds.includes(anchor.id)),
     [projectAnchors, sessionContextSelection.anchorIds]
   );
+  const markedSessionIdsForCopySet = useMemo(
+    () => new Set(markedSessionIdsForCopy),
+    [markedSessionIdsForCopy]
+  );
   const selectedSkillSummaries = useMemo(
     () => availableUnifiedSkills.filter((skill) => sessionContextSelection.skillIds.includes(skill.id)),
     [availableUnifiedSkills, sessionContextSelection.skillIds]
@@ -13074,11 +13259,85 @@ export function CodexMobileApp() {
     || Boolean(filePreviewError);
   const { date: scheduleDateValue, time: scheduleTimeValue } = splitScheduledDateTime(scheduledFor);
 
+  function isSessionEligibleForUserCopy(session: CodexSessionSummary): boolean {
+    return (
+      currentProfile?.provider === 'codex'
+      && currentProfile.mode === 'standard'
+      && !session.id.startsWith('draft:')
+      && !session.agentSession
+    );
+  }
+
+  function toggleSessionMarkedForCopy(sessionId: string) {
+    setMarkedSessionIdsForCopy((current) => (
+      current.includes(sessionId)
+        ? current.filter((candidate) => candidate !== sessionId)
+        : [...current, sessionId]
+    ));
+  }
+
+  function toggleSessionCopyMode() {
+    if (!isSessionCopyMode && !sessionCopyTargetProfileId) {
+      setError('בחר קודם משתמש יעד להעתקת השיחות.');
+      return;
+    }
+
+    setError(null);
+    setSessionCopyNotice(null);
+    setIsSessionCopyMode((current) => !current);
+    if (isSessionCopyMode) {
+      setMarkedSessionIdsForCopy([]);
+    }
+  }
+
+  async function handleCopyMarkedSessions() {
+    if (!profileId || !sessionCopyTargetProfileId || markedSessionIdsForCopy.length === 0) {
+      return;
+    }
+
+    setIsCopyingSessions(true);
+    setError(null);
+    setSessionCopyNotice(null);
+
+    try {
+      const data = await copySessionsToProfileRequest(profileId, sessionCopyTargetProfileId, markedSessionIdsForCopy);
+      const parts: string[] = [];
+      if (data.copied.length > 0) {
+        parts.push(`הועתקו ${data.copied.length} שיחות`);
+      }
+      if (data.skipped.length > 0) {
+        parts.push(`${data.skipped.length} דולגו`);
+      }
+      setSessionCopyNotice(parts.join(' • ') || 'לא הועתקו שיחות.');
+      setMarkedSessionIdsForCopy([]);
+      setIsSessionCopyMode(false);
+    } catch (copyError: any) {
+      setError(copyError.message || 'Failed to copy selected sessions');
+    } finally {
+      setIsCopyingSessions(false);
+    }
+  }
+
   useEffect(() => {
     if (!draftCwd && currentProfile?.workspaceCwd) {
       setDraftCwd(currentProfile.workspaceCwd);
     }
   }, [currentProfile?.workspaceCwd, draftCwd]);
+
+  useEffect(() => {
+    if (copyableCodexTargetProfiles.length === 0) {
+      setSessionCopyTargetProfileId('');
+      setIsSessionCopyMode(false);
+      setMarkedSessionIdsForCopy([]);
+      return;
+    }
+
+    if (!copyableCodexTargetProfiles.some((profile) => profile.id === sessionCopyTargetProfileId)) {
+      setSessionCopyTargetProfileId(copyableCodexTargetProfiles[0]?.id || '');
+      setIsSessionCopyMode(false);
+      setMarkedSessionIdsForCopy([]);
+    }
+  }, [copyableCodexTargetProfiles, sessionCopyTargetProfileId]);
 
   useEffect(() => {
     if (!profileId || !currentQueueKey) {
@@ -13373,6 +13632,12 @@ export function CodexMobileApp() {
       selectedProvider={selectedProvider}
       selectedProfile={currentProfile}
       workspaceMode={workspaceMode}
+      copyableTargetProfiles={copyableCodexTargetProfiles}
+      sessionCopyTargetProfileId={sessionCopyTargetProfileId}
+      isSessionCopyMode={isSessionCopyMode}
+      selectedSessionCopyCount={markedSessionIdsForCopy.length}
+      isCopyingSessions={isCopyingSessions}
+      sessionCopyNotice={sessionCopyNotice}
       sessionTaskSummaries={sessionTaskSummaries}
       sessionSubtaskSummaries={sessionSubtaskSummaries}
       search={search}
@@ -13387,6 +13652,7 @@ export function CodexMobileApp() {
       onClose={onClose}
       onProviderChange={handleProviderChange}
       onProfileChange={handleProfileChange}
+      onSessionCopyTargetProfileChange={setSessionCopyTargetProfileId}
       onSearchChange={setSearch}
       onRefresh={() => void loadSessionsOnly()}
       onInstallApp={() => void handleInstallApp()}
@@ -13396,9 +13662,14 @@ export function CodexMobileApp() {
       onChooseFolder={handleChooseFolderFromSidebar}
       onOpenTaskBoard={openTaskBoard}
       onToggleWorkspaceMode={handleToggleWorkspaceMode}
+      onToggleSessionCopyMode={toggleSessionCopyMode}
+      onConfirmCopySessions={() => void handleCopyMarkedSessions()}
       onManageTopic={(session) => void openTopicManager(session)}
       onManageSessionTasks={openSessionTaskDialog}
       onToggleArchived={() => setShowArchived((current) => !current)}
+      isSessionCopySelectable={isSessionEligibleForUserCopy}
+      isSessionMarkedForCopy={(sessionId) => markedSessionIdsForCopySet.has(sessionId)}
+      onToggleSessionMarkedForCopy={toggleSessionMarkedForCopy}
       onToggleSessionHidden={(sessionId, hidden) => void handleToggleSessionHidden(sessionId, hidden)}
       onDeleteSessionPermanently={(session) => setPendingPermanentDeleteSession(session)}
       onSelectSession={handleSelectConversation}

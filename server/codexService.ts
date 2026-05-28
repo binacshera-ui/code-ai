@@ -2264,6 +2264,73 @@ export async function deleteCodexSession(
   await fs.rm(sessionRecord.path, { force: true });
 }
 
+async function appendSessionIndexEntryIfMissing(
+  targetProfile: CodexProfile,
+  entry: SessionIndexEntry | undefined
+): Promise<void> {
+  if (!entry?.id) {
+    return;
+  }
+
+  const existingIndex = await loadSessionIndexMap(targetProfile);
+  if (existingIndex.has(entry.id)) {
+    return;
+  }
+
+  const indexPath = path.join(targetProfile.codexHome, 'session_index.jsonl');
+  await fs.mkdir(path.dirname(indexPath), { recursive: true });
+  await fs.appendFile(indexPath, `${JSON.stringify(entry)}\n`, 'utf-8');
+}
+
+export async function copyCodexSessionToProfile(
+  sessionId: string,
+  sourceProfileId: string,
+  targetProfileId: string
+): Promise<SessionScanRecord> {
+  const sourceProfile = resolveProfile(sourceProfileId);
+  const targetProfile = resolveProfile(targetProfileId);
+
+  if (sourceProfile.provider !== 'codex' || targetProfile.provider !== 'codex') {
+    throw new Error('Session copy between users is currently supported only for Codex profiles');
+  }
+
+  if (sourceProfile.id === targetProfile.id) {
+    throw new Error('Source and target profiles must be different');
+  }
+
+  const sourceSessionRecord = await resolveSessionRecord(sourceProfile, sessionId);
+  if (!sourceSessionRecord) {
+    throw new Error(`Session ${sessionId} was not found`);
+  }
+
+  const existingTargetRecord = await resolveSessionRecord(targetProfile, sessionId);
+  if (existingTargetRecord) {
+    throw new Error(`Session ${sessionId} already exists in target profile`);
+  }
+
+  const sourceIndexMap = await loadSessionIndexMap(sourceProfile);
+  const sourceContent = await fs.readFile(sourceSessionRecord.path, 'utf-8');
+  const timestamp = sourceSessionRecord.createdAt ? new Date(sourceSessionRecord.createdAt) : new Date();
+  const safeTimestamp = Number.isNaN(timestamp.getTime()) ? new Date() : timestamp;
+  const targetPath = buildSessionFilePath(targetProfile, sessionId, safeTimestamp);
+
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.writeFile(targetPath, sourceContent, 'utf-8');
+  await appendSessionIndexEntryIfMissing(targetProfile, sourceIndexMap.get(sessionId));
+
+  const stats = await fs.stat(targetPath);
+  return {
+    id: sessionId,
+    path: targetPath,
+    updatedAt: stats.mtime.toISOString(),
+    createdAt: sourceSessionRecord.createdAt,
+    cwd: sourceSessionRecord.cwd,
+    modelProvider: sourceSessionRecord.modelProvider,
+    source: sourceSessionRecord.source,
+    forkedFromId: sourceSessionRecord.forkedFromId,
+  };
+}
+
 interface RawCodexTurnRange {
   startLine: number;
   endLine: number;
