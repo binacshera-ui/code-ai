@@ -2285,7 +2285,10 @@ async function appendSessionIndexEntryIfMissing(
 export async function copyCodexSessionToProfile(
   sessionId: string,
   sourceProfileId: string,
-  targetProfileId: string
+  targetProfileId: string,
+  options?: {
+    targetSessionId?: string;
+  }
 ): Promise<SessionScanRecord> {
   const sourceProfile = resolveProfile(sourceProfileId);
   const targetProfile = resolveProfile(targetProfileId);
@@ -2303,24 +2306,51 @@ export async function copyCodexSessionToProfile(
     throw new Error(`Session ${sessionId} was not found`);
   }
 
-  const existingTargetRecord = await resolveSessionRecord(targetProfile, sessionId);
+  let targetSessionId = options?.targetSessionId?.trim() || randomUUID();
+  let existingTargetRecord = await resolveSessionRecord(targetProfile, targetSessionId);
+  while (existingTargetRecord) {
+    targetSessionId = randomUUID();
+    existingTargetRecord = await resolveSessionRecord(targetProfile, targetSessionId);
+  }
+
   if (existingTargetRecord) {
-    throw new Error(`Session ${sessionId} already exists in target profile`);
+    throw new Error(`Session ${targetSessionId} already exists in target profile`);
   }
 
   const sourceIndexMap = await loadSessionIndexMap(sourceProfile);
   const sourceContent = await fs.readFile(sourceSessionRecord.path, 'utf-8');
   const timestamp = sourceSessionRecord.createdAt ? new Date(sourceSessionRecord.createdAt) : new Date();
   const safeTimestamp = Number.isNaN(timestamp.getTime()) ? new Date() : timestamp;
-  const targetPath = buildSessionFilePath(targetProfile, sessionId, safeTimestamp);
+  const targetPath = buildSessionFilePath(targetProfile, targetSessionId, safeTimestamp);
+  const sourceIndexEntry = sourceIndexMap.get(sessionId);
+  const sourceLines = sourceContent.split('\n');
+  const firstRow = safeJsonParse<{ payload?: Record<string, unknown> }>(sourceLines[0] || '');
+
+  if (firstRow?.payload && typeof firstRow.payload === 'object') {
+    firstRow.payload = {
+      ...firstRow.payload,
+      id: targetSessionId,
+    };
+    sourceLines[0] = JSON.stringify(firstRow);
+  }
+
+  const targetContent = sourceLines.join('\n');
 
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  await fs.writeFile(targetPath, sourceContent, 'utf-8');
-  await appendSessionIndexEntryIfMissing(targetProfile, sourceIndexMap.get(sessionId));
+  await fs.writeFile(targetPath, targetContent, 'utf-8');
+  await appendSessionIndexEntryIfMissing(
+    targetProfile,
+    sourceIndexEntry
+      ? {
+          ...sourceIndexEntry,
+          id: targetSessionId,
+        }
+      : undefined
+  );
 
   const stats = await fs.stat(targetPath);
   return {
-    id: sessionId,
+    id: targetSessionId,
     path: targetPath,
     updatedAt: stats.mtime.toISOString(),
     createdAt: sourceSessionRecord.createdAt,

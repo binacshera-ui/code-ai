@@ -190,6 +190,7 @@ interface CodexSessionSubtask {
 interface CodexSessionCopyResponse {
   copied: Array<{
     sessionId: string;
+    targetSessionId: string;
     title: string;
     targetProfileId: string;
   }>;
@@ -4521,6 +4522,8 @@ type VoxelTouchTarget = {
   x: number;
   y: number;
   active: boolean;
+  lastMoveAt: number;
+  lastSpeed: number;
 };
 
 type VoxelBlock = {
@@ -4573,10 +4576,12 @@ type VoxelGameState = {
     y: number;
     size: number;
     speed: number;
+    flightSpeed: number;
     health: number;
     ammo: number;
     maxAmmo: number;
     shootCooldown: number;
+    invulnerability: number;
   };
   blocks: VoxelBlock[];
   enemies: VoxelEnemy[];
@@ -4606,10 +4611,12 @@ function createVoxelGameState(): VoxelGameState {
       y: VOXEL_GAME_HEIGHT / 2,
       size: 16,
       speed: 260,
+      flightSpeed: 0,
       health: 100,
       ammo: 12,
       maxAmmo: 18,
       shootCooldown: 0,
+      invulnerability: 0,
     },
     blocks: createVoxelBlocks(),
     enemies: [],
@@ -4699,6 +4706,8 @@ function spawnSkyRing(state: VoxelGameState) {
 function updateVoxelGame(state: VoxelGameState, _touchTarget: VoxelTouchTarget, dt: number) {
   state.time += dt;
   state.player.shootCooldown = Math.max(0, state.player.shootCooldown - dt);
+  state.player.invulnerability = Math.max(0, state.player.invulnerability - dt);
+  state.player.flightSpeed = Math.max(0, state.player.flightSpeed - dt * 1650);
   state.shake = Math.max(0, state.shake - dt * 4);
   state.boost = Math.max(0, state.boost - dt * 3.2);
 
@@ -4824,6 +4833,10 @@ function updateVoxelGame(state: VoxelGameState, _touchTarget: VoxelTouchTarget, 
     }
 
     if (Math.hypot(enemy.x - state.player.x, enemy.y - state.player.y) < enemy.size + state.player.size) {
+      if (state.player.invulnerability > 0) {
+        spawnVoxelBurst(state, enemy.x, enemy.y, 172, 4);
+        continue;
+      }
       state.player.health = Math.max(0, state.player.health - dt * (10 + state.wave * 1.3));
       state.combo = 0;
       state.shake = 0.22;
@@ -4950,6 +4963,23 @@ function drawVoxelGame(context: CanvasRenderingContext2D, state: VoxelGameState)
   context.translate(state.player.x, state.player.y);
   context.scale(playerPulse, playerPulse);
   context.rotate(Math.sin(state.time * 2.5) * 0.08);
+  if (state.player.invulnerability > 0) {
+    const shieldAlpha = 0.18 + Math.min(0.34, state.player.invulnerability * 1.2);
+    const shieldRadius = state.player.size * (1.9 + Math.min(0.35, state.player.flightSpeed / 4200));
+    const shieldGradient = context.createRadialGradient(0, 0, 4, 0, 0, shieldRadius);
+    shieldGradient.addColorStop(0, `rgba(255,255,255,${Math.min(0.7, shieldAlpha + 0.16)})`);
+    shieldGradient.addColorStop(0.45, `rgba(56,189,248,${shieldAlpha})`);
+    shieldGradient.addColorStop(1, 'rgba(56,189,248,0)');
+    context.fillStyle = shieldGradient;
+    context.beginPath();
+    context.arc(0, 0, shieldRadius, 0, Math.PI * 2);
+    context.fill();
+    context.strokeStyle = `rgba(14,165,233,${Math.min(0.9, shieldAlpha + 0.24)})`;
+    context.lineWidth = 2.5;
+    context.beginPath();
+    context.arc(0, 0, state.player.size * 1.48, state.time * 3.1, state.time * 3.1 + Math.PI * 1.45);
+    context.stroke();
+  }
   context.fillStyle = '#0F172A';
   context.beginPath();
   context.moveTo(0, -state.player.size - 8);
@@ -6077,6 +6107,8 @@ function MiniGameDialog({
     x: VOXEL_GAME_WIDTH / 2,
     y: VOXEL_GAME_HEIGHT / 2,
     active: false,
+    lastMoveAt: 0,
+    lastSpeed: 0,
   });
   const stateRef = useRef<VoxelGameState>(createVoxelGameState());
   const emptyAmmoNoticeShownRef = useRef(false);
@@ -6103,6 +6135,13 @@ function MiniGameDialog({
 
   const resetGame = useEffectEvent(() => {
     stateRef.current = createVoxelGameState();
+    touchTargetRef.current = {
+      x: VOXEL_GAME_WIDTH / 2,
+      y: VOXEL_GAME_HEIGHT / 2,
+      active: false,
+      lastMoveAt: 0,
+      lastSpeed: 0,
+    };
     emptyAmmoNoticeShownRef.current = false;
     setIsGameOver(false);
     setIsPaused(false);
@@ -6222,13 +6261,28 @@ function MiniGameDialog({
       Math.max(flightBounds.minY, nextY)
     );
 
+    const previousX = stateRef.current.player.x;
+    const previousY = stateRef.current.player.y;
+    const previousMoveAt = touchTargetRef.current.lastMoveAt;
+    const now = performance.now();
+    const distance = Math.hypot(clampedX - previousX, clampedY - previousY);
+    const elapsedSeconds = previousMoveAt > 0 ? Math.max((now - previousMoveAt) / 1000, 0.008) : 0;
+    const movementSpeed = elapsedSeconds > 0 ? distance / elapsedSeconds : 0;
+
     stateRef.current.player.x = clampedX;
     stateRef.current.player.y = clampedY;
+    stateRef.current.player.flightSpeed = movementSpeed;
+
+    if (movementSpeed >= 1350) {
+      stateRef.current.player.invulnerability = 0.2;
+    }
 
     touchTargetRef.current = {
       x: clampedX,
       y: clampedY,
       active: true,
+      lastMoveAt: now,
+      lastSpeed: movementSpeed,
     };
   };
 
@@ -6268,6 +6322,8 @@ function MiniGameDialog({
     touchTargetRef.current = {
       ...touchTargetRef.current,
       active: false,
+      lastMoveAt: 0,
+      lastSpeed: 0,
     };
   };
 

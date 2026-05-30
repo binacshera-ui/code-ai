@@ -1711,7 +1711,7 @@ router.post('/sessions/copy', requireCodexAccess, async (req, res) => {
       return;
     }
 
-    const copied: Array<{ sessionId: string; title: string; targetProfileId: string }> = [];
+    const copied: Array<{ sessionId: string; targetSessionId: string; title: string; targetProfileId: string }> = [];
     const skipped: Array<{ sessionId: string; reason: string }> = [];
     const uniqueSessionIds = [...new Set(sessionIds)];
 
@@ -1728,20 +1728,21 @@ router.post('/sessions/copy', requireCodexAccess, async (req, res) => {
           continue;
         }
 
-        await copyCodexSessionToProfile(sessionId, sourceProfileId, targetProfileId);
+        const copiedSession = await copyCodexSessionToProfile(sessionId, sourceProfileId, targetProfileId);
         await copySessionSidebarMetadataToForkSession(
           sourceProfileId,
           targetProfileId,
           sourceSession,
-          sessionId,
+          copiedSession.id,
           { preserveHidden: false }
         );
-        await copySessionInstructionToSession(sourceProfileId, targetProfileId, sessionId, sessionId);
-        await copySessionContextSelectionToSession(sourceProfileId, targetProfileId, sessionId, sessionId);
-        await copySessionRemindersToSession(sourceProfileId, targetProfileId, sessionId, sessionId);
+        await copySessionInstructionToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
+        await copySessionContextSelectionToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
+        await copySessionRemindersToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
 
         copied.push({
           sessionId,
+          targetSessionId: copiedSession.id,
           title: sourceSession.title,
           targetProfileId,
         });
