@@ -10616,6 +10616,20 @@ export function CodexMobileApp() {
     }
   }
 
+  async function fetchSessionsSnapshot(nextProfileId = profileId) {
+    const data = await fetchJson<{ sessions: CodexSessionSummary[] }>(
+      `/api/codex/sessions?profile=${encodeURIComponent(nextProfileId)}`
+    );
+    return data.sessions;
+  }
+
+  async function fetchQueueItemsSnapshot(nextProfileId = profileId) {
+    const data = await fetchJson<{ items: CodexQueueServerItem[] }>(
+      `/api/codex/queue/items?profile=${encodeURIComponent(nextProfileId)}`
+    );
+    return data.items;
+  }
+
   async function loadSessionDetail(
     sessionId: string,
     nextProfileId = profileId,
@@ -11526,6 +11540,26 @@ export function CodexMobileApp() {
         data.session.forkDraftContext,
         data.session.updatedAt
       );
+      const targetSessionsSnapshot = await fetchSessionsSnapshot(data.targetProfileId).catch(() => null);
+      const targetQueueSnapshot = await fetchQueueItemsSnapshot(data.targetProfileId).catch(() => null);
+      const nextSessions = targetSessionsSnapshot
+        ? [
+          data.session,
+          ...targetSessionsSnapshot.filter((session) => session.id !== data.session.id),
+        ]
+        : [
+          data.session,
+          ...sessions.filter((session) => session.id !== data.session.id),
+        ];
+      const nextQueueItems = targetQueueSnapshot
+        ? sortQueueItemsForDisplay([
+          data.item,
+          ...targetQueueSnapshot.filter((item) => item.id !== data.item.id),
+        ])
+        : [
+          data.item,
+          ...queueItems.filter((item) => item.id !== data.item.id),
+        ];
 
       recordCodexBreadcrumb('session-transfer-created', {
         sourceSessionId: selectedSession.id,
@@ -11556,8 +11590,8 @@ export function CodexMobileApp() {
         setDraftConversationKey(data.session.id);
         setForkDraftContext(nextForkDraftContext);
         setDraftCwd(data.session.cwd || nextForkDraftContext.sourceCwd || targetProfile.workspaceCwd || null);
-        setSessions([data.session]);
-        setQueueItems([data.item]);
+        setSessions(nextSessions);
+        setQueueItems(nextQueueItems);
         setPrompt('');
         setSearch('');
         setScheduledFor('');

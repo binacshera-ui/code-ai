@@ -119,7 +119,7 @@ function resolveGeminiBinary(): string {
 }
 
 const GEMINI_BIN = resolveGeminiBinary();
-const MAX_SESSIONS = 80;
+const MAX_SESSIONS = 500;
 const MAX_TOOL_TEXT = 12_000;
 const GEMINI_RUNTIME_STATE_FILE = path.join(CODEX_APP_CONFIG.queueRoot, 'gemini-runtime-state.json');
 const GEMINI_MODEL_CACHE_TTL_MS = 60_000;

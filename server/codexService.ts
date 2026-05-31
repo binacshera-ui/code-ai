@@ -205,6 +205,7 @@ interface SessionSummaryHints {
   preview: string;
   startPreview: string;
   endPreview: string;
+  cwdOverride?: string | null;
   isCompactClone?: boolean;
   compactSourceSessionId?: string | null;
 }
@@ -385,7 +386,7 @@ interface ActiveCodexRun {
 
 const CODEX_BIN = process.env.CODEX_BIN || 'codex';
 const DEFAULT_PROFILE_ID = CODEX_APP_CONFIG.defaultProfileId;
-const MAX_SESSIONS = 80;
+const MAX_SESSIONS = 500;
 const MAX_TOOL_TEXT = 12_000;
 export const CODEX_UPLOAD_ROOT = CODEX_APP_CONFIG.uploadRoot;
 const QUEUE_STATE_FILE = path.join(CODEX_APP_CONFIG.queueRoot, 'state.json');
@@ -736,9 +737,26 @@ async function readFileChunk(filePath: string, start: number, length: number): P
   }
 }
 
-async function readFileHead(filePath: string, maxBytes = 24 * 1024): Promise<string[]> {
-  const chunk = await readFileChunk(filePath, 0, maxBytes);
-  return chunk.split('\n');
+async function readFileHead(filePath: string, maxLines = 48): Promise<string[]> {
+  const stream = createReadStream(filePath, { encoding: 'utf-8' });
+  const lineReader = readline.createInterface({
+    input: stream,
+    crlfDelay: Infinity,
+  });
+  const lines: string[] = [];
+
+  try {
+    for await (const line of lineReader) {
+      lines.push(line);
+      if (lines.length >= maxLines) {
+        break;
+      }
+    }
+    return lines;
+  } finally {
+    lineReader.close();
+    stream.destroy();
+  }
 }
 
 async function readFileTail(filePath: string, maxBytes = 48 * 1024): Promise<string[]> {
@@ -1185,6 +1203,7 @@ async function extractSessionSummaryHints(
   let preview = '';
   let startPreview = '';
   let endPreview = '';
+  let cwdOverride: string | null = null;
   let isCompactClone = false;
   let compactSourceSessionId: string | null = null;
 
@@ -1208,6 +1227,9 @@ async function extractSessionSummaryHints(
 
     if (eventType === 'user_message' && typeof payload.message === 'string') {
       const text = payload.message.trim();
+      if (!cwdOverride) {
+        cwdOverride = parseInjectedWorkspacePath(text);
+      }
       const compactClone = parseCompactClonePrompt(text);
       if (compactClone) {
         isCompactClone = true;
@@ -1258,9 +1280,34 @@ async function extractSessionSummaryHints(
     preview,
     startPreview: startPreview || title || sessionId,
     endPreview: endPreview || startPreview || title || sessionId,
+    cwdOverride,
     isCompactClone,
     compactSourceSessionId,
   };
+}
+
+function parseInjectedWorkspacePath(text: string): string | null {
+  const patterns = [
+    /הנתיב הפעיל הוא:\s*(.+)/,
+    /The active path is:\s*(.+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) {
+      continue;
+    }
+
+    const candidate = match[1]
+      .split('\n')[0]
+      .trim()
+      .replace(/^["']+|["']+$/g, '');
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
 function summarizeToolName(name: string): string {
@@ -2138,9 +2185,10 @@ export async function listCodexSessions(
     const forkStartPreview = !isRealForkSession
       ? getFirstTimelineMessageText(forkMetadata?.timeline || [])
       : null;
+    const resolvedCwd = hints.cwdOverride || sessionFile.cwd;
     const title = hints.title;
     const preview = hints.preview;
-    const matchHaystack = `${title}\n${preview}\n${sessionFile.id}\n${sessionFile.cwd || ''}\n${forkMetadata?.sourceTitle || ''}`.toLowerCase();
+    const matchHaystack = `${title}\n${preview}\n${sessionFile.id}\n${resolvedCwd || ''}\n${forkMetadata?.sourceTitle || ''}`.toLowerCase();
 
     if (normalizedQuery && !matchHaystack.includes(normalizedQuery)) {
       continue;
@@ -2152,7 +2200,7 @@ export async function listCodexSessions(
       updatedAt: sessionFile.updatedAt,
       createdAt: sessionFile.createdAt,
       profileId: profile.id,
-      cwd: sessionFile.cwd,
+      cwd: resolvedCwd,
       messageCount: 0,
       preview,
       startPreview: forkStartPreview
