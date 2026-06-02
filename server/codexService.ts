@@ -572,6 +572,81 @@ function stripBenignCodexStderr(text: string): string {
     .trim();
 }
 
+function normalizeCodexCliText(text: string): string {
+  return stripBenignCodexStderr(text)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function summarizeCodexCliText(text: string, maxLines = 12): string {
+  const normalized = normalizeCodexCliText(text);
+  if (!normalized) {
+    return '';
+  }
+
+  const lines = normalized.split('\n').filter(Boolean);
+  if (lines.length <= maxLines) {
+    return lines.join('\n');
+  }
+
+  return lines.slice(-maxLines).join('\n');
+}
+
+function extractCodexStructuredError(row: any): string | null {
+  if (!row || typeof row !== 'object') {
+    return null;
+  }
+
+  const rowType = typeof row.type === 'string' ? row.type.toLowerCase() : '';
+  const hints = [
+    typeof row.message === 'string' ? row.message : null,
+    typeof row.detail === 'string' ? row.detail : null,
+    typeof row.details === 'string' ? row.details : null,
+    typeof row.reason === 'string' ? row.reason : null,
+    typeof row.error === 'string' ? row.error : null,
+    typeof row.error?.message === 'string' ? row.error.message : null,
+    typeof row.item?.text === 'string' && /(error|failed|invalid|denied|timeout)/i.test(row.item.text)
+      ? row.item.text
+      : null,
+  ].filter((value): value is string => Boolean(value?.trim()));
+
+  if (!hints.length && !/(error|failed|invalid|denied|timeout|abort)/i.test(rowType)) {
+    return null;
+  }
+
+  const primary = hints[0] || JSON.stringify(row);
+  return rowType ? `${rowType}: ${primary}` : primary;
+}
+
+function buildCodexFailureDetails(
+  fallbackMessage: string,
+  stderrText: string,
+  stdoutLines: string[],
+  structuredErrors: string[]
+): string {
+  const normalizedStderr = summarizeCodexCliText(stderrText, 16);
+  if (normalizedStderr) {
+    return normalizedStderr;
+  }
+
+  const uniqueStructuredErrors = Array.from(
+    new Set(structuredErrors.map((line) => line.trim()).filter(Boolean))
+  );
+  if (uniqueStructuredErrors.length) {
+    return uniqueStructuredErrors.slice(-6).join('\n');
+  }
+
+  const normalizedStdout = summarizeCodexCliText(stdoutLines.join('\n'), 16);
+  if (normalizedStdout) {
+    return `${fallbackMessage}\n${normalizedStdout}`;
+  }
+
+  return fallbackMessage;
+}
+
 function buildCodexHomeRepairCommand(profile: CodexProfile): string {
   const currentUser = process.env.USER?.trim() || '$(whoami)';
   return `sudo chown -R ${currentUser}:${currentUser} ${profile.codexHome}`;
@@ -3176,6 +3251,8 @@ export async function runCodexPrompt(
       let stderrBuffer = '';
       let finalMessage = '';
       let createdSessionId = sessionId || '';
+      const stdoutLines: string[] = [];
+      const structuredErrors: string[] = [];
 
       function wasCancellationRequested(): boolean {
         return activeRunId ? activeCodexRuns.get(activeRunId)?.cancelRequested === true : false;
@@ -3200,8 +3277,20 @@ export async function runCodexPrompt(
           stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
 
           if (!line) continue;
+          stdoutLines.push(line);
+          if (stdoutLines.length > 120) {
+            stdoutLines.splice(0, stdoutLines.length - 120);
+          }
           const row = safeJsonParse<any>(line);
           if (!row) continue;
+
+          const structuredError = extractCodexStructuredError(row);
+          if (structuredError) {
+            structuredErrors.push(structuredError);
+            if (structuredErrors.length > 40) {
+              structuredErrors.splice(0, structuredErrors.length - 40);
+            }
+          }
 
           if (row.type === 'thread.started' && typeof row.thread_id === 'string') {
             createdSessionId = row.thread_id;
@@ -3241,7 +3330,13 @@ export async function runCodexPrompt(
         }
 
         if (code !== 0) {
-          reject(new Error(sanitizeCodexCliFailure(profile, stderrBuffer, `Codex exited with code ${code}`)));
+          const failureDetails = buildCodexFailureDetails(
+            `Codex exited with code ${code}`,
+            stderrBuffer,
+            stdoutLines,
+            structuredErrors
+          );
+          reject(new Error(sanitizeCodexCliFailure(profile, failureDetails, `Codex exited with code ${code}`)));
           return;
         }
 
