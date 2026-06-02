@@ -1,77 +1,64 @@
-# code-ai Deployment Kit
+# code-ai
 
-Hebrew version:
-
-- `README.he.md`
-
-Windows field notes:
-
-- `WINDOWS.FIELD-NOTES.he.md`
-
-`code-ai` is a mobile-first workspace for operating the 3 leading terminal coding agents from one UI:
+`code-ai` is a mobile-first workspace for running and coordinating the leading terminal coding agents from one interface:
 
 - Codex
 - Claude Code
 - Gemini CLI
 
-This repo is not "a Codex skin" anymore. It is a unified control plane for multiple provider CLIs, shared sessions UI, queueing, scheduling, uploads, transfers between providers, and provider-specific profile homes.
+It is designed for operators who want one clean control plane for conversations, queueing, scheduling, topic grouping, project memory, cross-user transfer, support flows, and provider-specific execution settings without giving up local CLI power.
 
-## Internal Support Workspace
+## Product Preview
 
-`code-ai` also includes a built-in internal support workspace.
+<p align="center">
+  <img src="deploy/code-ai/assets/readme/topic-management.png" alt="Topic management" width="24%" />
+  <img src="deploy/code-ai/assets/readme/history-panel.png" alt="Session history" width="24%" />
+  <img src="deploy/code-ai/assets/readme/quick-actions.png" alt="Quick actions" width="24%" />
+  <img src="deploy/code-ai/assets/readme/model-panel.png" alt="Model and permissions panel" width="24%" />
+</p>
 
-It is designed for human-like support investigation flows:
+## What Makes It Different
 
-- separate UI mode from normal agent work
-- separate provider homes generated automatically under `CODEX_STORAGE_ROOT/support/homes/...`
-- separate write sandbox per provider/profile under `CODEX_STORAGE_ROOT/support/sandbox/...`
-- support transcript metadata stored in `CODEX_STORAGE_ROOT/support/support-session-state.json`
-- webhook/API entrypoints that can target Codex, Claude, or Gemini support profiles
+- One UI for three providers, with real local profile homes per provider.
+- Mobile-first session workflow instead of a desktop-only wrapper.
+- Built-in queueing and scheduling, including deferred and recurring execution.
+- Topic grouping, project boards, reminders, anchors, skills, and reusable context tools.
+- Cross-provider transfers and cross-user session copy flows.
+- Internal support mode with isolated storage and sandbox rules.
+- Trigger endpoints that can wake a normal session from an external system event.
 
-Relevant runtime files:
+## Core Experience
 
-- `server/supportAgentService.ts`
-- `POST /api/codex/support/ask`
-- `POST /api/codex/support/webhook`
-- sidebar `Support workspace` toggle in the mobile UI
+`code-ai` gives you a single workspace for:
 
-Support API execution levels:
+- starting regular chats
+- forking or transferring sessions
+- attaching files, anchors, skills, reminders, and agent modes
+- scheduling one-shot or recurring runs
+- tracking session-local subtasks and project assignments
+- inspecting changed files, tool traces, queue state, context usage, permissions, and rate limits
 
-- `fast`
-- `balanced`
-- `deep`
+The app uses your real CLI installations and their real homes. It does not fake a provider layer on top of hosted APIs.
 
-These map to provider-specific model + reasoning presets for Codex, Claude, and Gemini.
-You can still override them explicitly with `model` and/or `reasoningEffort`.
+## Bring Your Own Providers
 
-## What Must Be Installed
+You can run the app with one provider or with all three.
 
-Base requirements:
+Required base tooling:
 
 - Node.js 20+
 - npm
 - Git
 
-Provider CLIs:
+Optional provider CLIs:
 
-- Codex CLI, if you want Codex sessions and execution
-- Claude CLI, if you want Claude sessions and execution
-- Gemini CLI, if you want Gemini sessions and execution
+- Codex CLI
+- Claude CLI
+- Gemini CLI
 
-Authentication / provider state:
+The full multi-provider experience is available when all three are installed and authenticated on the host.
 
-- Codex profiles must have a real `.codex` home
-- Claude profiles must have a real `.claude` home
-- Gemini profiles must have a real `.gemini` home
-
-Important:
-
-- You can run `code-ai` with only one provider installed.
-- You get the full multi-provider experience only when all 3 CLIs are installed and authenticated on the host.
-
-## The Fastest Install
-
-If you only want the app running fast, install with explicit profiles JSON from day one.
+## Quick Start
 
 ### Linux / macOS
 
@@ -99,250 +86,54 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 `
   --session-secret change-me-too
 ```
 
-### Windows CMD
+## Repo Layout
 
-```cmd
-git clone https://github.com/binacshera-ui/code-ai.git
-cd code-ai
-install.cmd --app-name code-ai --port 4000 --profiles-json "[{\"id\":\"codex-main\",\"label\":\"Codex\",\"provider\":\"codex\",\"codexHome\":\"C:\\Users\\Administrator\\.codex\",\"workspaceCwd\":\"D:\\workspace\",\"defaultProfile\":true},{\"id\":\"claude-main\",\"label\":\"Claude\",\"provider\":\"claude\",\"codexHome\":\"C:\\Users\\Administrator\\.claude\",\"workspaceCwd\":\"D:\\workspace\"},{\"id\":\"gemini-main\",\"label\":\"Gemini\",\"provider\":\"gemini\",\"codexHome\":\"C:\\Users\\Administrator\\.gemini\",\"workspaceCwd\":\"D:\\workspace\"}]" --device-password change-me-now --session-secret change-me-too
-```
+- `client/` — the mobile UI
+- `server/` — provider routing, queueing, parsing, and orchestration
+- `deploy/code-ai/` — installer, export flow, and deployment assets
+- `scripts/` — repo-local utilities
+- `ecosystem.config.cjs` — PM2 process definition
 
-## Windows Field Notes
-
-If the target host is Windows, also read:
-
-- `WINDOWS.FIELD-NOTES.he.md`
-
-That document captures operational notes that usually appear only during real Windows installs:
-
-- `.cmd` / `.bat` wrapper behavior
-- resolving real CLI executables vs `PATH` shims
-- `Gemini CLI` specifics on Windows
-- reverse proxy / tunnel mismatches
-- PM2 behavior on Windows
-- paths with spaces
-
-## What The Installer Actually Does
-
-Canonical installer:
-
-- `deploy/code-ai/install.mjs`
-
-Wrappers:
-
-- `install.sh`
-- `install.ps1`
-- `install.cmd`
-
-The installer will:
-
-- write `.env`
-- write `CODEX_PROFILES_JSON`
-- create app-managed storage folders
-- run `npm install --include=dev`
-- run `npm run build`
-- start or restart PM2 through `ecosystem.config.cjs`
-
-You do not need to manually:
-
-- create `.env`
-- install PM2 globally
-- create queue/upload/log folders
-- build client and server separately
-
-## The 2 Path Concepts You Must Understand
+## Important Runtime Concepts
 
 ### `workspaceCwd`
 
-This is the default working directory shown in the UI for new conversations.
+The default working directory used for new conversations.
 
 ### `codexHome`
 
-The field name is legacy, but in `code-ai` it means:
-
-- provider data home for that profile
+Legacy field name for the provider home of the selected profile.
 
 Examples:
 
-- Codex profile -> `/home/ubuntu/.codex`
-- Claude profile -> `/home/ubuntu/.claude`
-- Gemini profile -> `/home/ubuntu/.gemini`
+- Codex -> `.codex`
+- Claude -> `.claude`
+- Gemini -> `.gemini`
 
-The field was intentionally not renamed in env / storage / JSON schema to avoid breaking old installs and old queue/session metadata.
+The name stays `codexHome` for backward compatibility with existing installs and stored metadata, but it now means “provider home” across the whole app.
 
-## Provider Binary Settings
+## Where To Read Next
 
-If binaries are already in `PATH`, you usually do not need these.
+- `README.he.md` — Hebrew version
+- `AGENT.md` — operator / handoff notes
+- `WINDOWS.FIELD-NOTES.he.md` — practical Windows install notes
+- `deploy/code-ai/install.mjs` — canonical installer
+- `server/config.ts` — profile and storage configuration
+- `client/src/components/codex/CodexMobileApp.tsx` — main UI shell
 
-- `CODEX_BIN`
-- `CLAUDE_BIN`
-- `GEMINI_BIN`
-- `CODEX_SUPPORT_WEBHOOK_TOKEN`
+## Deployment Notes
 
-Examples:
+The repo ships with a one-command installer that:
 
-- `CODEX_BIN=/usr/local/bin/codex`
-- `CLAUDE_BIN=/usr/local/bin/claude`
-- `GEMINI_BIN=/home/ubuntu/.local/bin/gemini`
+- writes `.env`
+- writes `CODEX_PROFILES_JSON`
+- creates app-managed storage
+- installs dependencies
+- builds client + server
+- starts or refreshes PM2
 
-## Repo Structure
+If you are looking for operational details, use:
 
-- `client/` — Vite mobile UI
-- `server/` — API, parsing, queue, orchestration
-- `deploy/code-ai/` — installer, exporter, nginx template
-- `ecosystem.config.cjs` — PM2 definition
-- `.env.example` — reference env shape
-
-## The Main Logic Files
-
-These are the files that define the real behavior of `code-ai`:
-
-- `server/config.ts`
-  provider/profile runtime config, paths, storage roots
-- `server/agentService.ts`
-  top-level provider router for Codex / Claude / Gemini
-- `server/codexService.ts`
-  Codex-specific session parsing and execution
-- `server/claudeService.ts`
-  Claude-specific session parsing and execution
-- `server/geminiService.ts`
-  Gemini-specific session parsing and execution
-- `server/codexQueue.ts`
-  shared queue, worker, scheduling, retries, fork/transfer execution
-- `server/codexForkSessions.ts`
-  draft fork sessions and cross-provider transfer metadata
-- `server/codexRoutes.ts`
-  HTTP surface used by the client
-- `client/src/components/codex/CodexMobileApp.tsx`
-  main application UI
-
-## Why So Many Files Still Say "codex"
-
-For backward compatibility.
-
-Examples:
-
-- `/api/codex/*`
-- `CODEX_PROFILES_JSON`
-- `server/codexRoutes.ts`
-- `server/codexQueue.ts`
-- `server/codexService.ts`
-- `client/src/components/codex/...`
-
-In the current system, those names no longer mean "Codex only". They are historical integration names inside `code-ai`.
-
-## What Lives In App Storage
-
-Default root:
-
-- `CODEX_STORAGE_ROOT`
-
-Typical contents:
-
-- `uploads/`
-- `queue/state.json`
-- `queue/fork-sessions.json`
-- `session-titles.json`
-- `session-topics.json`
-- `session-visibility.json`
-- `session-instructions.json`
-- `logs/client-crashes.jsonl`
-- `logs/server-crashes.jsonl`
-- `logs/file-access.jsonl`
-
-Support-mode contents:
-
-- `support/support-session-state.json`
-- `support/homes/<provider>/<source-profile>/...`
-- `support/sandbox/<provider>/<source-profile>/...`
-
-## Where Real Sessions Live
-
-Not in `.code-ai`.
-
-Provider transcript/history locations come from each profile home.
-
-Codex:
-
-- `session_index.jsonl`
-- `sessions/`
-- `archived_sessions/`
-
-Claude:
-
-- `projects/<workspace-hash-or-name>/*.jsonl`
-- `projects/<workspace>/memory/`
-- `projects/<workspace>/<session>/subagents/`
-
-Gemini:
-
-- `projects.json`
-- `tmp/<project-id>/chats/*.jsonl`
-
-If a user says "my old chats are missing", inspect the selected provider home first, not the app storage root.
-
-## Verify The Install
-
-After install, run:
-
-```bash
-npx pm2 describe code-ai
-npx pm2 logs code-ai
-```
-
-Then open:
-
-- `http://SERVER_IP:4000`
-
-Success looks like:
-
-- the UI opens
-- provider switcher appears
-- profiles load
-- old sessions appear for installed providers
-- sending a message creates or resumes a real provider session
-- transfers between providers create draft handoffs and continue naturally
-
-## Update Workflow
-
-```bash
-git pull
-npm install --include=dev
-npm run build
-npx pm2 restart code-ai --update-env
-```
-
-If your PM2 app still uses the installer default, replace `code-ai` with `code-ai-app`.
-
-## Export As Standalone Repo
-
-```bash
-node deploy/code-ai/export-standalone.mjs /tmp/code-ai-standalone --git-init
-```
-
-That export intentionally includes:
-
-- `README.md`
-- `README.he.md`
+- `deploy/code-ai/install.mjs`
+- `ecosystem.config.cjs`
 - `AGENT.md`
-- `AGENT.he.md`
-- `.env.example`
-- `client/`
-- `server/`
-- `deploy/code-ai/*`
-- `install.*`
-- `export-standalone.*`
-
-Keep those files. They are part of the deployment handoff, not noise.
-
-## Minimal Troubleshooting Checklist
-
-1. Verify the wanted provider CLI exists:
-   - `codex --help`
-   - `claude --help`
-   - `gemini --help`
-2. Verify the provider homes in `CODEX_PROFILES_JSON` are real and readable.
-3. Verify storage roots are writable.
-4. Run `npm run build`.
-5. Check `npx pm2 logs <app-name>`.
-6. If sessions are missing, inspect the provider-specific home, not `.code-ai`.

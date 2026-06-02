@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_OUTPUT_PATH = SCRIPT_DIR.parent / "client" / "src" / "components" / "codex" / "sudokuCatalog.ts"
+
 ALL_DIGITS = set(range(1, 10))
 ROWS = COLS = range(9)
 
@@ -363,7 +366,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("/root/projects/bina-cshera/web/app/client/src/components/codex/sudokuCatalog.ts"),
+        default=DEFAULT_OUTPUT_PATH,
     )
     args = parser.parse_args()
 

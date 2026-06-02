@@ -136,12 +136,6 @@ async function main() {
     await copyRelativePath(outputDir, relativePath);
   }
 
-  await copyPathToTarget(
-    outputDir,
-    path.resolve(APP_ROOT, '../../.codex/skills/bina-cshera-session-trigger-integrator'),
-    '.codex/skills/bina-cshera-session-trigger-integrator'
-  );
-
   await removeExportNoise(outputDir);
   await pruneStandaloneOnlyFiles(outputDir);
 

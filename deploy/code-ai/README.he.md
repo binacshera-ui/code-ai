@@ -1,77 +1,64 @@
-# ערכת פריסה ל־code-ai
+# code-ai
 
-גרסה באנגלית:
-
-- `README.md`
-
-הערות שטח ל־Windows:
-
-- `WINDOWS.FIELD-NOTES.he.md`
-
-`code-ai` היא סביבת עבודה מוביילית לשליטה ב־3 סוכני הקוד המובילים מתוך ממשק אחד:
+`code-ai` היא סביבת עבודה מוביילית להפעלה ולתיאום של סוכני הקוד הטרמינליים המובילים מתוך ממשק אחד:
 
 - Codex
 - Claude Code
 - Gemini CLI
 
-זה כבר לא "ממשק לקודקס". זו שכבת שליטה אחת שמחברת כמה ספקים, תורים, תיזמון, uploads, העברות בין ספקים, והיסטוריית שיחות לפי ה־home האמיתי של כל provider.
+המטרה שלה היא לתת שכבת שליטה אחת, נקייה ונוחה, מעל פרופילי CLI אמיתיים, עם תורים, תזמון, נושאים, זיכרון פרויקט, העברות בין ספקים, העתקות בין משתמשים, מצב תמיכה, וזרימות עבודה חוזרות.
 
-## מצב תמיכה פנימי
+## תצוגה מהמערכת
 
-ב־`code-ai` קיים גם `Support workspace` מובנה.
+<p align="center">
+  <img src="deploy/code-ai/assets/readme/topic-management.png" alt="ניהול נושאים" width="24%" />
+  <img src="deploy/code-ai/assets/readme/history-panel.png" alt="היסטוריית שיחות" width="24%" />
+  <img src="deploy/code-ai/assets/readme/quick-actions.png" alt="פעולות מהירות" width="24%" />
+  <img src="deploy/code-ai/assets/readme/model-panel.png" alt="פאנל מודלים והרשאות" width="24%" />
+</p>
 
-הוא מיועד לזרימות תמיכה דמויות-אנוש:
+## למה זה שונה
 
-- מצב UI נפרד ממצב הסוכנים הרגיל
-- homes מבודדים לספקים תחת `CODEX_STORAGE_ROOT/support/homes/...`
-- ארגז חול ייעודי לכתיבה לכל ספק/פרופיל תחת `CODEX_STORAGE_ROOT/support/sandbox/...`
-- transcript metadata של התמיכה נשמר ב־`CODEX_STORAGE_ROOT/support/support-session-state.json`
-- נקודות קצה API/Webhook ייעודיות שמכוונות לפרופילי התמיכה של Codex / Claude / Gemini
+- ממשק אחד לשלושה ספקים, עם homes אמיתיים לכל provider.
+- חוויית מובייל אמיתית, לא עטיפה שולחנית כבדה.
+- Queue, תזמון, recurring runs, ו־wake-up triggers כחלק מהמוצר.
+- עוגנים, סקילים, תזכורות, נושאים, פרויקטים ומשימות ברמת השיחה.
+- העברות בין ספקים והעתקת שיחות בין משתמשים.
+- מצב תמיכה פנימי עם אחסון מבודד וכללי sandbox.
+- זיהוי context, הרשאות, מודל, מהירות תגובה, קבצים ששונו, וכלי ריצה.
 
-קבצי runtime רלוונטיים:
+## מה עושים כאן בפועל
 
-- `server/supportAgentService.ts`
-- `POST /api/codex/support/ask`
-- `POST /api/codex/support/webhook`
-- כפתור `Support workspace` בסיידבר של המובייל
+ב־`code-ai` אפשר:
 
-רמות הרצה ל־Support API:
+- לפתוח שיחות רגילות
+- למזלג או להעביר שיחות
+- לצרף קבצים, עוגנים, סקילים, תזכורות ומצבים
+- לתזמן הרצות חד־פעמיות או קבועות
+- לנהל תתי־משימות ופרויקטים
+- לראות שינויים בקבצים, traces של כלים, מצב queue, חלון context, rate limits והרשאות
 
-- `fast`
-- `balanced`
-- `deep`
+האפליקציה לא “מחקה” ספקים דרך API חיצוני בלבד; היא יושבת מעל התקנות ה־CLI האמיתיות שעל השרת.
 
-כל רמה ממופה אוטומטית למודל + רמת חשיבה מתאימים עבור Codex, Claude ו־Gemini.
-אם צריך, עדיין אפשר לעקוף ידנית עם `model` ו/או `reasoningEffort`.
+## ספקים נתמכים
 
-## מה חייב להיות מותקן
+אפשר לעבוד עם ספק אחד בלבד או עם כל השלושה.
 
-בסיס:
+דרישות בסיס:
 
 - Node.js 20 ומעלה
 - npm
 - Git
 
-ספקים:
+CLIים אופציונליים:
 
-- Codex CLI אם רוצים לעבוד עם Codex
-- Claude CLI אם רוצים לעבוד עם Claude
-- Gemini CLI אם רוצים לעבוד עם Gemini
+- Codex CLI
+- Claude CLI
+- Gemini CLI
 
-מצב authentication / state:
+החוויה המלאה מתקבלת כאשר שלושת ה־CLI מותקנים ומחוברים על השרת.
 
-- לפרופילי Codex צריך להיות `.codex` אמיתי
-- לפרופילי Claude צריך להיות `.claude` אמיתי
-- לפרופילי Gemini צריך להיות `.gemini` אמיתי
-
-חשוב:
-
-- אפשר להפעיל את `code-ai` גם עם ספק אחד בלבד.
-- כדי לקבל את כל החוויה הרב-ספקית, כל 3 ה־CLI צריכים להיות מותקנים ומחוברים על השרת.
-
-## ההתקנה הכי מהירה
-
-אם המטרה היא להרים את המערכת נכון מההתחלה, השתמש ב־`profiles-json` מפורש עם 3 הספקים.
+## התחלה מהירה
 
 ### Linux / macOS
 
@@ -99,248 +86,54 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 `
   --session-secret change-me-too
 ```
 
-### Windows CMD
+## מבנה הריפו
 
-```cmd
-git clone https://github.com/binacshera-ui/code-ai.git
-cd code-ai
-install.cmd --app-name code-ai --port 4000 --profiles-json "[{\"id\":\"codex-main\",\"label\":\"Codex\",\"provider\":\"codex\",\"codexHome\":\"C:\\Users\\Administrator\\.codex\",\"workspaceCwd\":\"D:\\workspace\",\"defaultProfile\":true},{\"id\":\"claude-main\",\"label\":\"Claude\",\"provider\":\"claude\",\"codexHome\":\"C:\\Users\\Administrator\\.claude\",\"workspaceCwd\":\"D:\\workspace\"},{\"id\":\"gemini-main\",\"label\":\"Gemini\",\"provider\":\"gemini\",\"codexHome\":\"C:\\Users\\Administrator\\.gemini\",\"workspaceCwd\":\"D:\\workspace\"}]" --device-password change-me-now --session-secret change-me-too
-```
+- `client/` — ממשק המשתמש
+- `server/` — ניתוב ספקים, queue, parsing ואורקסטרציה
+- `deploy/code-ai/` — מתקין, exporter ונכסי deployment
+- `scripts/` — כלי עזר מקומיים
+- `ecosystem.config.cjs` — תהליך PM2
 
-## הערות שטח ל־Windows
-
-אם ההתקנה היא על Windows, מומלץ מאוד לקרוא גם את:
-
-- `WINDOWS.FIELD-NOTES.he.md`
-
-המסמך הזה מרכז בעיות אמיתיות מהשטח:
-
-- wrappers של `.cmd` ו־`.bat`
-- נתיבי CLI אמיתיים מול `PATH`
-- `Gemini CLI` על Windows
-- reverse proxy / tunnel
-- PM2 על Windows
-- נתיבים עם רווחים
-
-## מה המתקין עושה בפועל
-
-המתקין הראשי:
-
-- `deploy/code-ai/install.mjs`
-
-ה־wrappers:
-
-- `install.sh`
-- `install.ps1`
-- `install.cmd`
-
-הוא:
-
-- כותב `.env`
-- כותב `CODEX_PROFILES_JSON`
-- יוצר storage
-- מריץ `npm install --include=dev`
-- מריץ `npm run build`
-- מעלה או מרענן PM2 דרך `ecosystem.config.cjs`
-
-אין צורך ידני:
-
-- לכתוב `.env`
-- להתקין PM2 גלובלית
-- ליצור תיקיות queue/uploads/logs
-- לבנות client ו־server בנפרד
-
-## שני מושגי הנתיב שחייבים להבין
+## שני מושגים שחייבים להבין
 
 ### `workspaceCwd`
 
-זו תיקיית העבודה הדיפולטיבית שתופיע ב־UI לשיחות חדשות.
+תיקיית העבודה הדיפולטיבית לשיחות חדשות.
 
 ### `codexHome`
 
-זה שם legacy, אבל בתוך `code-ai` הכוונה היא:
-
-- תיקיית הנתונים האמיתית של אותו provider
-
-דוגמאות:
-
-- Codex -> `/home/ubuntu/.codex`
-- Claude -> `/home/ubuntu/.claude`
-- Gemini -> `/home/ubuntu/.gemini`
-
-השדה לא שונה בשם כדי לא לשבור התקנות קיימות, queue state ישן, ו־JSON schema ישן.
-
-## נתיבי הבינארים של הספקים
-
-אם הפקודות כבר ב־`PATH`, לרוב לא צריך להגדיר כלום.
-
-- `CODEX_BIN`
-- `CLAUDE_BIN`
-- `GEMINI_BIN`
-- `CODEX_SUPPORT_WEBHOOK_TOKEN`
-
-דוגמאות:
-
-- `CODEX_BIN=/usr/local/bin/codex`
-- `CLAUDE_BIN=/usr/local/bin/claude`
-- `GEMINI_BIN=/home/ubuntu/.local/bin/gemini`
-
-## מבנה הריפו
-
-- `client/` — ה־UI של המובייל
-- `server/` — ה־API, ה־queue, והאורקסטרציה
-- `deploy/code-ai/` — מתקין, exporter ותבנית nginx
-- `ecosystem.config.cjs` — הגדרת PM2
-- `.env.example` — מבנה הסביבה
-
-## קבצי ההיגיון הראשיים
-
-אלה הקבצים שבאמת מגדירים את ההתנהגות של `code-ai`:
-
-- `server/config.ts`
-  מגדיר profiles, providers, נתיבים ו־storage roots
-- `server/agentService.ts`
-  שכבת הניתוב הראשית בין Codex / Claude / Gemini
-- `server/codexService.ts`
-  parsing והרצה של Codex
-- `server/claudeService.ts`
-  parsing והרצה של Claude
-- `server/geminiService.ts`
-  parsing והרצה של Gemini
-- `server/codexQueue.ts`
-  queue משותף, scheduling, retries, fork/transfer execution
-- `server/codexForkSessions.ts`
-  draft forks ומטא־דאטה של העברות בין ספקים
-- `server/codexRoutes.ts`
-  שכבת ה־HTTP שהלקוח צורך
-- `client/src/components/codex/CodexMobileApp.tsx`
-  ממשק המשתמש הראשי
-
-## למה עדיין יש כל כך הרבה שמות עם "codex"
-
-בגלל תאימות לאחור.
+שם legacy ל־provider home של הפרופיל הנבחר.
 
 לדוגמה:
 
-- `/api/codex/*`
-- `CODEX_PROFILES_JSON`
-- `server/codexRoutes.ts`
-- `server/codexQueue.ts`
-- `server/codexService.ts`
-- `client/src/components/codex/...`
+- Codex -> `.codex`
+- Claude -> `.claude`
+- Gemini -> `.gemini`
 
-במערכת הנוכחית, השמות האלה כבר לא אומרים "Codex בלבד". אלה שמות legacy בתוך `code-ai`.
+השם נשאר `codexHome` כדי לא לשבור התקנות קיימות, JSON ישן, ו־metadata שכבר נשמר.
 
-## מה נמצא ב־storage של האפליקציה
+## מה לקרוא אחר כך
 
-שורש ברירת מחדל:
+- `README.md` — גרסה באנגלית
+- `AGENT.he.md` — הנחיות תפעול והעברה לסוכן/מפעיל אחר
+- `WINDOWS.FIELD-NOTES.he.md` — הערות שטח ל־Windows
+- `deploy/code-ai/install.mjs` — המתקין הראשי
+- `server/config.ts` — מבנה profiles ואחסון
+- `client/src/components/codex/CodexMobileApp.tsx` — מעטפת ה־UI הראשית
 
-- `CODEX_STORAGE_ROOT`
+## הערה על פריסה
 
-קבצים נפוצים:
+הריפו מגיע עם מתקין שמבצע אוטומטית:
 
-- `uploads/`
-- `queue/state.json`
-- `queue/fork-sessions.json`
-- `session-titles.json`
-- `session-topics.json`
-- `session-visibility.json`
-- `session-instructions.json`
-- `logs/client-crashes.jsonl`
-- `logs/server-crashes.jsonl`
-- `logs/file-access.jsonl`
+- כתיבת `.env`
+- כתיבת `CODEX_PROFILES_JSON`
+- יצירת storage
+- התקנת תלויות
+- build מלא ללקוח ולשרת
+- העלאה או רענון של PM2
 
-קבצים ותיקיות של מצב התמיכה:
+אם אתה מחפש את שכבת התפעול המלאה, עבור אל:
 
-- `support/support-session-state.json`
-- `support/homes/<provider>/<source-profile>/...`
-- `support/sandbox/<provider>/<source-profile>/...`
-
-## איפה השיחות האמיתיות נשמרות
-
-לא בתוך `.code-ai`.
-
-כל provider שומר את ההיסטוריה במקום שלו:
-
-Codex:
-
-- `session_index.jsonl`
-- `sessions/`
-- `archived_sessions/`
-
-Claude:
-
-- `projects/<workspace-hash-or-name>/*.jsonl`
-- `projects/<workspace>/memory/`
-- `projects/<workspace>/<session>/subagents/`
-
-Gemini:
-
-- `projects.json`
-- `tmp/<project-id>/chats/*.jsonl`
-
-אם משתמש אומר "הצ'אטים הישנים נעלמו", בודקים קודם את תיקיית הספק, לא את storage של האפליקציה.
-
-## איך בודקים שההתקנה הצליחה
-
-```bash
-npx pm2 describe code-ai
-npx pm2 logs code-ai
-```
-
-ואז פותחים:
-
-- `http://SERVER_IP:4000`
-
-סימנים טובים:
-
-- ה־UI נפתח
-- בחירת providers מופיעה
-- profiles נטענים
-- שיחות ישנות מופיעות עבור הספקים שמותקנים
-- שליחת הודעה מייצרת או ממשיכה session אמיתי
-- העברה בין ספקים יוצרת handoff draft וממשיכה טבעית
-
-## איך מעדכנים התקנה קיימת
-
-```bash
-git pull
-npm install --include=dev
-npm run build
-npx pm2 restart code-ai --update-env
-```
-
-אם שם ה־PM2 עדיין `code-ai-app`, השתמש בו במקום `code-ai`.
-
-## ייצוא כריפו standalone
-
-```bash
-node deploy/code-ai/export-standalone.mjs /tmp/code-ai-standalone --git-init
-```
-
-הייצוא כולל בכוונה:
-
-- `README.md`
-- `README.he.md`
-- `AGENT.md`
+- `deploy/code-ai/install.mjs`
+- `ecosystem.config.cjs`
 - `AGENT.he.md`
-- `.env.example`
-- `client/`
-- `server/`
-- `deploy/code-ai/*`
-- `install.*`
-- `export-standalone.*`
-
-אל תמחק את הקבצים האלה. הם חלק מחבילת ההעברה.
-
-## צ'קליסט קצר לתקלות
-
-1. ודא שהפקודה של הספק הרלוונטי קיימת:
-   - `codex --help`
-   - `claude --help`
-   - `gemini --help`
-2. ודא ש־`CODEX_PROFILES_JSON` מצביע ל־homes אמיתיים וקריאים.
-3. ודא שלתיקיות ה־storage יש הרשאות כתיבה.
-4. הרץ `npm run build`.
-5. בדוק `npx pm2 logs <app-name>`.
-6. אם שיחות חסרות, בדוק את תיקיית הספק הרלוונטית, לא את `.code-ai`.
