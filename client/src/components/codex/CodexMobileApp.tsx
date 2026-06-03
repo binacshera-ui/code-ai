@@ -2976,7 +2976,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
                 code={blockCode}
                 language={languageMatch?.[1] ?? null}
                 className={cn(
-                  isUser ? 'code-ai-user-pre border' : 'border border-slate-200'
+                    isUser ? 'code-ai-user-pre border' : 'border border-slate-200'
                 )}
               />
             );
@@ -2984,9 +2984,9 @@ const MessageMarkdown = memo(function MessageMarkdown({
 
           return (
             <pre className={cn(
-              'my-3 w-full max-w-full overflow-x-auto rounded-[1.25rem] border px-4 py-3 text-right text-[13px] leading-6',
-              isUser ? 'code-ai-user-pre' : 'bg-slate-100 text-slate-900'
-            )}>
+                'my-3 w-full max-w-full overflow-x-auto rounded-[1.25rem] border px-4 py-3 text-right text-[13px] leading-6',
+                isUser ? 'code-ai-user-pre' : 'bg-slate-100 text-slate-900'
+              )}>
               {children}
             </pre>
           );
@@ -3420,13 +3420,13 @@ function ToolGroupCard({
 function QueueSummaryButton({
   count,
   statusSummary,
-  collapsed,
+  expanded,
   onToggle,
   attached = false,
 }: {
   count: number;
   statusSummary: Array<{ status: CodexQueueServerItem['status']; count: number; label: string }>;
-  collapsed: boolean;
+  expanded: boolean;
   onToggle: () => void;
   attached?: boolean;
 }) {
@@ -3469,9 +3469,41 @@ function QueueSummaryButton({
       <ChevronDown
         className={cn(
           'h-4 w-4 shrink-0 text-slate-500 transition-transform dark:text-slate-300',
-          !collapsed && 'rotate-180'
+          expanded && 'rotate-180'
         )}
       />
+    </button>
+  );
+}
+
+function QueuePeekHandle({
+  count,
+  isOpen,
+  onClick,
+}: {
+  count: number;
+  isOpen: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      dir="rtl"
+      className={cn(
+        'absolute bottom-full left-1/2 z-30 flex h-9 min-w-[3.6rem] -translate-x-1/2 items-center justify-center gap-1.5 rounded-t-[999px] border border-slate-200/80 border-b-0 bg-white px-3 text-slate-500 shadow-[0_-8px_24px_-18px_rgba(15,23,42,0.22)] transition-all hover:bg-slate-50 hover:text-slate-800',
+        isOpen ? 'mb-0' : '-mb-px'
+      )}
+      aria-label={isOpen ? 'סגור את פאנל המשימות בתור' : 'פתח את פאנל המשימות בתור'}
+      title={isOpen ? 'סגור משימות בתור' : 'פתח משימות בתור'}
+    >
+      <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', isOpen && 'rotate-180')} />
+      <span
+        dir="ltr"
+        className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700"
+      >
+        {count}
+      </span>
     </button>
   );
 }
@@ -10083,7 +10115,7 @@ export function CodexMobileApp() {
   const [isFullTimelineLoading, setIsFullTimelineLoading] = useState(false);
   const [fullTimelineLoadPercent, setFullTimelineLoadPercent] = useState(0);
   const [isTranscriptCollapsed, setIsTranscriptCollapsed] = useState(false);
-  const [isPendingQueueSectionCollapsed, setIsPendingQueueSectionCollapsed] = useState(true);
+  const [queuePanelStage, setQueuePanelStage] = useState<'closed' | 'summary' | 'details'>('closed');
   const [expandedToolGroups, setExpandedToolGroups] = useState<Record<string, boolean>>({});
   const [thinkingPulseIndex, setThinkingPulseIndex] = useState(0);
   const mainScrollRef = useRef<HTMLElement | null>(null);
@@ -10232,9 +10264,14 @@ export function CodexMobileApp() {
   }, [draftConversationKey, forkDraftContext?.forkEntryId, forkDraftContext?.sourceSessionId, isSending, renderedTimeline, selectedSessionId, totalTimelineLength]);
 
   useEffect(() => {
-    setIsPendingQueueSectionCollapsed(true);
+    setQueuePanelStage('closed');
     setExpandedToolGroups({});
   }, [currentQueueKey, selectedSessionId]);
+  useEffect(() => {
+    if (collapsedQueueItems.length === 0) {
+      setQueuePanelStage('closed');
+    }
+  }, [collapsedQueueItems.length]);
   useEffect(() => {
     if (currentSessionActiveQueueCount <= 0) {
       setThinkingPulseIndex(0);
@@ -14820,7 +14857,7 @@ export function CodexMobileApp() {
             )}
 
             <div ref={composerControlsRef} className="relative">
-              {!isPendingQueueSectionCollapsed && collapsedQueueItems.length > 0 && (
+              {queuePanelStage === 'details' && collapsedQueueItems.length > 0 && (
                 <div className="absolute bottom-full -left-1.5 -right-1.5 z-20 mb-3 flex max-h-[40vh] flex-col gap-3 overflow-y-auto px-1.5 pb-2 pt-1.5">
                   {collapsedQueueItems.map((item) => (
                     <QueueItemCard
@@ -14833,6 +14870,16 @@ export function CodexMobileApp() {
                     />
                   ))}
                 </div>
+              )}
+
+              {collapsedQueueItems.length > 0 && (
+                <QueuePeekHandle
+                  count={collapsedQueueItems.length}
+                  isOpen={queuePanelStage !== 'closed'}
+                  onClick={() => {
+                    setQueuePanelStage((current) => current === 'closed' ? 'summary' : 'closed');
+                  }}
+                />
               )}
 
               <div className="pointer-events-none absolute bottom-full left-2 z-10 mb-2 flex flex-col gap-1.5">
@@ -14856,12 +14903,14 @@ export function CodexMobileApp() {
                 </button>
               </div>
 
-              {collapsedQueueItems.length > 0 && (
+              {collapsedQueueItems.length > 0 && queuePanelStage !== 'closed' && (
                 <QueueSummaryButton
                   count={collapsedQueueItems.length}
                   statusSummary={collapsedQueueStatusSummary}
-                  collapsed={isPendingQueueSectionCollapsed}
-                  onToggle={() => setIsPendingQueueSectionCollapsed((current) => !current)}
+                  expanded={queuePanelStage === 'details'}
+                  onToggle={() => {
+                    setQueuePanelStage((current) => current === 'details' ? 'summary' : 'details');
+                  }}
                   attached
                 />
               )}
@@ -14870,7 +14919,9 @@ export function CodexMobileApp() {
                 dir="rtl"
                 className={cn(
                   'flex items-end border border-slate-200/80 bg-white p-1.5 shadow-[0_2px_15px_rgba(0,0,0,0.02)] transition-all duration-300 focus-within:border-indigo-200 focus-within:ring-4 focus-within:ring-indigo-50/50',
-                  collapsedQueueItems.length > 0 ? 'rounded-[2rem] rounded-t-none border-t-0' : 'rounded-[2rem]'
+                  collapsedQueueItems.length > 0 && queuePanelStage !== 'closed'
+                    ? 'rounded-[2rem] rounded-t-none border-t-0'
+                    : 'rounded-[2rem]'
                 )}
               >
                 <div className="relative mr-1 flex shrink-0 flex-col items-center justify-end gap-1 self-stretch">
