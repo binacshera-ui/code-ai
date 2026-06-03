@@ -59,6 +59,10 @@ export interface CodexTimelineEntry {
   callId?: string | null;
   status?: string | null;
   exitCode?: number | null;
+  toolInputText?: string | null;
+  toolInputLanguage?: string | null;
+  toolOutputText?: string | null;
+  toolOutputLanguage?: string | null;
 }
 
 export interface CodexAgentSessionAgentPreview {
@@ -1472,6 +1476,20 @@ function formatPatchChanges(changes: unknown): string | null {
   return lines.join('\n');
 }
 
+function findLastToolTimelineEntry(
+  timeline: CodexTimelineEntry[],
+  predicate: (entry: CodexTimelineEntry) => boolean
+): CodexTimelineEntry | null {
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const entry = timeline[index];
+    if (entry?.entryType === 'tool' && predicate(entry)) {
+      return entry;
+    }
+  }
+
+  return null;
+}
+
 function timelineEntryToMessage(entry: CodexTimelineEntry): CodexSessionMessage | null {
   if (entry.entryType !== 'message' || !entry.role || !entry.kind || typeof entry.text !== 'string') {
     return null;
@@ -1798,19 +1816,41 @@ async function parseSessionFile(
         if (eventType === 'exec_command_end') {
           const outputText = payload.aggregated_output || payload.stdout || payload.stderr || '';
           const exitCode = typeof payload.exit_code === 'number' ? payload.exit_code : null;
+          const callId = payload.call_id || null;
+          const mergedEntry = findLastToolTimelineEntry(
+            timeline,
+            (entry) => entry.callId === callId && entry.toolName === 'exec_command'
+          );
+          const clippedOutput = clipLongText(outputText || 'No terminal output.');
 
-          timeline.push({
-            id: `${sessionId}-tool-terminal-${timeline.length}`,
-            entryType: 'tool',
-            timestamp,
-            toolName: 'exec_command',
-            title: 'Terminal',
-            subtitle: summarizeCommand(payload.command) || payload.cwd || null,
-            text: clipLongText(outputText || 'No terminal output.'),
-            callId: payload.call_id || null,
-            status: payload.status || null,
-            exitCode,
-          });
+          if (mergedEntry) {
+            mergedEntry.timestamp = timestamp;
+            mergedEntry.title = 'Terminal';
+            mergedEntry.subtitle = summarizeCommand(payload.command) || payload.cwd || mergedEntry.subtitle || null;
+            mergedEntry.toolInputLanguage = mergedEntry.toolInputLanguage || 'bash';
+            mergedEntry.toolOutputText = clippedOutput;
+            mergedEntry.toolOutputLanguage = null;
+            mergedEntry.text = clippedOutput;
+            mergedEntry.status = payload.status || 'completed';
+            mergedEntry.exitCode = exitCode;
+          } else {
+            timeline.push({
+              id: `${sessionId}-tool-terminal-${timeline.length}`,
+              entryType: 'tool',
+              timestamp,
+              toolName: 'exec_command',
+              title: 'Terminal',
+              subtitle: summarizeCommand(payload.command) || payload.cwd || null,
+              text: clippedOutput,
+              callId,
+              status: payload.status || null,
+              exitCode,
+              toolInputText: summarizeCommand(payload.command) || null,
+              toolInputLanguage: 'bash',
+              toolOutputText: clippedOutput,
+              toolOutputLanguage: null,
+            });
+          }
           continue;
         }
 
@@ -1820,38 +1860,76 @@ async function parseSessionFile(
             payload.stderr,
             formatPatchChanges(payload.changes),
           ].filter(Boolean).join('\n\n');
+          const callId = payload.call_id || null;
+          const clippedOutput = clipLongText(outputText || 'Patch completed without output.');
+          const mergedEntry = findLastToolTimelineEntry(
+            timeline,
+            (entry) => entry.callId === callId && entry.toolName === 'apply_patch'
+          );
 
-          timeline.push({
-            id: `${sessionId}-tool-patch-${timeline.length}`,
-            entryType: 'tool',
-            timestamp,
-            toolName: 'apply_patch',
-            title: 'Patch',
-            subtitle: payload.success ? 'Applied' : payload.status || 'Patch failed',
-            text: clipLongText(outputText || 'Patch completed without output.'),
-            callId: payload.call_id || null,
-            status: payload.status || null,
-            exitCode: null,
-          });
+          if (mergedEntry) {
+            mergedEntry.timestamp = timestamp;
+            mergedEntry.title = 'Patch';
+            mergedEntry.subtitle = payload.success ? 'Applied' : payload.status || 'Patch failed';
+            mergedEntry.toolOutputText = clippedOutput;
+            mergedEntry.toolOutputLanguage = 'diff';
+            mergedEntry.text = clippedOutput;
+            mergedEntry.status = payload.status || (payload.success ? 'completed' : 'failed');
+            mergedEntry.exitCode = null;
+          } else {
+            timeline.push({
+              id: `${sessionId}-tool-patch-${timeline.length}`,
+              entryType: 'tool',
+              timestamp,
+              toolName: 'apply_patch',
+              title: 'Patch',
+              subtitle: payload.success ? 'Applied' : payload.status || 'Patch failed',
+              text: clippedOutput,
+              callId,
+              status: payload.status || null,
+              exitCode: null,
+              toolOutputText: clippedOutput,
+              toolOutputLanguage: 'diff',
+            });
+          }
           continue;
         }
 
         if (eventType === 'web_search_end') {
           const action = payload.action ? JSON.stringify(payload.action, null, 2) : '';
           const text = [payload.query, action].filter(Boolean).join('\n\n');
+          const callId = payload.call_id || null;
+          const clippedOutput = clipLongText(text || 'Search completed.');
+          const mergedEntry = findLastToolTimelineEntry(
+            timeline,
+            (entry) => entry.callId === callId && (entry.toolName === 'web.search' || entry.toolName === 'web.search_query')
+          );
 
-          timeline.push({
-            id: `${sessionId}-tool-web-${timeline.length}`,
-            entryType: 'tool',
-            timestamp,
-            toolName: 'web.search',
-            title: 'Web Search',
-            subtitle: payload.query || null,
-            text: clipLongText(text || 'Search completed.'),
-            callId: payload.call_id || null,
-            status: 'completed',
-            exitCode: null,
-          });
+          if (mergedEntry) {
+            mergedEntry.timestamp = timestamp;
+            mergedEntry.title = 'Web Search';
+            mergedEntry.subtitle = payload.query || mergedEntry.subtitle || null;
+            mergedEntry.toolOutputText = clippedOutput;
+            mergedEntry.toolOutputLanguage = 'json';
+            mergedEntry.text = clippedOutput;
+            mergedEntry.status = 'completed';
+            mergedEntry.exitCode = null;
+          } else {
+            timeline.push({
+              id: `${sessionId}-tool-web-${timeline.length}`,
+              entryType: 'tool',
+              timestamp,
+              toolName: 'web.search',
+              title: 'Web Search',
+              subtitle: payload.query || null,
+              text: clippedOutput,
+              callId,
+              status: 'completed',
+              exitCode: null,
+              toolOutputText: clippedOutput,
+              toolOutputLanguage: 'json',
+            });
+          }
         }
 
         continue;
@@ -1871,6 +1949,7 @@ async function parseSessionFile(
         if (callId) {
           knownToolCalls.set(callId, toolName);
         }
+        const clippedInput = clipLongText(payload.arguments || '', 1000);
 
         timeline.push({
           id: `${sessionId}-tool-call-${timeline.length}`,
@@ -1879,10 +1958,12 @@ async function parseSessionFile(
           toolName,
           title: summarizeToolName(toolName),
           subtitle: summarizeFunctionArguments(toolName, payload.arguments),
-          text: clipLongText(payload.arguments || '', 1000),
+          text: clippedInput,
           callId,
           status: 'queued',
           exitCode: null,
+          toolInputText: clippedInput,
+          toolInputLanguage: 'json',
         });
         continue;
       }
@@ -1905,6 +1986,8 @@ async function parseSessionFile(
           callId,
           status: payload.status || null,
           exitCode: null,
+          toolInputText: clipLongText(String(payload.input || ''), 1000),
+          toolInputLanguage: 'json',
         });
         continue;
       }
@@ -1912,18 +1995,35 @@ async function parseSessionFile(
       if (responseType === 'custom_tool_call_output') {
         const callId = payload.call_id || null;
         const toolName = callId ? knownToolCalls.get(callId) || 'custom_tool' : 'custom_tool';
-        timeline.push({
-          id: `${sessionId}-custom-tool-output-${timeline.length}`,
-          entryType: 'tool',
-          timestamp,
-          toolName,
-          title: `${summarizeToolName(toolName)} result`,
-          subtitle: null,
-          text: clipLongText(String(payload.output || ''), 4000),
-          callId,
-          status: 'completed',
-          exitCode: null,
-        });
+        const clippedOutput = clipLongText(String(payload.output || ''), 4000);
+        const mergedEntry = findLastToolTimelineEntry(
+          timeline,
+          (entry) => entry.callId === callId && entry.toolName === toolName
+        );
+
+        if (mergedEntry) {
+          mergedEntry.timestamp = timestamp;
+          mergedEntry.toolOutputText = clippedOutput;
+          mergedEntry.toolOutputLanguage = null;
+          mergedEntry.text = clippedOutput;
+          mergedEntry.status = 'completed';
+          mergedEntry.exitCode = null;
+        } else {
+          timeline.push({
+            id: `${sessionId}-custom-tool-output-${timeline.length}`,
+            entryType: 'tool',
+            timestamp,
+            toolName,
+            title: `${summarizeToolName(toolName)} result`,
+            subtitle: null,
+            text: clippedOutput,
+            callId,
+            status: 'completed',
+            exitCode: null,
+            toolOutputText: clippedOutput,
+            toolOutputLanguage: null,
+          });
+        }
         continue;
       }
 
@@ -1940,6 +2040,8 @@ async function parseSessionFile(
           callId: null,
           status: payload.status || null,
           exitCode: null,
+          toolInputText: clipLongText(actionText, 1000),
+          toolInputLanguage: 'json',
         });
         continue;
       }
@@ -1952,18 +2054,35 @@ async function parseSessionFile(
           continue;
         }
 
-        timeline.push({
-          id: `${sessionId}-tool-output-${timeline.length}`,
-          entryType: 'tool',
-          timestamp,
-          toolName,
-          title: `${summarizeToolName(toolName)} result`,
-          subtitle: null,
-          text: clipLongText(String(payload.output || ''), 4000),
-          callId,
-          status: 'completed',
-          exitCode: null,
-        });
+        const clippedOutput = clipLongText(String(payload.output || ''), 4000);
+        const mergedEntry = findLastToolTimelineEntry(
+          timeline,
+          (entry) => entry.callId === callId && entry.toolName === toolName
+        );
+
+        if (mergedEntry) {
+          mergedEntry.timestamp = timestamp;
+          mergedEntry.toolOutputText = clippedOutput;
+          mergedEntry.toolOutputLanguage = null;
+          mergedEntry.text = clippedOutput;
+          mergedEntry.status = 'completed';
+          mergedEntry.exitCode = null;
+        } else {
+          timeline.push({
+            id: `${sessionId}-tool-output-${timeline.length}`,
+            entryType: 'tool',
+            timestamp,
+            toolName,
+            title: `${summarizeToolName(toolName)} result`,
+            subtitle: null,
+            text: clippedOutput,
+            callId,
+            status: 'completed',
+            exitCode: null,
+            toolOutputText: clippedOutput,
+            toolOutputLanguage: null,
+          });
+        }
       }
     }
   } finally {

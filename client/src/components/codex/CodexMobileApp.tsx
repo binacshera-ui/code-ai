@@ -1,4 +1,6 @@
 import {
+  Children,
+  isValidElement,
   memo,
   startTransition,
   useDeferredValue,
@@ -14,6 +16,7 @@ import {
 } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { visit } from 'unist-util-visit';
 import {
   Archive,
   ArchiveRestore,
@@ -136,6 +139,10 @@ interface CodexTimelineEntry {
   callId?: string | null;
   status?: string | null;
   exitCode?: number | null;
+  toolInputText?: string | null;
+  toolInputLanguage?: string | null;
+  toolOutputText?: string | null;
+  toolOutputLanguage?: string | null;
 }
 
 interface CodexSessionSummary {
@@ -752,8 +759,41 @@ const CODEX_EMPTY_STATE_ICON_PATH = '/icons/codex-empty-state.png';
 const CLAUDE_EMPTY_STATE_ICON_PATH = '/icons/claude-agent.png';
 const GEMINI_EMPTY_STATE_ICON_PATH = '/icons/gemini-agent.png';
 const CODE_AI_PUBLIC_ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
+const BIDI_FSI = '\u2068';
+const BIDI_PDI = '\u2069';
+const MIXED_BIDI_TOKEN_PATTERN = /(?:https?:\/\/[^\s<>()]+|\/[^\s<>()]+|:\d{2,5}\b|[A-Za-z0-9_@#%][A-Za-z0-9_@#.=+%~/-]*)/g;
 const PROVIDER_DISPLAY_ORDER: CodexProfile['provider'][] = ['codex', 'claude', 'gemini'];
 const WORKSPACE_MODE_STORAGE_KEY = 'code-ai.workspaceMode';
+
+function isolateMixedBidiText(value: string) {
+  if (!value || (!/[A-Za-z]/.test(value) && !/[0-9]/.test(value) && !/[:/]/.test(value))) {
+    return value;
+  }
+
+  return value.replace(MIXED_BIDI_TOKEN_PATTERN, (token) => {
+    if (!token || token.includes(BIDI_FSI) || token.includes(BIDI_PDI)) {
+      return token;
+    }
+
+    return `${BIDI_FSI}${token}${BIDI_PDI}`;
+  });
+}
+
+function remarkIsolateMixedBidiText() {
+  return (tree: any) => {
+    visit(tree, 'text', (node: any, _index: number | undefined, parent: any) => {
+      if (!node || typeof node.value !== 'string') {
+        return;
+      }
+
+      if (parent?.type && ['code', 'inlineCode', 'yaml', 'definition'].includes(parent.type)) {
+        return;
+      }
+
+      node.value = isolateMixedBidiText(node.value);
+    });
+  };
+}
 
 function formatTimestamp(value: string | null): string {
   if (!value) return 'ללא זמן';
@@ -1210,22 +1250,173 @@ function extractStandaloneCodeFence(rawText: string): { language: string | null;
   };
 }
 
-function resolveToolDetailView(entry: CodexTimelineEntry): {
+type ToolDisplayKind = 'thinking' | 'terminal' | 'patch' | 'web' | 'agent' | 'image' | 'file' | 'plan' | 'undo' | 'generic';
+
+function classifyToolEntry(entry: CodexTimelineEntry): ToolDisplayKind {
+  const identity = getToolIdentity(entry);
+  const toolName = (entry.toolName || '').toLowerCase();
+
+  if (toolName === 'thinking' || identity.includes('thinking')) {
+    return 'thinking';
+  }
+
+  if (
+    toolName === 'exec_command'
+    || toolName === 'functions.exec_command'
+    || toolName === 'functions.write_stdin'
+    || toolName.includes('terminal')
+    || toolName.includes('shell')
+    || identity.includes('exec command')
+    || identity.includes('write stdin')
+    || identity.includes('terminal')
+  ) {
+    return 'terminal';
+  }
+
+  if (
+    toolName === 'apply_patch'
+    || toolName === 'functions.apply_patch'
+    || identity.includes('apply patch')
+    || identity.includes('patch')
+    || identity.includes('file change')
+  ) {
+    return 'patch';
+  }
+
+  if (
+    toolName.startsWith('web.')
+    || identity.includes('web search')
+    || identity.includes('search query')
+    || identity.includes('web open')
+    || identity.includes('web find')
+  ) {
+    return 'web';
+  }
+
+  if (
+    toolName === 'multi_tool_use.parallel'
+    || toolName === 'functions.spawn_agent'
+    || toolName === 'functions.send_input'
+    || toolName === 'functions.wait_agent'
+    || toolName === 'functions.resume_agent'
+    || toolName === 'functions.close_agent'
+    || identity.includes('parallel')
+    || identity.includes('spawn agent')
+    || identity.includes('send input')
+    || identity.includes('wait agent')
+    || identity.includes('resume agent')
+    || identity.includes('close agent')
+    || identity.includes('agent')
+  ) {
+    return 'agent';
+  }
+
+  if (
+    toolName.startsWith('mcp__codex_apps__adobe_photoshop.')
+    || toolName.startsWith('mcp__codex_apps__canva.')
+    || toolName === 'imagegen'
+    || toolName === 'functions.view_image'
+    || identity.includes('photoshop')
+    || identity.includes('canva')
+    || identity.includes('imagegen')
+    || identity.includes('view image')
+    || identity.includes('image to design')
+    || identity.includes('generate design')
+    || identity.includes('applyeffects')
+    || identity.includes('applyadjustments')
+    || identity.includes('instructedit')
+  ) {
+    return 'image';
+  }
+
+  if (
+    toolName === 'functions.list_mcp_resources'
+    || toolName === 'functions.list_mcp_resource_templates'
+    || toolName === 'functions.read_mcp_resource'
+    || toolName === 'functions.view_image'
+    || toolName.includes('file')
+    || toolName.includes('read')
+    || toolName.includes('fetch')
+    || toolName.includes('resource')
+    || identity.includes('folder')
+    || identity.includes('tree')
+    || identity.includes('file')
+    || identity.includes('read')
+    || identity.includes('fetch')
+    || identity.includes('resource')
+  ) {
+    return 'file';
+  }
+
+  if (
+    toolName === 'functions.update_plan'
+    || toolName === 'functions.request_user_input'
+    || identity.includes('plan')
+    || identity.includes('request user input')
+  ) {
+    return 'plan';
+  }
+
+  if (identity.includes('undo') || identity.includes('retry')) {
+    return 'undo';
+  }
+
+  return 'generic';
+}
+
+function resolveToolPayloadView(
+  rawText: string,
+  preferredLanguage: string | null | undefined,
+  label: string,
+  displayKind: ToolDisplayKind
+): {
   mode: 'terminal' | 'code';
   label: string;
   badge: string;
   code: string;
   language: string | null;
 } {
-  const text = entry.text?.trim() || '';
-  const identity = getToolIdentity(entry);
+  const text = rawText.trim();
+  const normalizedLanguage = preferredLanguage?.trim().toLowerCase() || null;
+
+  if (normalizedLanguage === 'diff') {
+    return {
+      mode: 'code',
+      label,
+      badge: 'DIFF',
+      code: text,
+      language: 'diff',
+    };
+  }
+
+  if (normalizedLanguage === 'json') {
+    const parsedJson = tryParseToolJson(text);
+    return {
+      mode: 'code',
+      label,
+      badge: 'JSON',
+      code: parsedJson !== null ? JSON.stringify(parsedJson, null, 2) : text,
+      language: 'json',
+    };
+  }
+
+  if (normalizedLanguage === 'bash' || normalizedLanguage === 'shell' || normalizedLanguage === 'sh' || normalizedLanguage === 'zsh') {
+    return {
+      mode: 'terminal',
+      label,
+      badge: normalizedLanguage.toUpperCase(),
+      code: text,
+      language: normalizedLanguage,
+    };
+  }
+
   const fenced = extractStandaloneCodeFence(text);
   const parsedJson = fenced ? null : tryParseToolJson(text);
 
   if (parsedJson !== null) {
     return {
       mode: 'code',
-      label: 'JSON payload',
+      label,
       badge: 'JSON',
       code: JSON.stringify(parsedJson, null, 2),
       language: 'json',
@@ -1237,37 +1428,37 @@ function resolveToolDetailView(entry: CodexTimelineEntry): {
     const isTerminalFence = language === 'bash' || language === 'sh' || language === 'shell' || language === 'zsh';
     return {
       mode: isTerminalFence ? 'terminal' : 'code',
-      label: isTerminalFence ? 'Terminal output' : 'Code payload',
+      label,
       badge: language ? language.toUpperCase() : 'CODE',
       code: fenced.code,
       language,
     };
   }
 
-  if (identity.includes('apply patch') || identity.includes('patch')) {
+  if (displayKind === 'patch') {
     return {
       mode: 'code',
-      label: 'Patch payload',
+      label,
       badge: 'DIFF',
       code: text,
       language: 'diff',
     };
   }
 
-  if (identity.includes('thinking')) {
+  if (displayKind === 'thinking') {
     return {
       mode: 'terminal',
-      label: 'Reasoning trace',
+      label,
       badge: 'TRACE',
       code: text,
       language: null,
     };
   }
 
-  if (identity.includes('exec command') || identity.includes('write stdin') || identity.includes('terminal')) {
+  if (displayKind === 'terminal') {
     return {
       mode: 'terminal',
-      label: 'Terminal output',
+      label,
       badge: 'TERM',
       code: text,
       language: null,
@@ -1276,11 +1467,93 @@ function resolveToolDetailView(entry: CodexTimelineEntry): {
 
   return {
     mode: 'terminal',
-    label: 'Tool output',
+    label,
     badge: 'TEXT',
     code: text,
     language: null,
   };
+}
+
+function buildToolDetailSections(entry: CodexTimelineEntry): Array<{
+  id: string;
+  mode: 'terminal' | 'code';
+  label: string;
+  badge: string;
+  code: string;
+  language: string | null;
+}> {
+  const displayKind = classifyToolEntry(entry);
+  const sections: Array<{
+    id: string;
+    mode: 'terminal' | 'code';
+    label: string;
+    badge: string;
+    code: string;
+    language: string | null;
+  }> = [];
+
+  const inputText = entry.toolInputText?.trim() || '';
+  const outputText = entry.toolOutputText?.trim() || '';
+  const fallbackText = entry.text?.trim() || '';
+
+  if (inputText) {
+    sections.push({
+      id: `${entry.id}-input`,
+      ...resolveToolPayloadView(
+        inputText,
+        entry.toolInputLanguage,
+        displayKind === 'terminal' ? 'פקודה שנשלחה' : 'נשלח לכלי',
+        displayKind
+      ),
+    });
+  }
+
+  if (outputText) {
+    sections.push({
+      id: `${entry.id}-output`,
+      ...resolveToolPayloadView(
+        outputText,
+        entry.toolOutputLanguage,
+        displayKind === 'thinking' ? 'Trace שנשמר' : 'הוחזר מהכלי',
+        displayKind
+      ),
+    });
+  }
+
+  if (sections.length === 0 && fallbackText) {
+    sections.push({
+      id: `${entry.id}-legacy`,
+      ...resolveToolPayloadView(
+        fallbackText,
+        null,
+        displayKind === 'terminal' ? 'פלט כלי' : displayKind === 'thinking' ? 'Reasoning trace' : 'פרטי הכלי',
+        displayKind
+      ),
+    });
+  }
+
+  return sections;
+}
+
+function buildToolCopyText(entry: CodexTimelineEntry): string {
+  const parts = [
+    entry.title || entry.toolName || 'Tool',
+    entry.subtitle || '',
+  ].filter(Boolean);
+
+  if (entry.toolInputText?.trim()) {
+    parts.push(`נשלח לכלי:\n${entry.toolInputText.trim()}`);
+  }
+
+  if (entry.toolOutputText?.trim()) {
+    parts.push(`הוחזר מהכלי:\n${entry.toolOutputText.trim()}`);
+  }
+
+  if (!entry.toolInputText?.trim() && !entry.toolOutputText?.trim() && entry.text?.trim()) {
+    parts.push(entry.text.trim());
+  }
+
+  return parts.join('\n\n');
 }
 
 function resolveToolDialogSubtitle(entry: CodexTimelineEntry): string | null {
@@ -1304,7 +1577,10 @@ function resolveToolDialogSubtitle(entry: CodexTimelineEntry): string | null {
     return null;
   }
 
-  const detailText = resolveToolDetailView(entry).code.replace(/\s+/g, ' ').trim();
+  const detailText = buildToolDetailSections(entry)
+    .map((section) => section.code.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join(' ');
   if (detailText && detailText.includes(normalizedSubtitle)) {
     return null;
   }
@@ -1317,64 +1593,57 @@ function ToolDetailViewer({
 }: {
   entry: CodexTimelineEntry;
 }) {
-  if (!entry.text?.trim()) {
+  const sections = buildToolDetailSections(entry);
+
+  if (sections.length === 0) {
     return <div className="text-sm text-slate-500">אין פלט נוסף לכלי הזה.</div>;
   }
 
-  const detail = resolveToolDetailView(entry);
-
-  if (detail.mode === 'terminal') {
-    return (
-      <div className="overflow-hidden rounded-[1.5rem] border border-slate-800 bg-slate-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-        <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <span className="h-2.5 w-2.5 rounded-full bg-rose-400/90" />
-            <span className="h-2.5 w-2.5 rounded-full bg-amber-300/90" />
-            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/90" />
-          </div>
-          <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
-            <span
-              dir="ltr"
-              className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-semibold text-slate-300"
-            >
-              {detail.badge}
-            </span>
-            <span dir="ltr">{detail.label}</span>
-          </div>
-        </div>
-        <pre
-          dir="ltr"
-          className="max-h-[52dvh] overflow-x-auto overflow-y-auto px-4 py-4 font-mono text-[12px] leading-6 text-slate-100"
-        >
-          <code className="block min-w-max whitespace-pre">{detail.code}</code>
-        </pre>
-      </div>
-    );
-  }
-
   return (
-    <div className="overflow-hidden rounded-[1.5rem] border border-slate-200 bg-slate-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-      <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <span className="h-2.5 w-2.5 rounded-full bg-sky-400/90" />
-          <span className="h-2.5 w-2.5 rounded-full bg-violet-400/90" />
-          <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/90" />
+    <div className="space-y-4">
+      {sections.map((section) => (
+        <div
+          key={section.id}
+          className={cn(
+            'overflow-hidden rounded-[1.5rem] border shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]',
+            section.mode === 'terminal' ? 'border-slate-800 bg-slate-950' : 'border-slate-200 bg-slate-950'
+          )}
+        >
+          <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+            <div className="flex items-center gap-2">
+              <span className={cn('h-2.5 w-2.5 rounded-full', section.mode === 'terminal' ? 'bg-rose-400/90' : 'bg-sky-400/90')} />
+              <span className={cn('h-2.5 w-2.5 rounded-full', section.mode === 'terminal' ? 'bg-amber-300/90' : 'bg-violet-400/90')} />
+              <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/90" />
+            </div>
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
+              <span
+                dir="ltr"
+                className={cn(
+                  'rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-semibold',
+                  section.mode === 'terminal' ? 'text-slate-300' : 'text-slate-200'
+                )}
+              >
+                {section.badge}
+              </span>
+              <span>{section.label}</span>
+            </div>
+          </div>
+          {section.mode === 'terminal' ? (
+            <pre
+              dir="ltr"
+              className="max-h-[34dvh] overflow-x-auto overflow-y-auto px-4 py-4 font-mono text-[12px] leading-6 text-slate-100"
+            >
+              <code className="block min-w-max whitespace-pre">{section.code}</code>
+            </pre>
+          ) : (
+            <CodexCodeBlock
+              code={section.code}
+              language={section.language}
+              className="max-h-[34dvh] overflow-x-auto overflow-y-auto rounded-none border-0 shadow-none"
+            />
+          )}
         </div>
-        <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
-          <span
-            dir="ltr"
-            className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-semibold text-slate-200"
-          >
-            {detail.badge}
-          </span>
-          <span dir="ltr">{detail.label}</span>
-        </div>
-      </div>
-      <CodexCodeBlock
-        code={detail.code}
-        language={detail.language}
-        className="max-h-[52dvh] overflow-x-auto overflow-y-auto rounded-none border-0 shadow-none"
-      />
+      ))}
     </div>
   );
 }
@@ -2564,33 +2833,40 @@ const MessageMarkdown = memo(function MessageMarkdown({
   return (
     <div
       className="min-w-0 max-w-full overflow-hidden text-[15px] leading-7"
-      style={{ direction: 'rtl', unicodeBidi: 'plaintext' }}
+      style={{ direction: 'rtl', unicodeBidi: 'isolate' }}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkIsolateMixedBidiText]}
         components={{
           p: ({ children }) => (
-            <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{children}</p>
+            <p dir="auto" className="break-words text-right [overflow-wrap:anywhere] [word-break:normal]">{children}</p>
           ),
-          h1: ({ children }) => <h1 className="mb-2 mt-1 text-xl font-black">{children}</h1>,
-          h2: ({ children }) => <h2 className="mb-2 mt-1 text-lg font-black">{children}</h2>,
-          h3: ({ children }) => <h3 className="mb-2 mt-1 text-base font-black">{children}</h3>,
-          ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pr-5">{children}</ul>,
-          ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pr-5">{children}</ol>,
+          h1: ({ children }) => <h1 dir="auto" className="mb-2 mt-1 text-right text-xl font-black">{children}</h1>,
+          h2: ({ children }) => <h2 dir="auto" className="mb-2 mt-1 text-right text-lg font-black">{children}</h2>,
+          h3: ({ children }) => <h3 dir="auto" className="mb-2 mt-1 text-right text-base font-black">{children}</h3>,
+          ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pr-5 marker:text-slate-500">{children}</ul>,
+          ol: ({ children, ...props }) => (
+            <ol
+              start={typeof (props as { start?: number }).start === 'number' ? (props as { start?: number }).start : undefined}
+              className="my-2 list-decimal space-y-1 pr-5 marker:font-semibold marker:text-slate-500"
+            >
+              {children}
+            </ol>
+          ),
           li: ({ children }) => (
-            <li className="break-words [overflow-wrap:anywhere]">{children}</li>
+            <li dir="auto" className="break-words text-right [overflow-wrap:anywhere] [word-break:normal]">{children}</li>
           ),
           strong: ({ children }) => (
-            <strong className="break-words font-black [overflow-wrap:anywhere]">{children}</strong>
+            <strong className="break-words font-black">{children}</strong>
           ),
           em: ({ children }) => (
-            <em className="break-words italic [overflow-wrap:anywhere]">{children}</em>
+            <em className="break-words italic">{children}</em>
           ),
           a: ({ href, children }) => (
             (() => {
               const localFile = href ? parseLocalFileHref(href) : null;
               const linkClassName = cn(
-                'break-words font-medium underline underline-offset-4 [overflow-wrap:anywhere]',
+                'break-words font-medium underline underline-offset-4',
                 'text-cyan-700'
               );
 
@@ -2620,8 +2896,9 @@ const MessageMarkdown = memo(function MessageMarkdown({
           ),
           blockquote: ({ children }) => (
             <blockquote
+              dir="auto"
               className={cn(
-                'my-3 rounded-r-2xl border-r-4 px-4 py-3',
+                'my-3 rounded-r-2xl border-r-4 px-4 py-3 text-right',
                 isUser
                   ? 'border-indigo-200 bg-indigo-50/60 text-slate-700'
                   : 'border-cyan-300 bg-cyan-50 text-slate-700'
@@ -2631,26 +2908,83 @@ const MessageMarkdown = memo(function MessageMarkdown({
             </blockquote>
           ),
           code: ((props: any) => {
+            const className = typeof props.className === 'string' ? props.className : '';
+            const rawCodeText = Children.toArray(props.children)
+              .map((child) => (typeof child === 'string' || typeof child === 'number' ? String(child) : ''))
+              .join('');
+            const nodePosition = props.node?.position;
+            const spansMultipleLines = Boolean(
+              nodePosition
+              && typeof nodePosition.start?.line === 'number'
+              && typeof nodePosition.end?.line === 'number'
+              && nodePosition.end.line > nodePosition.start.line
+            );
+            const isInline = props.inline === true || (!className && !spansMultipleLines && !rawCodeText.includes('\n'));
+
+            if (isInline) {
+              const inlineText = rawCodeText.trim();
+              const inlineDirection = /[A-Za-z0-9_/@.:%#=+-]/.test(inlineText) ? 'ltr' : 'auto';
+
+              return (
+                <code
+                  dir={inlineDirection}
+                  style={{ unicodeBidi: 'isolate', WebkitBoxDecorationBreak: 'clone', boxDecorationBreak: 'clone' }}
+                  className={cn(
+                    'inline break-normal rounded-lg border px-1.5 py-[0.12rem] align-baseline text-[0.92em] font-medium whitespace-normal leading-[1.9]',
+                    isUser
+                      ? 'border-indigo-200/80 bg-white/75 font-sans text-slate-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]'
+                      : 'border-slate-200/80 bg-slate-100/90 font-sans text-slate-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]'
+                  )}
+                >
+                  {props.children}
+                </code>
+              );
+            }
+
             return (
               <code
                 dir="ltr"
                 className={cn(
-                  'inline break-words font-mono text-[0.95em] font-semibold [overflow-wrap:anywhere]',
-                  'text-slate-900'
+                  'block min-w-max whitespace-pre font-mono text-[13px] leading-6 text-slate-900',
+                  className
                 )}
               >
                 {props.children}
               </code>
             );
           }) as any,
-          pre: ({ children }) => (
-            <pre className={cn(
-              'my-3 w-full max-w-full overflow-x-auto rounded-[1.25rem] px-4 py-3 text-left text-[13px] leading-6',
-              isUser ? 'bg-indigo-100/70 text-slate-900' : 'bg-slate-100 text-slate-900'
-            )}>
-              {children}
-            </pre>
-          ),
+          pre: ({ children }) => {
+            const codeChild = Children.toArray(children)[0];
+
+            if (isValidElement(codeChild)) {
+              const codeProps = (codeChild as any).props ?? {};
+              const blockCode = Children.toArray(codeProps.children)
+                .map((child) => (typeof child === 'string' || typeof child === 'number' ? String(child) : ''))
+                .join('');
+              const languageMatch = typeof codeProps.className === 'string'
+                ? codeProps.className.match(/language-([A-Za-z0-9_-]+)/)
+                : null;
+
+              return (
+                <CodexCodeBlock
+                  code={blockCode}
+                  language={languageMatch?.[1] ?? null}
+                  className={cn(
+                    isUser ? 'border border-indigo-200/70' : 'border border-slate-200'
+                  )}
+                />
+              );
+            }
+
+            return (
+              <pre className={cn(
+                'my-3 w-full max-w-full overflow-x-auto rounded-[1.25rem] border px-4 py-3 text-right text-[13px] leading-6',
+                isUser ? 'bg-indigo-100/70 text-slate-900' : 'bg-slate-100 text-slate-900'
+              )}>
+                {children}
+              </pre>
+            );
+          },
           table: ({ children }) => (
             <div
               dir="ltr"
@@ -2666,6 +3000,17 @@ const MessageMarkdown = memo(function MessageMarkdown({
           ),
           td: ({ children }) => (
             <td className="border border-slate-200 px-3 py-2 align-top">{children}</td>
+          ),
+          input: ({ type, checked, disabled }) => (
+            type === 'checkbox' ? (
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={disabled}
+                readOnly
+                className="ml-2 h-4 w-4 rounded border-slate-300 text-cyan-600 accent-cyan-600"
+              />
+            ) : null
           ),
           hr: () => <hr className="my-4 border-slate-200" />,
         }}
@@ -2742,63 +3087,41 @@ function getToolIdentity(entry: CodexTimelineEntry) {
 }
 
 function getToolEntryIcon(entry: CodexTimelineEntry) {
-  const identity = getToolIdentity(entry);
+  const toolKind = classifyToolEntry(entry);
 
-  if (identity.includes('thinking')) {
+  if (toolKind === 'thinking') {
     return Brain;
   }
 
-  if (identity.includes('exec command') || identity.includes('write stdin') || identity.includes('terminal')) {
+  if (toolKind === 'terminal') {
     return Command;
   }
 
-  if (identity.includes('apply patch') || identity.includes('patch') || identity.includes('file change')) {
+  if (toolKind === 'patch') {
     return SquarePen;
   }
 
-  if (identity.includes('web search') || identity.includes('search query') || identity.includes('web open') || identity.includes('web find')) {
+  if (toolKind === 'web') {
     return Eye;
   }
 
-  if (
-    identity.includes('parallel')
-    || identity.includes('spawn agent')
-    || identity.includes('send input')
-    || identity.includes('wait agent')
-    || identity.includes('resume agent')
-    || identity.includes('close agent')
-    || identity.includes('agent')
-  ) {
+  if (toolKind === 'agent') {
     return Bot;
   }
 
-  if (
-    identity.includes('photoshop')
-    || identity.includes('canva')
-    || identity.includes('imagegen')
-    || identity.includes('view image')
-    || identity.includes('image to design')
-    || identity.includes('generate design')
-    || identity.includes('applyeffects')
-    || identity.includes('applyadjustments')
-    || identity.includes('instructedit')
-  ) {
+  if (toolKind === 'image') {
     return FileImage;
   }
 
-  if (identity.includes('folder') || identity.includes('tree')) {
+  if (toolKind === 'file') {
     return FolderTree;
   }
 
-  if (identity.includes('file') || identity.includes('read') || identity.includes('fetch') || identity.includes('resource')) {
-    return FileText;
-  }
-
-  if (identity.includes('plan') || identity.includes('request_user_input')) {
+  if (toolKind === 'plan') {
     return ListPlus;
   }
 
-  if (identity.includes('undo') || identity.includes('retry')) {
+  if (toolKind === 'undo') {
     return RefreshCw;
   }
 
@@ -2806,90 +3129,65 @@ function getToolEntryIcon(entry: CodexTimelineEntry) {
 }
 
 function getToolEntryTone(entry: CodexTimelineEntry) {
-  const identity = getToolIdentity(entry);
+  const toolKind = classifyToolEntry(entry);
 
-  if (identity.includes('thinking')) {
+  if (toolKind === 'thinking') {
     return {
       button: 'hover:border-fuchsia-200 hover:text-fuchsia-700',
       icon: 'bg-fuchsia-100 text-fuchsia-600 group-hover:bg-fuchsia-200',
     };
   }
 
-  if (identity.includes('exec command') || identity.includes('write stdin') || identity.includes('terminal')) {
+  if (toolKind === 'terminal') {
     return {
       button: 'hover:border-slate-200 hover:text-slate-700',
       icon: 'bg-slate-100 text-slate-600 group-hover:bg-slate-200',
     };
   }
 
-  if (identity.includes('apply patch') || identity.includes('patch') || identity.includes('file change')) {
+  if (toolKind === 'patch') {
     return {
       button: 'hover:border-indigo-200 hover:text-indigo-700',
       icon: 'bg-indigo-100 text-indigo-600 group-hover:bg-indigo-200',
     };
   }
 
-  if (identity.includes('web search') || identity.includes('search query') || identity.includes('web open') || identity.includes('web find')) {
+  if (toolKind === 'web') {
     return {
       button: 'hover:border-cyan-200 hover:text-cyan-700',
       icon: 'bg-cyan-100 text-cyan-600 group-hover:bg-cyan-200',
     };
   }
 
-  if (
-    identity.includes('parallel')
-    || identity.includes('spawn agent')
-    || identity.includes('send input')
-    || identity.includes('wait agent')
-    || identity.includes('resume agent')
-    || identity.includes('close agent')
-    || identity.includes('agent')
-  ) {
+  if (toolKind === 'agent') {
     return {
       button: 'hover:border-violet-200 hover:text-violet-700',
       icon: 'bg-violet-100 text-violet-600 group-hover:bg-violet-200',
     };
   }
 
-  if (
-    identity.includes('photoshop')
-    || identity.includes('canva')
-    || identity.includes('imagegen')
-    || identity.includes('view image')
-    || identity.includes('image to design')
-    || identity.includes('generate design')
-    || identity.includes('applyeffects')
-    || identity.includes('applyadjustments')
-    || identity.includes('instructedit')
-  ) {
+  if (toolKind === 'image') {
     return {
       button: 'hover:border-rose-200 hover:text-rose-700',
       icon: 'bg-rose-100 text-rose-600 group-hover:bg-rose-200',
     };
   }
 
-  if (identity.includes('folder') || identity.includes('tree')) {
+  if (toolKind === 'file') {
     return {
       button: 'hover:border-amber-200 hover:text-amber-700',
       icon: 'bg-amber-100 text-amber-700 group-hover:bg-amber-200',
     };
   }
 
-  if (identity.includes('file') || identity.includes('read') || identity.includes('fetch') || identity.includes('resource')) {
-    return {
-      button: 'hover:border-emerald-200 hover:text-emerald-700',
-      icon: 'bg-emerald-100 text-emerald-600 group-hover:bg-emerald-200',
-    };
-  }
-
-  if (identity.includes('plan') || identity.includes('request user input')) {
+  if (toolKind === 'plan') {
     return {
       button: 'hover:border-sky-200 hover:text-sky-700',
       icon: 'bg-sky-100 text-sky-600 group-hover:bg-sky-200',
     };
   }
 
-  if (identity.includes('undo') || identity.includes('retry')) {
+  if (toolKind === 'undo') {
     return {
       button: 'hover:border-orange-200 hover:text-orange-700',
       icon: 'bg-orange-100 text-orange-600 group-hover:bg-orange-200',
@@ -15848,7 +16146,7 @@ export function CodexMobileApp() {
               </div>
               <div className="flex items-center gap-2">
                 <CopyButton
-                  text={[activeToolEntry.title, activeToolEntry.subtitle, activeToolEntry.text].filter(Boolean).join('\n\n')}
+                  text={buildToolCopyText(activeToolEntry)}
                 />
                 <button
                   type="button"

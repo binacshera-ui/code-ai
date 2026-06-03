@@ -1,4 +1,5 @@
-import { memo, useMemo } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
+import { Check, Copy } from 'lucide-react';
 import hljs from 'highlight.js/lib/common';
 import { cn } from '@/lib/utils';
 
@@ -39,6 +40,16 @@ export const CodexCodeBlock = memo(function CodexCodeBlock({
     () => renderHighlightedHtml(normalizedCode, language || null),
     [language, normalizedCode]
   );
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => setCopied(false), 1400);
+    return () => window.clearTimeout(timeout);
+  }, [copied]);
 
   if (inline) {
     return (
@@ -53,12 +64,31 @@ export const CodexCodeBlock = memo(function CodexCodeBlock({
   }
 
   return (
-    <pre className={cn('overflow-x-auto rounded-[1.25rem] bg-slate-950 p-4 text-left text-[13px] leading-6', className)}>
-      <code
-        dir="ltr"
-        className="hljs block min-w-full whitespace-pre font-mono text-slate-100"
-        dangerouslySetInnerHTML={{ __html: highlightedHtml }}
-      />
-    </pre>
+    <div className={cn('relative my-3 w-full max-w-full', className)}>
+      <button
+        type="button"
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(normalizedCode);
+            setCopied(true);
+          } catch {
+            setCopied(false);
+          }
+        }}
+        className="absolute left-3 top-3 z-10 inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-slate-900/80 px-3 py-1.5 text-[11px] font-medium text-slate-100 shadow-lg backdrop-blur transition hover:bg-slate-800 active:scale-[0.98]"
+        aria-label="העתק קטע קוד"
+        title="העתק קטע קוד"
+      >
+        {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+        <span>{copied ? 'הועתק' : 'העתק'}</span>
+      </button>
+      <pre className="overflow-x-auto rounded-[1.25rem] bg-slate-950 p-4 pt-12 text-right text-[13px] leading-6">
+        <code
+          dir="ltr"
+          className="hljs block min-w-full whitespace-pre font-mono text-slate-100"
+          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+        />
+      </pre>
+    </div>
   );
 });

@@ -444,6 +444,20 @@ function extractToolResultText(value: unknown): string {
   return '';
 }
 
+function findLastToolTimelineEntry(
+  timeline: CodexTimelineEntry[],
+  predicate: (entry: CodexTimelineEntry) => boolean
+): CodexTimelineEntry | null {
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const entry = timeline[index];
+    if (entry?.entryType === 'tool' && predicate(entry)) {
+      return entry;
+    }
+  }
+
+  return null;
+}
+
 function extractUserPromptText(content: unknown): string {
   if (typeof content === 'string') {
     return content.trim();
@@ -1230,18 +1244,35 @@ async function parseClaudeSessionFile(filePath: string, sessionId: string): Prom
             const callId = normalizeString(part.tool_use_id);
             const toolName = callId ? knownToolCalls.get(callId) || 'tool' : 'tool';
             const resultText = extractToolResultText(part.content);
-            timeline.push({
-              id: `${sessionId}-tool-result-${timeline.length}`,
-              entryType: 'tool',
-              timestamp,
-              toolName,
-              title: `${summarizeToolName(toolName)} result`,
-              subtitle: null,
-              text: clipLongText(resultText || 'Tool completed without textual output.', 4000),
-              callId,
-              status: 'completed',
-              exitCode: null,
-            });
+            const clippedOutput = clipLongText(resultText || 'Tool completed without textual output.', 4000);
+            const mergedEntry = findLastToolTimelineEntry(
+              timeline,
+              (entry) => entry.callId === callId && entry.toolName === toolName
+            );
+
+            if (mergedEntry) {
+              mergedEntry.timestamp = timestamp;
+              mergedEntry.toolOutputText = clippedOutput;
+              mergedEntry.toolOutputLanguage = null;
+              mergedEntry.text = clippedOutput;
+              mergedEntry.status = 'completed';
+              mergedEntry.exitCode = null;
+            } else {
+              timeline.push({
+                id: `${sessionId}-tool-result-${timeline.length}`,
+                entryType: 'tool',
+                timestamp,
+                toolName,
+                title: `${summarizeToolName(toolName)} result`,
+                subtitle: null,
+                text: clippedOutput,
+                callId,
+                status: 'completed',
+                exitCode: null,
+                toolOutputText: clippedOutput,
+                toolOutputLanguage: null,
+              });
+            }
           }
         }
         continue;
@@ -1290,6 +1321,8 @@ async function parseClaudeSessionFile(filePath: string, sessionId: string): Prom
               callId,
               status: 'queued',
               exitCode: null,
+              toolInputText: clipLongText(JSON.stringify(part.input || {}, null, 2), 2000),
+              toolInputLanguage: 'json',
             });
             continue;
           }

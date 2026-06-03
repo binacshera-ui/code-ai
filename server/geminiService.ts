@@ -900,6 +900,8 @@ function parseGeminiSessionRows(messages: any[], sessionId: string): ParsedGemin
       const toolName = normalizeString(toolCall?.name) || 'tool';
       const callId = normalizeString(toolCall?.id);
       const resultText = extractGeminiToolResultText(toolCall?.result);
+      const inputText = clipLongText(JSON.stringify(toolCall?.args || {}, null, 2), 5000);
+      const outputText = clipLongText(resultText || 'Tool completed without textual output.', 5000);
       timeline.push({
         id: `${callId || normalizeString(row?.id) || sessionId}-tool-${timeline.length}`,
         entryType: 'tool',
@@ -907,10 +909,14 @@ function parseGeminiSessionRows(messages: any[], sessionId: string): ParsedGemin
         toolName,
         title: normalizeString(toolCall?.displayName) || summarizeToolName(toolName),
         subtitle: normalizeString(toolCall?.description) || summarizeToolInput(toolName, toolCall?.args) || normalizeString(toolCall?.status),
-        text: clipLongText(resultText || JSON.stringify(toolCall?.args || {}, null, 2), 5000),
+        text: outputText,
         callId,
         status: normalizeString(toolCall?.status) || 'completed',
         exitCode: null,
+        toolInputText: inputText,
+        toolInputLanguage: 'json',
+        toolOutputText: outputText,
+        toolOutputLanguage: null,
       });
     }
 
