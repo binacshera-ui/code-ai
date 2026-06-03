@@ -82,6 +82,12 @@ import { RailHeistDialog } from './RailHeistDialog';
 import { TempleGemQuestDialog } from './TempleGemQuestDialog';
 import { VaultRunnerDialog } from './VaultRunnerDialog';
 import {
+  DEFAULT_THEME_PRESET_ID,
+  THEME_PRESET_MAP,
+  THEME_PRESETS,
+  type ThemePresetId,
+} from './themePresets';
+import {
   installCodexGlobalCrashHandlers,
   recordCodexBreadcrumb,
   reportCodexClientLog,
@@ -2867,7 +2873,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
               const localFile = href ? parseLocalFileHref(href) : null;
               const linkClassName = cn(
                 'break-words font-medium underline underline-offset-4',
-                'text-cyan-700'
+                isUser ? 'code-ai-user-meta' : 'text-cyan-700'
               );
 
               if (localFile && onOpenFilePreview) {
@@ -2895,12 +2901,12 @@ const MessageMarkdown = memo(function MessageMarkdown({
             })()
           ),
           blockquote: ({ children }) => (
-            <blockquote
+          <blockquote
               dir="auto"
               className={cn(
                 'my-3 rounded-r-2xl border-r-4 px-4 py-3 text-right',
                 isUser
-                  ? 'border-indigo-200 bg-indigo-50/60 text-slate-700'
+                  ? 'code-ai-user-blockquote'
                   : 'border-cyan-300 bg-cyan-50 text-slate-700'
               )}
             >
@@ -2932,7 +2938,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
                   className={cn(
                     'inline break-normal rounded-lg border px-1.5 py-[0.12rem] align-baseline text-[0.92em] font-medium whitespace-normal leading-[1.9]',
                     isUser
-                      ? 'border-indigo-200/80 bg-white/75 font-sans text-slate-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]'
+                      ? 'code-ai-user-inline-code font-sans shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]'
                       : 'border-slate-200/80 bg-slate-100/90 font-sans text-slate-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]'
                   )}
                 >
@@ -2966,24 +2972,24 @@ const MessageMarkdown = memo(function MessageMarkdown({
                 : null;
 
               return (
-                <CodexCodeBlock
-                  code={blockCode}
-                  language={languageMatch?.[1] ?? null}
-                  className={cn(
-                    isUser ? 'border border-indigo-200/70' : 'border border-slate-200'
-                  )}
-                />
-              );
-            }
-
-            return (
-              <pre className={cn(
-                'my-3 w-full max-w-full overflow-x-auto rounded-[1.25rem] border px-4 py-3 text-right text-[13px] leading-6',
-                isUser ? 'bg-indigo-100/70 text-slate-900' : 'bg-slate-100 text-slate-900'
-              )}>
-                {children}
-              </pre>
+              <CodexCodeBlock
+                code={blockCode}
+                language={languageMatch?.[1] ?? null}
+                className={cn(
+                  isUser ? 'code-ai-user-pre border' : 'border border-slate-200'
+                )}
+              />
             );
+          }
+
+          return (
+            <pre className={cn(
+              'my-3 w-full max-w-full overflow-x-auto rounded-[1.25rem] border px-4 py-3 text-right text-[13px] leading-6',
+              isUser ? 'code-ai-user-pre' : 'bg-slate-100 text-slate-900'
+            )}>
+              {children}
+            </pre>
+          );
           },
           table: ({ children }) => (
             <div
@@ -3517,7 +3523,7 @@ function MessageBubble({
       <div className={cn('flex w-full items-end gap-2', isUser ? 'flex-row' : 'flex-row-reverse')}>
         {isUser && (
           <div
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-indigo-600 shadow-sm transition-all"
+            className="code-ai-user-avatar flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-sm transition-all"
           >
             <User className="h-4 w-4" />
           </div>
@@ -3528,7 +3534,7 @@ function MessageBubble({
             'relative flex min-w-0 max-w-none flex-col gap-1 rounded-[1.25rem] px-4 py-3 text-[15px] leading-relaxed shadow-sm',
             isTransfer ? 'max-w-[min(100%,42rem)] flex-none' : isUser ? 'flex-1' : 'w-full',
             isUser
-              ? 'rounded-tr-sm border border-indigo-100/50 bg-gradient-to-br from-indigo-50 to-blue-50 text-indigo-950'
+              ? 'code-ai-user-bubble rounded-tr-sm border'
               : isTransfer
                 ? 'rounded-tl-sm border border-orange-200/80 bg-gradient-to-br from-orange-50 to-amber-50 text-slate-700 shadow-[0_10px_24px_rgba(251,146,60,0.10)]'
                 : isCommentary
@@ -3539,14 +3545,14 @@ function MessageBubble({
           <div className="mb-1 flex items-center gap-2 text-[10px] font-medium">
             <span className={cn(
               isUser
-                ? 'text-indigo-500/80'
+                ? 'code-ai-user-meta'
                 : isTransfer
                   ? 'text-orange-500/90'
                   : 'text-slate-400'
             )}>{senderLabel}</span>
             <span className={cn(
               isUser
-                ? 'text-indigo-400/70'
+                ? 'code-ai-user-meta-faint'
                 : isTransfer
                   ? 'text-orange-400/80'
                   : 'text-slate-400'
@@ -3562,7 +3568,7 @@ function MessageBubble({
               className={cn(
                 'h-7 w-7 border-0 text-[10px]',
                 isUser
-                  ? 'bg-white/20 text-indigo-700 hover:bg-white/30'
+                  ? 'code-ai-user-action'
                   : isTransfer
                     ? 'bg-white/70 text-orange-500 hover:bg-white'
                     : 'bg-slate-50'
@@ -3575,7 +3581,7 @@ function MessageBubble({
                 disabled={isChangeLoading}
                 className={cn(
                   'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
-                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                  isUser ? 'code-ai-user-action' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
                 )}
                 title="קבצים שהשיחה שינתה"
                 aria-label="קבצים שהשיחה שינתה"
@@ -3589,7 +3595,7 @@ function MessageBubble({
                 onClick={() => onFork?.(entry.id)}
                 className={cn(
                   'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors',
-                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                  isUser ? 'code-ai-user-action' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
                 )}
                 title="מזלג מהודעה זו"
                 aria-label="מזלג מהודעה זו"
@@ -3603,7 +3609,7 @@ function MessageBubble({
                 onClick={() => onAddReminder?.(entry)}
                 className={cn(
                   'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors',
-                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30' : 'bg-slate-50 text-violet-500 hover:bg-violet-50'
+                  isUser ? 'code-ai-user-action' : 'bg-slate-50 text-violet-500 hover:bg-violet-50'
                 )}
                 title="הוסף לתזכורות"
                 aria-label="הוסף לתזכורות"
@@ -3618,7 +3624,7 @@ function MessageBubble({
                 disabled={isDeleting}
                 className={cn(
                   'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
-                  isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30' : 'bg-slate-50 text-rose-500 hover:bg-rose-50'
+                  isUser ? 'code-ai-user-action' : 'bg-slate-50 text-rose-500 hover:bg-rose-50'
                 )}
                 title="מחק את זוג ההודעות הזה"
                 aria-label="מחק את זוג ההודעות הזה"
@@ -3645,7 +3651,7 @@ function MessageBubble({
                   disabled={isTransfering}
                   className={cn(
                     'inline-flex h-7 w-7 items-center justify-center rounded-full border border-transparent text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
-                    isUser ? 'bg-white/20 text-indigo-700 hover:bg-white/30' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                    isUser ? 'code-ai-user-action' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
                   )}
                   title={transferOptions?.length === 1 ? `העבר ל-${transferOptions[0].label}` : 'העבר לספק אחר'}
                   aria-label={transferOptions?.length === 1 ? `העבר ל-${transferOptions[0].label}` : 'העבר לספק אחר'}
@@ -4117,7 +4123,9 @@ function SidebarPanel({
   onDeleteSessionPermanently,
   onSelectSession,
   themeMode,
+  themePresetId,
   onThemeModeChange,
+  onThemePresetChange,
 }: {
   profiles: CodexProfile[];
   profileId: string;
@@ -4166,7 +4174,9 @@ function SidebarPanel({
   onDeleteSessionPermanently: (session: CodexSessionSummary) => void;
   onSelectSession: (sessionId: string) => void;
   themeMode: ThemeMode;
+  themePresetId: ThemePresetId;
   onThemeModeChange: (mode: ThemeMode) => void;
+  onThemePresetChange: (presetId: ThemePresetId) => void;
 }) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
@@ -4430,7 +4440,7 @@ function SidebarPanel({
 
       <div className="shrink-0 border-t border-slate-100 p-4">
         {isSettingsOpen && (
-          <div className="mb-3 rounded-2xl border border-slate-100 bg-slate-50 p-3 text-right">
+          <div className="mb-3 max-h-[56dvh] overflow-y-auto overscroll-contain rounded-2xl border border-slate-100 bg-slate-50 p-3 text-right">
             <div className="text-[11px] font-semibold tracking-[0.18em] text-slate-500">
               שירות
             </div>
@@ -4560,6 +4570,41 @@ function SidebarPanel({
                 כהה
                 <Moon className="h-4 w-4" />
               </button>
+            </div>
+            <div className="mt-4 text-[11px] font-semibold tracking-[0.18em] text-slate-500">
+              ערכת צבע
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {THEME_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => onThemePresetChange(preset.id)}
+                  className={cn(
+                    'rounded-2xl border px-3 py-3 text-right transition-colors',
+                    themePresetId === preset.id
+                      ? 'border-slate-900 bg-slate-900 text-white'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                  )}
+                >
+                  <span className="flex items-center justify-between gap-3">
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-semibold">{preset.label}</span>
+                      <span className={cn(
+                        'mt-1 block truncate text-[11px]',
+                        themePresetId === preset.id ? 'text-white/75' : 'text-slate-500'
+                      )}>
+                        {preset.description}
+                      </span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      <span className="h-5 w-5 rounded-full border border-black/5" style={{ backgroundColor: preset.colors.canvas }} />
+                      <span className="h-5 w-5 rounded-full border border-black/5" style={{ backgroundColor: preset.colors.soft }} />
+                      <span className="h-5 w-5 rounded-full border border-black/5" style={{ backgroundColor: preset.colors.accentSoft }} />
+                    </span>
+                  </span>
+                </button>
+              ))}
             </div>
             {selectedProfile && (
               <div className="mt-2 truncate text-[11px] text-slate-400" dir="ltr" title={selectedProfile.workspaceCwd}>
@@ -5318,6 +5363,7 @@ function getPlayerFlightBounds(playerSize: number) {
 const SIDEBAR_COLLAPSED_FOLDERS_STORAGE_PREFIX = 'codex.sidebar.collapsedFolders';
 const SIDEBAR_COLLAPSED_TOPICS_STORAGE_PREFIX = 'codex.sidebar.collapsedTopics';
 const THEME_MODE_STORAGE_PREFIX = 'codex.theme.mode';
+const THEME_PRESET_STORAGE_PREFIX = 'code-ai.theme.preset';
 
 function readBooleanMapFromStorage(storageKey: string): Record<string, boolean> {
   if (typeof window === 'undefined') {
@@ -5357,6 +5403,10 @@ function getThemeModeStorageKey(profileId: string): string {
   return `${THEME_MODE_STORAGE_PREFIX}:${profileId}`;
 }
 
+function getThemePresetStorageKey(profileId: string): string {
+  return `${THEME_PRESET_STORAGE_PREFIX}:${profileId}`;
+}
+
 function readThemeModeForProfile(profileId: string): ThemeMode {
   if (typeof window === 'undefined' || !profileId) {
     return 'light';
@@ -5372,6 +5422,27 @@ function writeThemeModeForProfile(profileId: string, mode: ThemeMode) {
   }
 
   window.localStorage.setItem(getThemeModeStorageKey(profileId), mode);
+}
+
+function readThemePresetForProfile(profileId: string): ThemePresetId {
+  if (typeof window === 'undefined' || !profileId) {
+    return DEFAULT_THEME_PRESET_ID;
+  }
+
+  const raw = window.localStorage.getItem(getThemePresetStorageKey(profileId));
+  if (raw && raw in THEME_PRESET_MAP) {
+    return raw as ThemePresetId;
+  }
+
+  return DEFAULT_THEME_PRESET_ID;
+}
+
+function writeThemePresetForProfile(profileId: string, presetId: ThemePresetId) {
+  if (typeof window === 'undefined' || !profileId) {
+    return;
+  }
+
+  window.localStorage.setItem(getThemePresetStorageKey(profileId), presetId);
 }
 
 function FileTreeDialog({
@@ -10006,6 +10077,7 @@ export function CodexMobileApp() {
   const [isInstallHelpOpen, setIsInstallHelpOpen] = useState(false);
   const [isStandaloneMode, setIsStandaloneMode] = useState(isStandaloneDisplayMode);
   const [themeMode, setThemeMode] = useState<ThemeMode>('light');
+  const [themePresetId, setThemePresetId] = useState<ThemePresetId>(DEFAULT_THEME_PRESET_ID);
   const [sessionWindowSize, setSessionWindowSize] = useState(INITIAL_TIMELINE_WINDOW_SIZE);
   const [isFullTimelineLoaded, setIsFullTimelineLoaded] = useState(false);
   const [isFullTimelineLoading, setIsFullTimelineLoading] = useState(false);
@@ -13900,6 +13972,7 @@ export function CodexMobileApp() {
     }
 
     setThemeMode(readThemeModeForProfile(profileId));
+    setThemePresetId(readThemePresetForProfile(profileId));
   }, [profileId]);
 
   useEffect(() => {
@@ -13910,11 +13983,29 @@ export function CodexMobileApp() {
     writeThemeModeForProfile(profileId, themeMode);
   }, [profileId, themeMode]);
 
+  useEffect(() => {
+    if (!profileId) {
+      return;
+    }
+
+    writeThemePresetForProfile(profileId, themePresetId);
+  }, [profileId, themePresetId]);
+
   const themeClassName = themeMode === 'dark' ? 'code-ai-theme-dark' : 'code-ai-theme-light';
+  const lightThemeShellStyle = themeMode === 'light'
+    ? {
+        backgroundColor: 'var(--code-ai-canvas-bg)',
+        color: 'var(--code-ai-canvas-text)',
+      }
+    : undefined;
 
   if (isBooting) {
     return (
-      <div className={cn('code-ai-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
+      <div
+        data-theme-preset={themePresetId}
+        className={cn('code-ai-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}
+        style={lightThemeShellStyle}
+      >
         <div className="w-full max-w-sm rounded-[28px] border border-slate-100 bg-white px-8 py-10 text-center shadow-[0_24px_80px_-56px_rgba(15,23,42,0.35)]">
           <img
             src={APP_ICON_PATH}
@@ -13932,7 +14023,11 @@ export function CodexMobileApp() {
 
   if (!authStatus?.authenticated) {
     return (
-      <div className={cn('code-ai-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
+      <div
+        data-theme-preset={themePresetId}
+        className={cn('code-ai-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}
+        style={lightThemeShellStyle}
+      >
         <div className="w-full max-w-lg rounded-[28px] border border-slate-100 bg-white p-8 text-center shadow-[0_24px_80px_-56px_rgba(15,23,42,0.35)]">
           <img
             src={APP_ICON_PATH}
@@ -13989,7 +14084,11 @@ export function CodexMobileApp() {
 
   if (authStatus.deviceUnlocked === false) {
     return (
-      <div className={cn('code-ai-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
+      <div
+        data-theme-preset={themePresetId}
+        className={cn('code-ai-theme flex h-dvh items-center justify-center px-6 font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}
+        style={lightThemeShellStyle}
+      >
         <div className="w-full max-w-md rounded-[28px] border border-slate-100 bg-white p-8 text-center shadow-[0_24px_80px_-56px_rgba(15,23,42,0.35)]">
           <img
             src={APPLE_TOUCH_ICON_PATH}
@@ -14094,12 +14193,18 @@ export function CodexMobileApp() {
       onDeleteSessionPermanently={(session) => setPendingPermanentDeleteSession(session)}
       onSelectSession={handleSelectConversation}
       themeMode={themeMode}
+      themePresetId={themePresetId}
       onThemeModeChange={setThemeMode}
+      onThemePresetChange={setThemePresetId}
     />
   );
 
   return (
-    <div className={cn('code-ai-theme h-dvh w-full overflow-hidden font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}>
+    <div
+      data-theme-preset={themePresetId}
+      className={cn('code-ai-theme h-dvh w-full overflow-hidden font-sans', themeClassName, themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-[#FAFAFA] text-slate-800')}
+      style={lightThemeShellStyle}
+    >
       <input
         ref={fileInputRef}
         type="file"
