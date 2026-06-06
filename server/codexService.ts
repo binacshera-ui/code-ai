@@ -2711,6 +2711,7 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
     env,
     encoding: 'utf-8',
     maxBuffer: 12 * 1024 * 1024,
+    windowsHide: true,
   });
 
   let result = runModelCatalogCommand(buildCodexProcessEnv(profile));
@@ -3084,6 +3085,7 @@ export async function runCodexPrompt(
         cwd: runCwd,
         env: buildCodexProcessEnv(profile),
         stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
       });
       const activeRunId = options.runId;
 

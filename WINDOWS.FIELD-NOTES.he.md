@@ -249,3 +249,16 @@ npx pm2 logs code-ai
 6. רק אחרי שכל זה תקין, לחבר את הכול ל־PM2 ולשמור state.
 
 זה בדרך כלל חוסך את רוב הבעיות שמרגישות כמו "באג באפליקציה", אבל בפועל הן בעיות סביבה של Windows.
+
+## 9. Repository-level Windows fixes
+
+These are code changes that proved necessary on real Windows deployments and should be re-applied after upstream updates:
+
+- `windowsHide: true` on CLI child-process launches for `codex`, `claude`, and `gemini`, so opening the app does not flash a visible `cmd.exe` window.
+- `windowsHide: true` on `git` child-process calls used by session-change tracking, because those calls can also flash a console window on Windows.
+- Lazy loading of the model catalog in the UI. The app should not call the model-catalog endpoint automatically on first render; it should load models only when the user opens the model or reasoning picker.
+- Case-insensitive and normalized path matching for session topics on Windows. A topic stored under `C:\...` must still match a session reported as `c:\...`.
+- Topic deduplication by normalized identity `(profileId, cwd, name, icon, colorKey)` so the same logical topic is not created twice because Windows reported the same folder with a slightly different path spelling.
+- Keep the public entrypoint stable through a dedicated port-80 proxy process if the tunnel or reverse proxy already targets `localhost:80` while the app itself listens on `4000`.
+
+When updating the repository from upstream on Windows, these patches should be re-applied and re-verified before considering the deployment healthy.

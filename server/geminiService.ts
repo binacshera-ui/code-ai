@@ -1854,6 +1854,7 @@ export async function runGeminiPrompt(
           cwd: runCwd,
           env,
           stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
         });
 
         if (activeRunId) {

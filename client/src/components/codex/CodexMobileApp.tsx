@@ -13429,9 +13429,29 @@ export function CodexMobileApp() {
       return;
     }
 
-    void loadModelCatalog(profileId);
+    setAvailableModels([]);
+    setModelPermissionSnapshot(null);
+    setModelResponseSpeedSnapshot(null);
+    setSelectedModelSlug(null);
+    setSelectedReasoningEffort(null);
+  }, [profileId]);
+
+  useEffect(() => {
+    if (!profileId) {
+      setRateLimitSnapshot(null);
+      return;
+    }
+
     void loadRateLimitSnapshot(profileId, selectedSessionId);
   }, [profileId, selectedSessionId]);
+
+  useEffect(() => {
+    if (!profileId || (!isModelPickerOpen && !isReasoningPickerOpen)) {
+      return;
+    }
+
+    void loadModelCatalog(profileId);
+  }, [isModelPickerOpen, isReasoningPickerOpen, profileId]);
 
   useEffect(() => {
     writeWorkspaceMode(workspaceMode);

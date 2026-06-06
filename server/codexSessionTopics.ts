@@ -43,8 +43,67 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function normalizeTopicCwd(value: string): string {
+  const normalized = path.normalize(path.resolve(value));
+  return process.platform === 'win32'
+    ? normalized.toLowerCase()
+    : normalized;
+}
+
+function topicBelongsToCwd(topicCwd: string, cwd: string): boolean {
+  return normalizeTopicCwd(topicCwd) === normalizeTopicCwd(cwd);
+}
+
+function normalizeTopicIdentityName(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function buildTopicIdentity(topic: Pick<CodexSessionTopic, 'profileId' | 'cwd' | 'name' | 'icon' | 'colorKey'>): string {
+  return [
+    topic.profileId,
+    normalizeTopicCwd(topic.cwd),
+    normalizeTopicIdentityName(topic.name),
+    topic.icon.trim(),
+    topic.colorKey.trim().toLowerCase(),
+  ].join('::');
+}
+
 function cloneTopic(topic: CodexSessionTopic): CodexSessionTopic {
   return { ...topic };
+}
+
+function dedupeTopicState(currentState: CodexSessionTopicsState): CodexSessionTopicsState {
+  const seen = new Map<string, CodexSessionTopic>();
+  const reassignedTopicIds = new Map<string, string>();
+  const dedupedTopics: CodexSessionTopic[] = [];
+
+  for (const topic of currentState.topics) {
+    const key = buildTopicIdentity(topic);
+    const existing = seen.get(key);
+    if (existing) {
+      reassignedTopicIds.set(topic.id, existing.id);
+      continue;
+    }
+
+    seen.set(key, topic);
+    dedupedTopics.push(topic);
+  }
+
+  if (reassignedTopicIds.size === 0) {
+    return currentState;
+  }
+
+  const dedupedAssignments = Object.fromEntries(
+    Object.entries(currentState.assignments).map(([assignmentKey, topicId]) => [
+      assignmentKey,
+      reassignedTopicIds.get(topicId) || topicId,
+    ])
+  );
+
+  return {
+    topics: dedupedTopics,
+    assignments: dedupedAssignments,
+  };
 }
 
 function countAssignedSessions(profileId: string, topicId: string): number {
@@ -86,6 +145,7 @@ async function loadState() {
         ? parsed.assignments as Record<string, string>
         : {},
     };
+    state = dedupeTopicState(state);
   } catch (error: any) {
     if (error?.code !== 'ENOENT') {
       throw error;
@@ -135,7 +195,7 @@ function normalizeColorKey(value: string): string {
 export async function listSessionTopics(profileId: string, cwd: string): Promise<CodexSessionTopic[]> {
   await ensureStateLoaded();
   return state.topics
-    .filter((topic) => topic.profileId === profileId && topic.cwd === cwd)
+    .filter((topic) => topic.profileId === profileId && topicBelongsToCwd(topic.cwd, cwd))
     .sort((left, right) => left.name.localeCompare(right.name, 'he'))
     .map((topic) => ({
       ...cloneTopic(topic),
@@ -153,21 +213,42 @@ export async function createSessionTopic(
   }
 ): Promise<CodexSessionTopic> {
   await ensureStateLoaded();
+  const normalizedName = normalizeName(input.name);
+  const normalizedIcon = normalizeIcon(input.icon);
+  const normalizedColorKey = normalizeColorKey(input.colorKey);
+
+  const existingTopic = state.topics.find((candidate) => (
+    candidate.profileId === profileId
+    && topicBelongsToCwd(candidate.cwd, cwd)
+    && normalizeTopicIdentityName(candidate.name) === normalizedName
+    && candidate.icon.trim() === normalizedIcon
+    && candidate.colorKey.trim().toLowerCase() === normalizedColorKey
+  ));
+
+  if (existingTopic) {
+    return {
+      ...cloneTopic(existingTopic),
+      assignedSessionCount: countAssignedSessions(profileId, existingTopic.id),
+    };
+  }
 
   const topic: CodexSessionTopic = {
     id: randomUUID(),
     profileId,
-    cwd,
-    name: normalizeName(input.name),
-    icon: normalizeIcon(input.icon),
-    colorKey: normalizeColorKey(input.colorKey),
+    cwd: path.normalize(path.resolve(cwd)),
+    name: normalizedName,
+    icon: normalizedIcon,
+    colorKey: normalizedColorKey,
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };
 
   state.topics.push(topic);
   await persistState();
-  return cloneTopic(topic);
+  return {
+    ...cloneTopic(topic),
+    assignedSessionCount: countAssignedSessions(profileId, topic.id),
+  };
 }
 
 export async function setSessionTopic(
@@ -193,13 +274,16 @@ export async function setSessionTopic(
     throw new Error('Topic was not found');
   }
 
-  if (cwd && topic.cwd !== cwd) {
+  if (cwd && !topicBelongsToCwd(topic.cwd, cwd)) {
     throw new Error('Topic does not belong to this folder');
   }
 
   state.assignments[`${profileId}:${sessionId}`] = topic.id;
   await persistState();
-  return cloneTopic(topic);
+  return {
+    ...cloneTopic(topic),
+    assignedSessionCount: countAssignedSessions(profileId, topic.id),
+  };
 }
 
 export async function getSessionTopicMap(profileId: string): Promise<Record<string, CodexSessionTopic>> {

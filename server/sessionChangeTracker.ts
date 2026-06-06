@@ -150,6 +150,7 @@ function runGit(
     cwd: options.cwd || repoRoot,
     encoding: options.encoding || 'utf8',
     maxBuffer: 16 * 1024 * 1024,
+    windowsHide: true,
   });
 
   if (result.error && !options.allowFailure) {
@@ -175,6 +176,7 @@ function resolveGitRepoRoot(cwd: string): string | null {
     cwd,
     encoding: 'utf8',
     maxBuffer: 1024 * 1024,
+    windowsHide: true,
   });
 
   if (result.status !== 0) {
@@ -414,6 +416,7 @@ function buildNoIndexDiff(
     {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
+      windowsHide: true,
     }
   );
   const diffText = typeof result.stdout === 'string'
