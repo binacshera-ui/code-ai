@@ -1480,65 +1480,363 @@ function resolveToolPayloadView(
   };
 }
 
-function buildToolDetailSections(entry: CodexTimelineEntry): Array<{
+type ToolDetailSection = {
   id: string;
+  role: 'input' | 'output' | 'legacy';
   mode: 'terminal' | 'code';
   label: string;
+  helper: string;
   badge: string;
   code: string;
   language: string | null;
-}> {
+  parsedJson: unknown | null;
+};
+
+const TOOL_FIELD_HELPERS: Record<string, string> = {
+  command: 'הפקודה שהמודל שלח להרצה ב-shell.',
+  cmd: 'שם הפקודה או הפקודה המלאה שנשלחה לכלי.',
+  cwd: 'תיקיית העבודה שבה הכלי רץ.',
+  path: 'נתיב בודד שאליו הכלי פנה.',
+  paths: 'רשימת נתיבים שהכלי קרא או עדכן.',
+  file: 'קובץ יחיד שהכלי קיבל או החזיר.',
+  files: 'קבצים שהכלי קיבל או החזיר.',
+  input: 'קלט גולמי שנשלח לכלי.',
+  output: 'פלט גולמי שהכלי החזיר.',
+  stdout: 'פלט רגיל של התהליך.',
+  stderr: 'פלט שגיאה של התהליך.',
+  status: 'מצב הפעולה כפי שהכלי דיווח.',
+  exit_code: 'קוד היציאה של תהליך shell: 0 בדרך כלל אומר הצלחה.',
+  exitCode: 'קוד היציאה של תהליך shell: 0 בדרך כלל אומר הצלחה.',
+  args: 'ארגומנטים שנשלחו לכלי.',
+  parameters: 'אובייקט הפרמטרים שנשלח לקריאה.',
+  q: 'מחרוזת חיפוש בודדת.',
+  query: 'מונח החיפוש או הבקשה שנשלחה לשירות.',
+  url: 'כתובת יעד יחידה.',
+  urls: 'רשימת כתובות יעד.',
+  model: 'המודל שבו הקריאה רצה.',
+  reasoningEffort: 'רמת החשיבה או העומק שנבחרו לקריאה.',
+  reasoning_effort: 'רמת החשיבה או העומק שנבחרו לקריאה.',
+  responseSpeed: 'מצב מהירות התגובה שנבחר לקריאה.',
+  input_tokens: 'מספר טוקני הקלט שהכלי או השירות דיווחו עליהם.',
+  output_tokens: 'מספר טוקני הפלט שהכלי או השירות דיווחו עליהם.',
+  total_tokens: 'סך הטוקנים שנצרכו בקריאה.',
+  cached_input_tokens: 'טוקני קלט שנקראו מה־cache במקום לחשב מחדש.',
+  tool_uses: 'רשימת כלים או סוכנים שהורצו באופן מקביל.',
+  recipient_name: 'שם הכלי שאליו נשלחה הקריאה.',
+  sessionId: 'מזהה הסשן שהכלי קיבל או החזיר.',
+  session_id: 'מזהה הסשן שהכלי קיבל או החזיר.',
+};
+
+function resolveToolSectionHelper(displayKind: ToolDisplayKind, role: ToolDetailSection['role']): string {
+  if (role === 'legacy') {
+    return 'זהו תיעוד ישן של הכלי שלא הופרד לקלט ופלט. מוצג כאן במלואו כמו שנשמר.';
+  }
+
+  if (role === 'input') {
+    if (displayKind === 'terminal') {
+      return 'זה בדיוק הטקסט שהמודל שלח להרצה. בדרך כלל זו פקודת shell מלאה או JSON שמכיל את הפקודה.';
+    }
+    if (displayKind === 'web') {
+      return 'אלה הפרמטרים שנשלחו לחיפוש או לטעינת מידע חיצוני.';
+    }
+    if (displayKind === 'agent') {
+      return 'זהו מטען הקריאה שנשלח לסוכן משנה או להרצה מקבילית.';
+    }
+    if (displayKind === 'patch') {
+      return 'זהו הקלט שנשלח לכלי עריכת הקבצים, לפני שהמערכת יישמה את השינויים.';
+    }
+    return 'זהו הקלט שהמודל שלח לכלי לפני שהכלי התחיל לפעול.';
+  }
+
+  if (displayKind === 'thinking') {
+    return 'זהו trace שהכלי או המודל שמרו במהלך reasoning או בזמן בדיקה פנימית.';
+  }
+  if (displayKind === 'terminal') {
+    return 'זהו הפלט המלא של ההרצה: stdout, stderr או טקסט מסכם שהכלי שמר עבור ההרצה.';
+  }
+  if (displayKind === 'patch') {
+    return 'זהו הפלט שהוחזר מכלי העריכה, כולל diff או סטטוס של השינוי שבוצע.';
+  }
+  return 'זהו הפלט המלא שהכלי החזיר אחרי סיום הפעולה.';
+}
+
+function normalizeToolFieldKey(rawKey: string): string {
+  return rawKey.replace(/\[\d+\]/g, '').trim();
+}
+
+function resolveToolFieldHelper(fieldPath: string): string | null {
+  const normalized = normalizeToolFieldKey(fieldPath);
+  return TOOL_FIELD_HELPERS[normalized] || null;
+}
+
+function resolveToolPurpose(entry: CodexTimelineEntry, displayKind: ToolDisplayKind): string {
+  const toolName = (entry.toolName || '').toLowerCase();
+  if (toolName === 'exec_command' || toolName.includes('exec_command')) {
+    return 'הרצת פקודת shell בתוך סביבת העבודה.';
+  }
+  if (toolName === 'apply_patch') {
+    return 'יישום patch או diff על קבצים בדיסק.';
+  }
+  if (toolName.startsWith('web.') || toolName.includes('search')) {
+    return 'שליפת מידע מהרשת או חיפוש מקורות חיצוניים.';
+  }
+  if (toolName.includes('spawn_agent') || toolName.includes('wait_agent') || toolName.includes('parallel')) {
+    return 'תיאום סוכנים נוספים או הרצה מקבילית של תתי־משימות.';
+  }
+  if (displayKind === 'thinking') {
+    return 'תיעוד reasoning או trace פנימי שהמודל שמר כחלק מהסשן.';
+  }
+  if (displayKind === 'image') {
+    return 'הפעלת כלי עיצוב, יצירת תמונה או עריכת מדיה.';
+  }
+  if (displayKind === 'file') {
+    return 'קריאה, טעינה או בדיקה של קבצים ומשאבים.';
+  }
+  return 'קריאת כלי כללית מתוך ה־provider או מתוך החיבורים המקומיים של המערכת.';
+}
+
+function isScalarToolValue(value: unknown): value is string | number | boolean | null {
+  return value === null || ['string', 'number', 'boolean'].includes(typeof value);
+}
+
+function formatToolScalarValue(value: string | number | boolean | null): string {
+  if (value === null) {
+    return 'null';
+  }
+  return String(value);
+}
+
+function buildToolDetailSections(entry: CodexTimelineEntry): ToolDetailSection[] {
   const displayKind = classifyToolEntry(entry);
-  const sections: Array<{
-    id: string;
-    mode: 'terminal' | 'code';
-    label: string;
-    badge: string;
-    code: string;
-    language: string | null;
-  }> = [];
+  const sections: ToolDetailSection[] = [];
 
   const inputText = entry.toolInputText?.trim() || '';
   const outputText = entry.toolOutputText?.trim() || '';
   const fallbackText = entry.text?.trim() || '';
 
   if (inputText) {
+    const resolved = resolveToolPayloadView(
+      inputText,
+      entry.toolInputLanguage,
+      displayKind === 'terminal' ? 'פקודה שנשלחה' : 'נשלח לכלי',
+      displayKind
+    );
     sections.push({
       id: `${entry.id}-input`,
-      ...resolveToolPayloadView(
-        inputText,
-        entry.toolInputLanguage,
-        displayKind === 'terminal' ? 'פקודה שנשלחה' : 'נשלח לכלי',
-        displayKind
-      ),
+      role: 'input',
+      helper: resolveToolSectionHelper(displayKind, 'input'),
+      parsedJson: resolved.language === 'json' ? tryParseToolJson(resolved.code) : null,
+      ...resolved,
     });
   }
 
   if (outputText) {
+    const resolved = resolveToolPayloadView(
+      outputText,
+      entry.toolOutputLanguage,
+      displayKind === 'thinking' ? 'Trace שנשמר' : 'הוחזר מהכלי',
+      displayKind
+    );
     sections.push({
       id: `${entry.id}-output`,
-      ...resolveToolPayloadView(
-        outputText,
-        entry.toolOutputLanguage,
-        displayKind === 'thinking' ? 'Trace שנשמר' : 'הוחזר מהכלי',
-        displayKind
-      ),
+      role: 'output',
+      helper: resolveToolSectionHelper(displayKind, 'output'),
+      parsedJson: resolved.language === 'json' ? tryParseToolJson(resolved.code) : null,
+      ...resolved,
     });
   }
 
   if (sections.length === 0 && fallbackText) {
+    const resolved = resolveToolPayloadView(
+      fallbackText,
+      null,
+      displayKind === 'terminal' ? 'פלט כלי' : displayKind === 'thinking' ? 'Reasoning trace' : 'פרטי הכלי',
+      displayKind
+    );
     sections.push({
       id: `${entry.id}-legacy`,
-      ...resolveToolPayloadView(
-        fallbackText,
-        null,
-        displayKind === 'terminal' ? 'פלט כלי' : displayKind === 'thinking' ? 'Reasoning trace' : 'פרטי הכלי',
-        displayKind
-      ),
+      role: 'legacy',
+      helper: resolveToolSectionHelper(displayKind, 'legacy'),
+      parsedJson: resolved.language === 'json' ? tryParseToolJson(resolved.code) : null,
+      ...resolved,
     });
   }
 
   return sections;
+}
+
+function buildToolMetaRows(entry: CodexTimelineEntry, sections: ToolDetailSection[]): Array<{
+  id: string;
+  label: string;
+  value: string;
+  help: string;
+  dir?: 'ltr' | 'rtl' | 'auto';
+}> {
+  const rows: Array<{
+    id: string;
+    label: string;
+    value: string;
+    help: string;
+    dir?: 'ltr' | 'rtl' | 'auto';
+  }> = [];
+  const inputSection = sections.find((section) => section.role === 'input');
+  const outputSection = sections.find((section) => section.role === 'output');
+  const purpose = resolveToolPurpose(entry, classifyToolEntry(entry));
+
+  rows.push({
+    id: 'tool',
+    label: 'כלי',
+    value: entry.title || entry.toolName || 'Tool',
+    help: purpose,
+    dir: 'ltr',
+  });
+
+  if (entry.toolName) {
+    rows.push({
+      id: 'tool-name',
+      label: 'Tool ID',
+      value: entry.toolName,
+      help: 'המזהה הטכני של הכלי כפי שה־provider דיווח עליו.',
+      dir: 'ltr',
+    });
+  }
+
+  if (entry.status) {
+    rows.push({
+      id: 'status',
+      label: 'סטטוס',
+      value: entry.status,
+      help: 'מצב הקריאה האחרונה: queued, running, completed או failed לפי מה שנשמר מה־provider.',
+      dir: 'ltr',
+    });
+  }
+
+  if (entry.exitCode !== null && entry.exitCode !== undefined) {
+    rows.push({
+      id: 'exit-code',
+      label: 'Exit Code',
+      value: String(entry.exitCode),
+      help: 'קוד יציאה של תהליך shell. בדרך כלל 0 אומר הצלחה.',
+      dir: 'ltr',
+    });
+  }
+
+  if (entry.callId) {
+    rows.push({
+      id: 'call-id',
+      label: 'Call ID',
+      value: entry.callId,
+      help: 'מזהה הקריאה המקושר בין שליחת הכלי לבין התוצאה שחזרה ממנו.',
+      dir: 'ltr',
+    });
+  }
+
+  if (inputSection) {
+    rows.push({
+      id: 'input-format',
+      label: 'פורמט קלט',
+      value: inputSection.language || inputSection.badge,
+      help: 'הפורמט שבו נשמר הקלט שנשלח לכלי.',
+      dir: 'ltr',
+    });
+    rows.push({
+      id: 'input-length',
+      label: 'אורך קלט',
+      value: `${inputSection.code.length.toLocaleString('en-US')} chars`,
+      help: 'כמה תווים נשמרו מהקלט. כאן אמור להופיע התוכן המלא בלי חיתוך.',
+      dir: 'ltr',
+    });
+  }
+
+  if (outputSection) {
+    rows.push({
+      id: 'output-format',
+      label: 'פורמט פלט',
+      value: outputSection.language || outputSection.badge,
+      help: 'הפורמט שבו נשמר הפלט שהכלי החזיר.',
+      dir: 'ltr',
+    });
+    rows.push({
+      id: 'output-length',
+      label: 'אורך פלט',
+      value: `${outputSection.code.length.toLocaleString('en-US')} chars`,
+      help: 'כמה תווים נשמרו מהפלט. כאן אמור להופיע התוכן המלא בלי חיתוך.',
+      dir: 'ltr',
+    });
+  }
+
+  return rows;
+}
+
+function ToolJsonInspector({
+  value,
+  depth = 0,
+  path = '',
+}: {
+  value: unknown;
+  depth?: number;
+  path?: string;
+}) {
+  if (isScalarToolValue(value)) {
+    const helper = path ? resolveToolFieldHelper(path) : null;
+    return (
+      <div className="rounded-[1rem] border border-slate-200 bg-slate-50/80 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {path ? (
+            <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+              {path}
+            </span>
+          ) : null}
+          <span dir="ltr" className="text-sm font-medium text-slate-800 [overflow-wrap:anywhere]">
+            {formatToolScalarValue(value)}
+          </span>
+        </div>
+        {helper ? <div className="mt-1 text-[12px] leading-5 text-slate-500">{helper}</div> : null}
+      </div>
+    );
+  }
+
+  const entries = Array.isArray(value)
+    ? value.map((item, index) => [String(index), item] as const)
+    : Object.entries(value as Record<string, unknown>);
+
+  return (
+    <div className="space-y-3">
+      {entries.map(([key, child]) => {
+        const childPath = path ? `${path}.${key}` : key;
+        const helper = resolveToolFieldHelper(childPath);
+        const isScalar = isScalarToolValue(child);
+        return (
+          <div
+            key={childPath}
+            className="rounded-[1.1rem] border border-slate-200 bg-white/90 px-3 py-3 shadow-[0_8px_24px_-22px_rgba(15,23,42,0.38)]"
+            style={{ marginInlineStart: depth * 12 }}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+                    {Array.isArray(value) ? `item ${key}` : key}
+                  </span>
+                  <span className="text-[11px] text-slate-400">{Array.isArray(child) ? 'Array' : typeof child}</span>
+                </div>
+                {helper ? <div className="mt-1 text-[12px] leading-5 text-slate-500">{helper}</div> : null}
+              </div>
+              {isScalar ? (
+                <div
+                  dir="ltr"
+                  className="min-w-0 max-w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800 [overflow-wrap:anywhere]"
+                >
+                  {formatToolScalarValue(child)}
+                </div>
+              ) : null}
+            </div>
+            {!isScalar ? <div className="mt-3"><ToolJsonInspector value={child} depth={depth + 1} path={childPath} /></div> : null}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function buildToolCopyText(entry: CodexTimelineEntry): string {
@@ -1600,6 +1898,7 @@ function ToolDetailViewer({
   entry: CodexTimelineEntry;
 }) {
   const sections = buildToolDetailSections(entry);
+  const metaRows = buildToolMetaRows(entry, sections);
 
   if (sections.length === 0) {
     return <div className="text-sm text-slate-500">אין פלט נוסף לכלי הזה.</div>;
@@ -1607,47 +1906,76 @@ function ToolDetailViewer({
 
   return (
     <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-2">
+        {metaRows.map((row) => (
+          <div
+            key={row.id}
+            className="rounded-[1.3rem] border border-slate-200 bg-slate-50/80 px-4 py-3 shadow-[0_10px_30px_-24px_rgba(15,23,42,0.32)]"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-slate-800">{row.label}</div>
+              <div
+                dir={row.dir || 'auto'}
+                className="min-w-0 max-w-[70%] text-left text-sm font-medium text-slate-900 [overflow-wrap:anywhere]"
+              >
+                {row.value}
+              </div>
+            </div>
+            <div className="mt-2 text-[12px] leading-5 text-slate-500">{row.help}</div>
+          </div>
+        ))}
+      </div>
       {sections.map((section) => (
         <div
           key={section.id}
           className={cn(
-            'overflow-hidden rounded-[1.5rem] border shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]',
-            section.mode === 'terminal' ? 'border-slate-800 bg-slate-950' : 'border-slate-200 bg-slate-950'
+            'overflow-hidden rounded-[1.5rem] border bg-white shadow-[0_18px_40px_-28px_rgba(15,23,42,0.38)]',
+            section.mode === 'terminal' ? 'border-slate-200' : 'border-slate-200'
           )}
         >
-          <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
-            <div className="flex items-center gap-2">
-              <span className={cn('h-2.5 w-2.5 rounded-full', section.mode === 'terminal' ? 'bg-rose-400/90' : 'bg-sky-400/90')} />
-              <span className={cn('h-2.5 w-2.5 rounded-full', section.mode === 'terminal' ? 'bg-amber-300/90' : 'bg-violet-400/90')} />
-              <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/90" />
+          <div className="border-b border-slate-200 px-4 py-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className={cn('h-2.5 w-2.5 rounded-full', section.mode === 'terminal' ? 'bg-rose-400/90' : 'bg-sky-400/90')} />
+                <span className={cn('h-2.5 w-2.5 rounded-full', section.mode === 'terminal' ? 'bg-amber-300/90' : 'bg-violet-400/90')} />
+                <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/90" />
+              </div>
+              <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
+                <span
+                  dir="ltr"
+                  className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-semibold text-slate-600"
+                >
+                  {section.badge}
+                </span>
+                <span>{section.label}</span>
+              </div>
             </div>
-            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
-              <span
-                dir="ltr"
-                className={cn(
-                  'rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-semibold',
-                  section.mode === 'terminal' ? 'text-slate-300' : 'text-slate-200'
-                )}
-              >
-                {section.badge}
-              </span>
-              <span>{section.label}</span>
+            <div className="mt-3 text-[13px] leading-6 text-slate-500">{section.helper}</div>
+          </div>
+          {section.parsedJson !== null ? (
+            <div className="space-y-4 border-b border-slate-200 bg-slate-50/70 px-4 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-semibold text-slate-800">שדות מזוהים</div>
+                <div className="text-[12px] text-slate-400">תצוגה מוסברת של ה־JSON שנשלח או חזר</div>
+              </div>
+              <div dir="ltr" className="text-left">
+                <ToolJsonInspector value={section.parsedJson} />
+              </div>
+            </div>
+          ) : null}
+          <div className="bg-slate-950/98">
+            <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+              <div className="text-sm font-semibold text-slate-100">תצוגה גולמית מלאה</div>
+              <div className="text-[12px] text-slate-400">הטקסט כפי שנשמר אצלנו, ללא חיתוך UI</div>
+            </div>
+            <div dir="ltr" className="text-left">
+              <CodexCodeBlock
+                code={section.code}
+                language={section.language}
+                className="my-0 rounded-none border-0 shadow-none"
+              />
             </div>
           </div>
-          {section.mode === 'terminal' ? (
-            <pre
-              dir="ltr"
-              className="max-h-[34dvh] overflow-x-auto overflow-y-auto px-4 py-4 font-mono text-[12px] leading-6 text-slate-100"
-            >
-              <code className="block min-w-max whitespace-pre">{section.code}</code>
-            </pre>
-          ) : (
-            <CodexCodeBlock
-              code={section.code}
-              language={section.language}
-              className="max-h-[34dvh] overflow-x-auto overflow-y-auto rounded-none border-0 shadow-none"
-            />
-          )}
         </div>
       ))}
     </div>

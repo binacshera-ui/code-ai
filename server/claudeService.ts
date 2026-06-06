@@ -118,6 +118,8 @@ interface ClaudeRuntimeState {
   modelContextWindows: Record<string, number>;
 }
 
+const MAX_TOOL_TEXT = 200_000;
+
 interface ClaudeRunResult {
   sessionId: string;
   finalMessage: string;
@@ -238,7 +240,7 @@ function trimPreview(text: string, limit = 180): string {
   return `${normalized.slice(0, limit - 1).trimEnd()}…`;
 }
 
-function clipLongText(text: string, limit = 12_000): string {
+function clipLongText(text: string, limit = MAX_TOOL_TEXT): string {
   const normalized = text.trim();
   if (normalized.length <= limit) {
     return normalized;
@@ -1244,7 +1246,7 @@ async function parseClaudeSessionFile(filePath: string, sessionId: string): Prom
             const callId = normalizeString(part.tool_use_id);
             const toolName = callId ? knownToolCalls.get(callId) || 'tool' : 'tool';
             const resultText = extractToolResultText(part.content);
-            const clippedOutput = clipLongText(resultText || 'Tool completed without textual output.', 4000);
+            const clippedOutput = clipLongText(resultText || 'Tool completed without textual output.', MAX_TOOL_TEXT);
             const mergedEntry = findLastToolTimelineEntry(
               timeline,
               (entry) => entry.callId === callId && entry.toolName === toolName
@@ -1317,11 +1319,11 @@ async function parseClaudeSessionFile(filePath: string, sessionId: string): Prom
               toolName,
               title: summarizeToolName(toolName),
               subtitle: summarizeToolInput(toolName, part.input),
-              text: clipLongText(JSON.stringify(part.input || {}, null, 2), 2000),
+              text: clipLongText(JSON.stringify(part.input || {}, null, 2), MAX_TOOL_TEXT),
               callId,
               status: 'queued',
               exitCode: null,
-              toolInputText: clipLongText(JSON.stringify(part.input || {}, null, 2), 2000),
+              toolInputText: clipLongText(JSON.stringify(part.input || {}, null, 2), MAX_TOOL_TEXT),
               toolInputLanguage: 'json',
             });
             continue;

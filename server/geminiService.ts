@@ -120,7 +120,7 @@ function resolveGeminiBinary(): string {
 
 const GEMINI_BIN = resolveGeminiBinary();
 const MAX_SESSIONS = 500;
-const MAX_TOOL_TEXT = 12_000;
+const MAX_TOOL_TEXT = 200_000;
 const GEMINI_RUNTIME_STATE_FILE = path.join(CODEX_APP_CONFIG.queueRoot, 'gemini-runtime-state.json');
 const GEMINI_MODEL_CACHE_TTL_MS = 60_000;
 const SUPPORTED_REASONING_LEVELS: CodexReasoningLevelOption[] = [
@@ -888,7 +888,7 @@ function parseGeminiSessionRows(messages: any[], sessionId: string): ParsedGemin
         toolName: 'thinking',
         title: 'Thinking',
         subtitle: 'Gemini reasoning trace',
-        text: clipLongText(thoughtText, 5000),
+        text: clipLongText(thoughtText, MAX_TOOL_TEXT),
         status: 'completed',
         exitCode: null,
         callId: null,
@@ -900,8 +900,8 @@ function parseGeminiSessionRows(messages: any[], sessionId: string): ParsedGemin
       const toolName = normalizeString(toolCall?.name) || 'tool';
       const callId = normalizeString(toolCall?.id);
       const resultText = extractGeminiToolResultText(toolCall?.result);
-      const inputText = clipLongText(JSON.stringify(toolCall?.args || {}, null, 2), 5000);
-      const outputText = clipLongText(resultText || 'Tool completed without textual output.', 5000);
+      const inputText = clipLongText(JSON.stringify(toolCall?.args || {}, null, 2), MAX_TOOL_TEXT);
+      const outputText = clipLongText(resultText || 'Tool completed without textual output.', MAX_TOOL_TEXT);
       timeline.push({
         id: `${callId || normalizeString(row?.id) || sessionId}-tool-${timeline.length}`,
         entryType: 'tool',

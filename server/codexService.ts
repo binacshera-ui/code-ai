@@ -391,7 +391,7 @@ interface ActiveCodexRun {
 const CODEX_BIN = process.env.CODEX_BIN || 'codex';
 const DEFAULT_PROFILE_ID = CODEX_APP_CONFIG.defaultProfileId;
 const MAX_SESSIONS = 500;
-const MAX_TOOL_TEXT = 12_000;
+const MAX_TOOL_TEXT = 200_000;
 export const CODEX_UPLOAD_ROOT = CODEX_APP_CONFIG.uploadRoot;
 const QUEUE_STATE_FILE = path.join(CODEX_APP_CONFIG.queueRoot, 'state.json');
 
@@ -1821,12 +1821,14 @@ async function parseSessionFile(
             timeline,
             (entry) => entry.callId === callId && entry.toolName === 'exec_command'
           );
+          const fullCommandText = clipLongText(String(payload.command || ''), MAX_TOOL_TEXT);
           const clippedOutput = clipLongText(outputText || 'No terminal output.');
 
           if (mergedEntry) {
             mergedEntry.timestamp = timestamp;
             mergedEntry.title = 'Terminal';
             mergedEntry.subtitle = summarizeCommand(payload.command) || payload.cwd || mergedEntry.subtitle || null;
+            mergedEntry.toolInputText = fullCommandText || mergedEntry.toolInputText || null;
             mergedEntry.toolInputLanguage = mergedEntry.toolInputLanguage || 'bash';
             mergedEntry.toolOutputText = clippedOutput;
             mergedEntry.toolOutputLanguage = null;
@@ -1845,7 +1847,7 @@ async function parseSessionFile(
               callId,
               status: payload.status || null,
               exitCode,
-              toolInputText: summarizeCommand(payload.command) || null,
+              toolInputText: fullCommandText || summarizeCommand(payload.command) || null,
               toolInputLanguage: 'bash',
               toolOutputText: clippedOutput,
               toolOutputLanguage: null,
@@ -1949,7 +1951,7 @@ async function parseSessionFile(
         if (callId) {
           knownToolCalls.set(callId, toolName);
         }
-        const clippedInput = clipLongText(payload.arguments || '', 1000);
+        const clippedInput = clipLongText(payload.arguments || '', MAX_TOOL_TEXT);
 
         timeline.push({
           id: `${sessionId}-tool-call-${timeline.length}`,
@@ -1982,11 +1984,11 @@ async function parseSessionFile(
           toolName,
           title: summarizeToolName(toolName),
           subtitle: clipLongText(String(payload.status || 'Custom tool call'), 200),
-          text: clipLongText(String(payload.input || ''), 1000),
+          text: clipLongText(String(payload.input || ''), MAX_TOOL_TEXT),
           callId,
           status: payload.status || null,
           exitCode: null,
-          toolInputText: clipLongText(String(payload.input || ''), 1000),
+          toolInputText: clipLongText(String(payload.input || ''), MAX_TOOL_TEXT),
           toolInputLanguage: 'json',
         });
         continue;
@@ -1995,7 +1997,7 @@ async function parseSessionFile(
       if (responseType === 'custom_tool_call_output') {
         const callId = payload.call_id || null;
         const toolName = callId ? knownToolCalls.get(callId) || 'custom_tool' : 'custom_tool';
-        const clippedOutput = clipLongText(String(payload.output || ''), 4000);
+        const clippedOutput = clipLongText(String(payload.output || ''), MAX_TOOL_TEXT);
         const mergedEntry = findLastToolTimelineEntry(
           timeline,
           (entry) => entry.callId === callId && entry.toolName === toolName
@@ -2036,11 +2038,11 @@ async function parseSessionFile(
           toolName: 'web.search',
           title: 'Web Search',
           subtitle: payload.status || null,
-          text: clipLongText(actionText, 1000),
+          text: clipLongText(actionText, MAX_TOOL_TEXT),
           callId: null,
           status: payload.status || null,
           exitCode: null,
-          toolInputText: clipLongText(actionText, 1000),
+          toolInputText: clipLongText(actionText, MAX_TOOL_TEXT),
           toolInputLanguage: 'json',
         });
         continue;
@@ -2054,7 +2056,7 @@ async function parseSessionFile(
           continue;
         }
 
-        const clippedOutput = clipLongText(String(payload.output || ''), 4000);
+        const clippedOutput = clipLongText(String(payload.output || ''), MAX_TOOL_TEXT);
         const mergedEntry = findLastToolTimelineEntry(
           timeline,
           (entry) => entry.callId === callId && entry.toolName === toolName

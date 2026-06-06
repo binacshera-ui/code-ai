@@ -55,7 +55,7 @@ export const CodexCodeBlock = memo(function CodexCodeBlock({
     return (
       <code
         className={cn(
-          'rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[0.9em] text-slate-900',
+          'inline-flex max-w-full items-center rounded-xl border border-slate-200 bg-slate-50 px-2 py-0.5 font-sans text-[0.92em] font-medium text-slate-700 align-baseline',
           className
         )}
         dangerouslySetInnerHTML={{ __html: highlightedHtml }}
@@ -82,10 +82,13 @@ export const CodexCodeBlock = memo(function CodexCodeBlock({
         {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
         <span>{copied ? 'הועתק' : 'העתק'}</span>
       </button>
-      <pre className="overflow-x-auto rounded-[1.25rem] bg-slate-950 p-4 pt-12 text-right text-[13px] leading-6">
+      <pre
+        dir="ltr"
+        className="overflow-x-hidden overflow-y-auto rounded-[1.25rem] bg-slate-950 p-4 pt-12 text-left text-[13px] leading-6"
+      >
         <code
           dir="ltr"
-          className="hljs block min-w-full whitespace-pre font-mono text-slate-100"
+          className="hljs block whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-mono text-slate-100"
           dangerouslySetInnerHTML={{ __html: highlightedHtml }}
         />
       </pre>
