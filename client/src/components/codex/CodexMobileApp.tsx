@@ -1093,6 +1093,55 @@ function getSkillScopeLabel(scope: UnifiedSkillSummary['scope']): string {
   }
 }
 
+function normalizeClientPath(value: string): string {
+  const normalized = value.replace(/\\/g, '/').trim();
+  if (!normalized) {
+    return normalized;
+  }
+
+  if (normalized === '/') {
+    return '/';
+  }
+
+  return normalized.replace(/\/+$/, '');
+}
+
+function getClientPathCollectionRoot(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = normalizeClientPath(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const windowsDriveMatch = normalized.match(/^([A-Za-z]:)(?:\/(.*))?$/);
+  if (windowsDriveMatch) {
+    const drive = windowsDriveMatch[1];
+    const tail = windowsDriveMatch[2] || '';
+    const parts = tail.split('/').filter(Boolean);
+    if (parts.length >= 1) {
+      return `${drive}/${parts[0]}`;
+    }
+    return `${drive}/`;
+  }
+
+  if (!normalized.startsWith('/')) {
+    return normalized;
+  }
+
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length >= 2) {
+    return `/${parts[0]}/${parts[1]}`;
+  }
+  if (parts.length === 1) {
+    return `/${parts[0]}`;
+  }
+
+  return '/';
+}
+
 function readWorkspaceMode(): WorkspaceMode {
   if (typeof window === 'undefined') {
     return 'standard';
@@ -5010,6 +5059,7 @@ function FolderPickerDialog({
   onNavigateForward,
   onNavigateTo,
   onSelectCurrent,
+  onSelectFolder,
 }: {
   browser: CodexFolderBrowseResult | null;
   isLoading: boolean;
@@ -5024,6 +5074,7 @@ function FolderPickerDialog({
   onNavigateForward: () => void;
   onNavigateTo: (path: string) => void;
   onSelectCurrent: () => void;
+  onSelectFolder: (path: string) => void;
 }) {
   return (
     <div className="fixed inset-0 z-[75] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
@@ -5194,20 +5245,31 @@ function FolderPickerDialog({
                 </div>
               ) : (
                 browser.entries.map((entry) => (
-                  <button
+                  <div
                     key={entry.path}
-                    type="button"
-                    onClick={() => onNavigateTo(entry.path)}
-                    className="flex w-full items-center justify-between gap-3 rounded-[1.25rem] border border-slate-100 bg-white px-4 py-4 text-right shadow-sm transition-colors hover:bg-slate-50"
+                    className="flex items-center justify-between gap-3 rounded-[1.25rem] border border-slate-100 bg-white px-4 py-4 text-right shadow-sm"
                   >
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold text-slate-800">{entry.name}</div>
-                      <div className="mt-1 truncate text-xs text-slate-500" dir="ltr" title={entry.path}>
-                        {entry.path}
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTo(entry.path)}
+                      className="flex min-w-0 flex-1 items-center justify-between gap-3 text-right transition-colors hover:text-slate-900"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold text-slate-800">{entry.name}</div>
+                        <div className="mt-1 truncate text-xs text-slate-500" dir="ltr" title={entry.path}>
+                          {entry.path}
+                        </div>
                       </div>
-                    </div>
-                    <ChevronLeft className="h-4 w-4 shrink-0 text-slate-400" />
-                  </button>
+                      <ChevronLeft className="h-4 w-4 shrink-0 text-slate-400" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onSelectFolder(entry.path)}
+                      className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100"
+                    >
+                      בחר
+                    </button>
+                  </div>
                 ))
               )}
             </div>
@@ -6030,6 +6092,25 @@ function FileTreeDialog({
               </button>
             ))}
           </div>
+          {browser?.roots?.length ? (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {browser.roots.map((root) => (
+                <button
+                  key={root.path}
+                  type="button"
+                  onClick={() => onNavigateTo(root.path)}
+                  className={cn(
+                    'rounded-full px-3 py-1.5 text-xs transition',
+                    browser.rootPath === root.path
+                      ? 'bg-slate-900 text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  )}
+                >
+                  {root.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
@@ -11075,7 +11156,10 @@ export function CodexMobileApp() {
       return;
     }
 
-    const nextTargetPath = targetPath || effectiveDraftCwd || selectedSession?.cwd || currentProfile?.workspaceCwd || null;
+    const preferredLaunchPath = getClientPathCollectionRoot(
+      effectiveDraftCwd || selectedSession?.cwd || currentProfile?.workspaceCwd || null
+    );
+    const nextTargetPath = targetPath || preferredLaunchPath || effectiveDraftCwd || selectedSession?.cwd || currentProfile?.workspaceCwd || null;
     setIsFolderBrowserLoading(true);
     setFolderBrowserError(null);
 
@@ -11101,13 +11185,17 @@ export function CodexMobileApp() {
   }
 
   function openFolderPicker() {
+    const preferredLaunchPath = getClientPathCollectionRoot(
+      effectiveDraftCwd || selectedSession?.cwd || currentProfile?.workspaceCwd || null
+    );
     setIsFolderPickerOpen(true);
-    setFolderPathInput(effectiveDraftCwd || selectedSession?.cwd || currentProfile?.workspaceCwd || '');
-    void loadFolderPicker(undefined, { resetHistory: true });
+    setFolderPathInput(preferredLaunchPath || effectiveDraftCwd || selectedSession?.cwd || currentProfile?.workspaceCwd || '');
+    void loadFolderPicker(preferredLaunchPath, { resetHistory: true });
   }
 
   function handleChooseFolderFromSidebar() {
-    handleNewConversation(currentProfile?.workspaceCwd || selectedProfileWorkspaceCwd || null);
+    const preferredLaunchPath = getClientPathCollectionRoot(currentProfile?.workspaceCwd || selectedProfileWorkspaceCwd || null);
+    handleNewConversation(preferredLaunchPath || currentProfile?.workspaceCwd || selectedProfileWorkspaceCwd || null);
     setTimeout(() => {
       openFolderPicker();
     }, 0);
@@ -11199,6 +11287,9 @@ export function CodexMobileApp() {
   }
 
   function openFileTree() {
+    const preferredLaunchPath = activeComposerCwd
+      ? activeComposerCwd
+      : getClientPathCollectionRoot(currentProfile?.workspaceCwd || null) || currentProfile?.workspaceCwd || '';
     setIsHeaderActionsOpen(false);
     setIsSidebarOpen(false);
     setIsAdditionsMenuOpen(false);
@@ -11206,10 +11297,10 @@ export function CodexMobileApp() {
     setAnchorDraftTargetEntry(null);
     setIsFileTreeOpen(true);
     setFileTreeFilter('');
-    setFileTreePathInput(activeComposerCwd || currentProfile?.workspaceCwd || '');
+    setFileTreePathInput(preferredLaunchPath);
     setFileTreeNodes({});
     setFileTreeExpandedPaths({});
-    void loadFileTree(undefined, { replaceRoot: true, expandRoot: true });
+    void loadFileTree(preferredLaunchPath, { replaceRoot: true, expandRoot: true });
   }
 
   function openMiniGame() {
@@ -16390,6 +16481,7 @@ export function CodexMobileApp() {
           onNavigateBack={navigateFolderPickerBack}
           onNavigateForward={navigateFolderPickerForward}
           onNavigateTo={(path) => void loadFolderPicker(path, { pushHistory: true })}
+          onSelectFolder={selectFolderForDraft}
           onSelectCurrent={() => {
             if (folderBrowser?.currentPath) {
               selectFolderForDraft(folderBrowser.currentPath);

@@ -31,6 +31,84 @@ export interface CodexFolderBrowseResult {
 
 const MAX_FOLDER_ENTRIES = 400;
 
+function normalizeSuggestionInput(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  if (left === right) {
+    return 0;
+  }
+
+  if (left.length === 0) {
+    return right.length;
+  }
+
+  if (right.length === 0) {
+    return left.length;
+  }
+
+  const previous = new Array(right.length + 1).fill(0).map((_, index) => index);
+  const current = new Array(right.length + 1).fill(0);
+
+  for (let row = 1; row <= left.length; row += 1) {
+    current[0] = row;
+    for (let column = 1; column <= right.length; column += 1) {
+      const substitutionCost = left[row - 1] === right[column - 1] ? 0 : 1;
+      current[column] = Math.min(
+        current[column - 1] + 1,
+        previous[column] + 1,
+        previous[column - 1] + substitutionCost
+      );
+    }
+
+    for (let column = 0; column <= right.length; column += 1) {
+      previous[column] = current[column];
+    }
+  }
+
+  return previous[right.length];
+}
+
+async function suggestNearbyDirectory(targetPath: string): Promise<string | null> {
+  const parentPath = path.dirname(targetPath);
+  const requestedName = path.basename(targetPath);
+
+  if (!requestedName || requestedName === '.' || requestedName === '..') {
+    return null;
+  }
+
+  const parentRealPath = await realpathIfExists(parentPath);
+  if (!parentRealPath) {
+    return null;
+  }
+
+  const entries = await fs.readdir(parentRealPath, { withFileTypes: true }).catch(() => []);
+  const requestedNormalized = normalizeSuggestionInput(requestedName);
+  let bestMatch: { path: string; distance: number } | null = null;
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const candidateNormalized = normalizeSuggestionInput(entry.name);
+    const distance = levenshteinDistance(requestedNormalized, candidateNormalized);
+    const isLoosePrefixMatch = candidateNormalized.includes(requestedNormalized) || requestedNormalized.includes(candidateNormalized);
+
+    if (distance > 4 && !isLoosePrefixMatch) {
+      continue;
+    }
+
+    const candidatePath = path.join(parentRealPath, entry.name);
+    if (!bestMatch || distance < bestMatch.distance) {
+      bestMatch = { path: candidatePath, distance };
+    }
+  }
+
+  return bestMatch?.path || null;
+}
+
 function isPathInside(rootPath: string, targetPath: string): boolean {
   const relative = path.relative(rootPath, targetPath);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
@@ -180,6 +258,11 @@ export async function resolveCodexFolderPath(
   const realPath = await realpathIfExists(basePath);
 
   if (!realPath) {
+    const suggestion = await suggestNearbyDirectory(basePath);
+    if (suggestion) {
+      throw new Error(`Directory was not found. Did you mean: ${suggestion}?`);
+    }
+
     throw new Error('Directory was not found');
   }
 
