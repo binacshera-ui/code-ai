@@ -134,6 +134,62 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function normalizeSessionBindingKey(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function resolveSessionBindingFromState(
+  value: string | null | undefined,
+  options: {
+    fallbackToSelf?: boolean;
+  } = {}
+): string | null {
+  const normalized = normalizeSessionBindingKey(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const seen = new Set<string>();
+  let current = normalized;
+
+  while (!seen.has(current)) {
+    seen.add(current);
+    const next = normalizeSessionBindingKey(state.sessionBindings[current]);
+    if (!next) {
+      return options.fallbackToSelf ? current : null;
+    }
+    if (next === current) {
+      return current;
+    }
+    current = next;
+  }
+
+  return current;
+}
+
+function resolveQueueItemSessionId(
+  sessionId: string | null | undefined,
+  queueKey: string | null | undefined
+): string | null {
+  return (
+    resolveSessionBindingFromState(sessionId, { fallbackToSelf: true })
+    || resolveSessionBindingFromState(queueKey, { fallbackToSelf: false })
+    || null
+  );
+}
+
+export async function resolveCodexQueueSessionId(
+  sessionId: string | null | undefined
+): Promise<string | null> {
+  await ensureStateLoaded();
+  return resolveSessionBindingFromState(sessionId, { fallbackToSelf: true });
+}
+
 function isDraftSessionKey(value: string | null | undefined): boolean {
   return typeof value === 'string' && value.startsWith('draft:');
 }
@@ -884,6 +940,11 @@ function getProviderForQueueItem(profileId: string): 'codex' | 'claude' | 'gemin
 }
 
 async function processQueueItem(item: CodexQueueItem) {
+  const reboundSessionId = resolveQueueItemSessionId(item.sessionId, item.queueKey);
+  if (reboundSessionId && item.sessionId !== reboundSessionId) {
+    item.sessionId = reboundSessionId;
+  }
+
   item.status = 'running';
   item.startedAt = nowIso();
   item.updatedAt = item.startedAt;
@@ -899,7 +960,7 @@ async function processQueueItem(item: CodexQueueItem) {
     });
   }
 
-  const resolvedSessionId = item.sessionId || state.sessionBindings[item.queueKey] || undefined;
+  const resolvedSessionId = resolveQueueItemSessionId(item.sessionId, item.queueKey) || undefined;
   const shouldApplyForkPromptPrefix = isDraftSessionKey(item.sessionId) || isDraftSessionKey(item.queueKey);
   const promptWithForkContext = shouldApplyForkPromptPrefix && item.contextPrefix
     ? `${item.contextPrefix}\n\nהודעת ההמשך החדשה:\n${item.prompt}`
@@ -1173,6 +1234,10 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
     : null;
   let scheduledAt = normalizeScheduledAt(input.scheduledAt);
   const now = nowIso();
+  const resolvedSessionId = resolveQueueItemSessionId(
+    input.sessionId || null,
+    input.queueKey
+  );
   const item: CodexQueueItem = {
     id: randomUUID(),
     profileId: input.profileId,
@@ -1181,7 +1246,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
       : null,
     queueKey: input.queueKey,
     clientRequestId,
-    sessionId: input.sessionId || state.sessionBindings[input.queueKey] || null,
+    sessionId: resolvedSessionId,
     cwd: input.cwd?.trim() || null,
     model: typeof input.model === 'string' && input.model.trim()
       ? input.model.trim()

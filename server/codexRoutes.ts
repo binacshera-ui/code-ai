@@ -34,6 +34,7 @@ import {
   getCodexQueueItem,
   getCodexQueueItemSession,
   listCodexQueueItems,
+  resolveCodexQueueSessionId,
   retryCodexQueueItem,
 } from './codexQueue.js';
 import { CODEX_APP_CONFIG } from './config.js';
@@ -81,6 +82,7 @@ import {
   buildAgentExecutionPrompt,
   buildAgentPlanPrompt,
   createAgentSessionDraft,
+  deleteAgentSessionRecord,
   getAgentSessionLinkForSession,
   getAgentSessionRecord,
   listAgentSessionLinksForSourceProfile,
@@ -400,12 +402,17 @@ async function resolveEffectiveProfileIdForSession(
   requestedProfileId: string | undefined,
   sessionId: string
 ): Promise<string | undefined> {
-  const linked = await getAgentSessionLinkForSession(sessionId);
+  const resolvedSessionId = await resolveCodexQueueSessionId(sessionId) || sessionId;
+  const linked = await getAgentSessionLinkForSession(resolvedSessionId);
   if (!linked) {
     return requestedProfileId;
   }
 
   return linked.profileId;
+}
+
+async function resolveEffectiveSessionId(sessionId: string): Promise<string> {
+  return await resolveCodexQueueSessionId(sessionId) || sessionId;
 }
 
 async function loadAgentLinkedSessionSummaries(
@@ -1893,7 +1900,8 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
 
 router.get('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
   try {
-    const sessionId = readRouteParam(req.params.sessionId);
+    const requestedSessionId = readRouteParam(req.params.sessionId);
+    const sessionId = await resolveEffectiveSessionId(requestedSessionId);
     const requestedProfileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
     const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
     const tail = typeof req.query.tail === 'string'
@@ -2667,6 +2675,69 @@ router.get('/agent-sessions/:agentSessionId', requireCodexAccess, async (req, re
   }
 });
 
+router.delete('/agent-sessions/:agentSessionId', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const agentSessionId = readRouteParam(req.params.agentSessionId);
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (!record) {
+      res.status(404).json({ error: 'Agent session was not found' });
+      return;
+    }
+    assertAgentSessionAccess(record, sourceProfile.id);
+
+    const plannerSessionDeletion = record.plannerSessionId && record.plannerProfileId
+      ? {
+        sessionId: record.plannerSessionId,
+        profileId: record.plannerProfileId,
+      }
+      : null;
+    const { links } = await deleteAgentSessionRecord(agentSessionId);
+    const deletedSessionIds = new Set<string>();
+    const deletionErrors: Array<{ sessionId: string; error: string }> = [];
+
+    for (const link of links) {
+      try {
+        await deleteAgentSession(link.sessionId, link.profileId);
+        deletedSessionIds.add(link.sessionId);
+      } catch (error: any) {
+        const message = error?.message || 'Failed to delete linked agent session';
+        if (!/not found|not exist|was not found|ENOENT/i.test(message)) {
+          deletionErrors.push({ sessionId: link.sessionId, error: message });
+        }
+      }
+    }
+
+    if (plannerSessionDeletion && !deletedSessionIds.has(plannerSessionDeletion.sessionId)) {
+      try {
+        await deleteAgentSession(plannerSessionDeletion.sessionId, plannerSessionDeletion.profileId);
+        deletedSessionIds.add(plannerSessionDeletion.sessionId);
+      } catch (error: any) {
+        const message = error?.message || 'Failed to delete planner session';
+        if (!/not found|not exist|was not found|ENOENT/i.test(message)) {
+          deletionErrors.push({ sessionId: plannerSessionDeletion.sessionId, error: message });
+        }
+      }
+    }
+
+    res.json({
+      agentSessionId,
+      deletedSessionIds: [...deletedSessionIds],
+      errors: deletionErrors,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete agent session' });
+  }
+});
+
 router.post('/agent-sessions/:agentSessionId/goal', requireCodexAccess, async (req, res) => {
   try {
     const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
@@ -3160,8 +3231,11 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
   try {
     const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
     const visibleProfileId = requestedProfileId || 'developer';
-    const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+    const requestedSessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
       ? req.body.sessionId.trim()
+      : undefined;
+    const sessionId = requestedSessionId
+      ? await resolveEffectiveSessionId(requestedSessionId)
       : undefined;
     const profileId = sessionId
       ? await resolveEffectiveProfileIdForSession(visibleProfileId, sessionId)
@@ -3445,8 +3519,11 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const clientRequestId = typeof req.body?.clientRequestId === 'string' && req.body.clientRequestId.trim()
       ? req.body.clientRequestId.trim()
       : undefined;
-    const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+    const requestedSessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
       ? req.body.sessionId.trim()
+      : undefined;
+    const sessionId = requestedSessionId
+      ? await resolveEffectiveSessionId(requestedSessionId)
       : undefined;
     const profileId = sessionId
       ? await resolveEffectiveProfileIdForSession(visibleProfileId, sessionId)
@@ -3740,8 +3817,11 @@ async function handleSupportAskRequest(
     const clientRequestId = typeof req.body?.clientRequestId === 'string' && req.body.clientRequestId.trim()
       ? req.body.clientRequestId.trim()
       : undefined;
-    const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+    const requestedSessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
       ? req.body.sessionId.trim()
+      : undefined;
+    const sessionId = requestedSessionId
+      ? await resolveEffectiveSessionId(requestedSessionId)
       : undefined;
     const requestedSupportLevel = readSupportExecutionLevel(
       req.body?.supportLevel ?? req.body?.level ?? req.body?.tier

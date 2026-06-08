@@ -11,12 +11,64 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="format-detection" content="telephone=no" />
     <title>code-ai</title>
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" type="image/png" href="/favicon.png" />
-    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.codex.webmanifest?v=20260608" />
+    <link rel="icon" type="image/png" href="/favicon.png?v=20260608" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png?v=20260608" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+    <script>
+      (() => {
+        const host = window.location.hostname.toLowerCase();
+        const brandingByHost = {
+          'app-codex.bina-cshera.co.il': {
+            title: 'code-ai',
+            manifestHref: '/manifest.codex.webmanifest?v=20260608',
+            faviconHref: '/favicon.png?v=20260608',
+            appleTouchIconHref: '/icons/apple-touch-icon.png?v=20260608',
+          },
+          'app.bina-cshera.co.il': {
+            title: 'בינה כשרה',
+            manifestHref: '/manifest.bina.webmanifest?v=20260608',
+            faviconHref: '/favicon-bina.png?v=20260608',
+            appleTouchIconHref: '/icons/apple-touch-icon-bina.png?v=20260608',
+          },
+        };
+
+        const branding = brandingByHost[host];
+        if (!branding) {
+          return;
+        }
+
+        document.title = branding.title;
+
+        const appNameMeta = document.querySelector('meta[name="application-name"]');
+        if (appNameMeta) {
+          appNameMeta.setAttribute('content', branding.title);
+        }
+
+        const appleTitleMeta = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+        if (appleTitleMeta) {
+          appleTitleMeta.setAttribute('content', branding.title);
+        }
+
+        const manifestLink = document.querySelector('link[rel="manifest"]');
+        if (manifestLink) {
+          manifestLink.setAttribute('href', branding.manifestHref);
+        }
+
+        const faviconLink = document.querySelector('link[rel="icon"]');
+        if (faviconLink) {
+          faviconLink.setAttribute('href', branding.faviconHref);
+          faviconLink.setAttribute('type', 'image/png');
+        }
+
+        const appleTouchIcon = document.querySelector('link[rel="apple-touch-icon"]');
+        if (appleTouchIcon) {
+          appleTouchIcon.setAttribute('href', branding.appleTouchIconHref);
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

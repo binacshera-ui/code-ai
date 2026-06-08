@@ -473,6 +473,30 @@ export async function getAgentSessionRecord(agentSessionId: string): Promise<Age
   return record ? cloneRecord(record) : null;
 }
 
+export async function deleteAgentSessionRecord(
+  agentSessionId: string
+): Promise<{ record: AgentSessionRecord | null; links: AgentSessionLinkRecord[] }> {
+  await ensureLoaded();
+  const record = state.sessionsById[agentSessionId];
+  if (!record) {
+    return { record: null, links: [] };
+  }
+
+  const snapshot = cloneRecord(record);
+  const links = Object.values(state.sessionLinksBySessionId)
+    .filter((candidate) => candidate.agentSessionId === agentSessionId)
+    .map(cloneLink);
+
+  delete state.sessionsById[agentSessionId];
+  for (const link of links) {
+    delete state.sessionLinksBySessionId[link.sessionId];
+  }
+
+  await persistState();
+  await fs.rm(record.rootPath, { recursive: true, force: true });
+  return { record: snapshot, links };
+}
+
 export async function saveAgentSessionPlan(
   agentSessionId: string,
   rawPlan: unknown,

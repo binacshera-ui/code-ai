@@ -5,16 +5,10 @@ import connectPgSimple from 'connect-pg-simple';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import codexRoutes from './codexRoutes.js';
-import geminiConversationRoutes from './geminiConversationRoutes.js';
 import { recordCodexServerCrash } from './codexCrashLogs.js';
 import { CODEX_APP_CONFIG } from './config.js';
 import { startCodexQueueWorker } from './codexQueue.js';
 import { repairAllProviderHomesOwnership } from './providerRuntimeOwnership.js';
-import {
-  handleGeminiObservatoryLogin,
-  requireGeminiObservatoryPageAccess,
-  serveGeminiObservatoryLoginPage,
-} from './geminiObservatoryAccess.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -154,15 +148,9 @@ app.get('/api/auth/check-session', async (req, res) => {
 });
 
 app.use('/api/codex', codexRoutes);
-app.use('/api/gemini-conversations', geminiConversationRoutes);
 
 const publicPath = path.join(__dirname, 'public');
 app.use(express.static(publicPath));
-app.get('/gemini-observatory/login', serveGeminiObservatoryLoginPage);
-app.post('/gemini-observatory/login', handleGeminiObservatoryLogin);
-app.get(['/gemini-observatory', '/gemini-observatory/*'], requireGeminiObservatoryPageAccess, (req, res) => {
-  res.sendFile(path.join(publicPath, 'index.html'));
-});
 app.get('*', (req, res) => {
   res.sendFile(path.join(publicPath, 'index.html'));
 });

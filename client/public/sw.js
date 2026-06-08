@@ -1,14 +1,25 @@
-const SHELL_CACHE = 'code-ai-shell-v4';
-const ASSET_CACHE = 'code-ai-assets-v4';
+const SHELL_CACHE = 'app-shell-v7';
+const ASSET_CACHE = 'app-assets-v7';
 const SHELL_URLS = [
   '/',
   '/manifest.webmanifest',
+  '/manifest.codex.webmanifest',
+  '/manifest.bina.webmanifest',
   '/favicon.png',
+  '/favicon-bina.png',
+  '/logo-login.webp',
+  '/login.png',
+  '/login.svg',
   '/icons/apple-touch-icon.png',
+  '/icons/apple-touch-icon-bina.png',
   '/icons/code-ai-192.png',
   '/icons/code-ai-512.png',
   '/icons/code-ai-maskable-192.png',
   '/icons/code-ai-maskable-512.png',
+  '/icons/bina-192.png',
+  '/icons/bina-512.png',
+  '/icons/bina-maskable-192.png',
+  '/icons/bina-maskable-512.png',
 ];
 
 self.addEventListener('install', (event) => {

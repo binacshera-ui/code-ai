@@ -21,6 +21,6 @@ export default defineConfig({
   },
   build: {
     outDir: '../dist/public',
-    emptyDirOnBuild: true,
+    emptyOutDir: true,
   },
 });

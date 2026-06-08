@@ -1193,6 +1193,47 @@ async function scanSessionFiles(profile: CodexProfile): Promise<SessionScanRecor
   return rows;
 }
 
+async function sessionFileContainsLegacyContextCompactionMarker(sessionPath: string): Promise<boolean> {
+  const stream = createReadStream(sessionPath, { encoding: 'utf-8' });
+  const lineReader = readline.createInterface({
+    input: stream,
+    crlfDelay: Infinity,
+  });
+
+  try {
+    for await (const line of lineReader) {
+      const row = safeJsonParse<any>(line);
+      if (!row || typeof row !== 'object') {
+        continue;
+      }
+
+      if (row.type === 'response_item') {
+        const responseType = typeof row.payload?.type === 'string'
+          ? row.payload.type.trim().toLowerCase()
+          : '';
+        if (responseType === 'context_compaction') {
+          return true;
+        }
+      }
+
+      const replacementHistory = Array.isArray(row.payload?.replacement_history)
+        ? row.payload.replacement_history
+        : [];
+      if (replacementHistory.some((item: any) => {
+        const itemType = typeof item?.type === 'string' ? item.type.trim().toLowerCase() : '';
+        return itemType === 'context_compaction';
+      })) {
+        return true;
+      }
+    }
+
+    return false;
+  } finally {
+    lineReader.close();
+    stream.destroy();
+  }
+}
+
 function parseRateLimitNumber(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
@@ -3502,6 +3543,40 @@ export async function runCodexPrompt(
 
   return queueBySessionKey(queueKey, async () => {
     const previousSession = sessionId ? await resolveSessionRecord(profile, sessionId) : null;
+    if (
+      sessionId
+      && previousSession
+      && options.allowCompactionResumeRepair !== false
+      && await sessionFileContainsLegacyContextCompactionMarker(previousSession.path)
+    ) {
+      console.warn('[codex] compact-clone pre-repair triggered for legacy context_compaction marker', {
+        profileId: profile.id,
+        sessionId,
+        sessionPath: previousSession.path,
+      });
+      const recovery = await buildCodexCompactionRecoveryContext(sessionId, profile.id);
+      const repairedResult = await runCodexPrompt(
+        trimmedPrompt,
+        undefined,
+        profile.id,
+        attachments,
+        {
+          runId: options.runId,
+          cwd: runCwd,
+          injectDirectoryContext: false,
+          contextPrefix: recovery.promptPrefix,
+          executionConfig,
+          allowCompactionResumeRepair: false,
+        }
+      );
+
+      return {
+        ...repairedResult,
+        recoveredFromSessionId: sessionId,
+        recoveryMode: 'compact-clone',
+      };
+    }
+
     const permissionArgs = await resolveCodexPermissionArgs(profile, executionConfig.permissionModeId);
     const args = collectCodexArgs(permissionArgs, sessionId, imagePaths, executionConfig);
 

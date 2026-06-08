@@ -2297,6 +2297,24 @@ async function fetchAgentSessionRecord(profileId: string, agentSessionId: string
   return data.agentSession;
 }
 
+async function deleteAgentSessionRequest(
+  profileId: string,
+  agentSessionId: string
+): Promise<{ agentSessionId: string; deletedSessionIds: string[]; errors: Array<{ sessionId: string; error: string }> }> {
+  const data = await fetchJson<{
+    agentSessionId: string;
+    deletedSessionIds?: string[];
+    errors?: Array<{ sessionId: string; error: string }>;
+  }>(`/api/codex/agent-sessions/${encodeURIComponent(agentSessionId)}?profileId=${encodeURIComponent(profileId)}`, {
+    method: 'DELETE',
+  });
+  return {
+    agentSessionId: data.agentSessionId,
+    deletedSessionIds: data.deletedSessionIds || [],
+    errors: data.errors || [],
+  };
+}
+
 async function saveAgentSessionPlanRequest(
   profileId: string,
   agentSessionId: string,
@@ -4779,34 +4797,36 @@ function SidebarPanel({
                       const topicCollapseKey = `${group.key}:${topicGroup.key}`;
                       return (
                         <div key={topicGroup.key} className="space-y-1">
-                          <button
-                            type="button"
-                            onClick={() => setCollapsedTopics((current) => {
-                              const next = { ...current };
-                              if (next[topicCollapseKey]) {
-                                delete next[topicCollapseKey];
-                              } else {
-                                next[topicCollapseKey] = true;
-                              }
-                              return next;
-                            })}
-                            className="flex w-full min-w-0 items-center justify-start gap-2 px-1 pt-1 text-right"
-                          >
-                            <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform', collapsedTopics[topicCollapseKey] && 'rotate-90')} />
-                            <div
-                              className="inline-flex min-w-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px]"
-                              style={topicGroup.topic && topicColors
-                                ? {
-                                  backgroundColor: topicColors.bg,
-                                  color: topicColors.text,
-                                  borderColor: topicColors.border,
-                              }
-                                : undefined}
+                          <div className="flex min-w-0 items-center justify-between gap-2 px-1 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => setCollapsedTopics((current) => {
+                                const next = { ...current };
+                                if (next[topicCollapseKey]) {
+                                  delete next[topicCollapseKey];
+                                } else {
+                                  next[topicCollapseKey] = true;
+                                }
+                                return next;
+                              })}
+                              className="flex min-w-0 flex-1 items-center justify-start gap-2 text-right"
                             >
-                              <span>{topicGroup.topic?.icon || '•'}</span>
-                              <span className="truncate">{topicGroup.label}</span>
-                            </div>
-                          </button>
+                              <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform', collapsedTopics[topicCollapseKey] && 'rotate-90')} />
+                              <div
+                                className="inline-flex min-w-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px]"
+                                style={topicGroup.topic && topicColors
+                                  ? {
+                                    backgroundColor: topicColors.bg,
+                                    color: topicColors.text,
+                                    borderColor: topicColors.border,
+                                }
+                                  : undefined}
+                              >
+                                <span>{topicGroup.topic?.icon || '•'}</span>
+                                <span className="truncate">{topicGroup.label}</span>
+                              </div>
+                            </button>
+                          </div>
                           {!collapsedTopics[topicCollapseKey] && (
                             <div className="mr-3 space-y-2 border-r border-slate-100/70 pr-3">
                               {topicGroup.sessions.map((session) => (
@@ -8172,6 +8192,7 @@ function SudokuDialog({
 
 function TopicManagerDialog({
   session,
+  agentSessionRecord,
   topics,
   isLoading,
   error,
@@ -8187,6 +8208,7 @@ function TopicManagerDialog({
   triggerBaseUrl,
   pendingDeleteTopic,
   deletingTopicId,
+  deletingAgentSessionId,
   onClose,
   onAssignTopic,
   onSaveSessionTitle,
@@ -8201,11 +8223,14 @@ function TopicManagerDialog({
   onCancelDeleteTopic,
   onDeleteTopicMoveToUntagged,
   onDeleteTopicWithSessions,
+  onEditAgentSession,
+  onRequestDeleteAgentSession,
   onChangeName,
   onChangeIcon,
   onChangeColorKey,
 }: {
   session: CodexSessionSummary;
+  agentSessionRecord: CodexAgentSessionRecord | null;
   topics: CodexSessionTopic[];
   isLoading: boolean;
   error: string | null;
@@ -8221,6 +8246,7 @@ function TopicManagerDialog({
   triggerBaseUrl: string;
   pendingDeleteTopic: CodexSessionTopic | null;
   deletingTopicId: string | null;
+  deletingAgentSessionId: string | null;
   onClose: () => void;
   onAssignTopic: (topicId: string | null) => void;
   onSaveSessionTitle: () => void;
@@ -8235,6 +8261,8 @@ function TopicManagerDialog({
   onCancelDeleteTopic: () => void;
   onDeleteTopicMoveToUntagged: () => void;
   onDeleteTopicWithSessions: () => void;
+  onEditAgentSession: (agentSessionId: string) => void;
+  onRequestDeleteAgentSession: (agentSession: CodexAgentSessionRecord) => void;
   onChangeName: (value: string) => void;
   onChangeIcon: (value: string) => void;
   onChangeColorKey: (value: string) => void;
@@ -8280,6 +8308,61 @@ function TopicManagerDialog({
           {error && (
             <div className="rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
               {error}
+            </div>
+          )}
+
+          {session.agentSession && (
+            <div className="rounded-[1.5rem] border border-violet-100 bg-violet-50/70 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-slate-800">סשן סוכנים</div>
+                  <div className="mt-1 text-xs leading-6 text-slate-500">
+                    ניהול ותחזוקה של סשן הסוכנים המשויך לשיחה הזו.
+                  </div>
+                </div>
+                <div className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-violet-700 shadow-sm">
+                  {session.agentSession.kind === 'planner' ? 'Planner' : 'Agent'}
+                </div>
+              </div>
+
+              <div className="mt-3 rounded-[1.25rem] border border-violet-100 bg-white/90 px-4 py-3">
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                  <span className="rounded-full bg-violet-50 px-2 py-1 font-semibold text-violet-700">
+                    {getProviderDisplayLabel(session.agentSession.plannerProvider || agentSessionRecord?.plannerProvider || 'codex')}
+                  </span>
+                  <span className="rounded-full bg-slate-100 px-2 py-1 font-semibold text-slate-600">
+                    {agentSessionRecord?.status || session.agentSession.status}
+                  </span>
+                </div>
+                <div className="mt-3 text-sm font-semibold text-slate-800">
+                  {agentSessionRecord?.title || session.agentSession.title}
+                </div>
+                <div className="mt-1 text-xs leading-6 text-slate-500">
+                  {agentSessionRecord?.goal || session.agentSession.goal}
+                </div>
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => onEditAgentSession(session.agentSession!.id)}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+                >
+                  ערוך סשן סוכנים
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (agentSessionRecord) {
+                      onRequestDeleteAgentSession(agentSessionRecord);
+                    }
+                  }}
+                  disabled={!agentSessionRecord || deletingAgentSessionId === session.agentSession.id}
+                  className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-600 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {deletingAgentSessionId === session.agentSession.id ? 'מוחק...' : 'מחק סשן סוכנים'}
+                </button>
+              </div>
             </div>
           )}
 
@@ -9200,6 +9283,7 @@ function AgentSessionDialog({
   draftPlannerProvider,
   isSaving,
   isApproving,
+  deletingAgentSessionId,
   onClose,
   onDraftTitleChange,
   onDraftGoalChange,
@@ -9208,6 +9292,7 @@ function AgentSessionDialog({
   onCreateDraft,
   onOpenPlan,
   onApprove,
+  onRequestDelete,
 }: {
   isOpen: boolean;
   cwd: string | null;
@@ -9220,6 +9305,7 @@ function AgentSessionDialog({
   draftPlannerProvider: CodexProfile['provider'];
   isSaving: boolean;
   isApproving: boolean;
+  deletingAgentSessionId: string | null;
   onClose: () => void;
   onDraftTitleChange: (value: string) => void;
   onDraftGoalChange: (value: string) => void;
@@ -9228,6 +9314,7 @@ function AgentSessionDialog({
   onCreateDraft: () => void;
   onOpenPlan: (agentSessionId: string) => void;
   onApprove: (agentSessionId: string) => void;
+  onRequestDelete: (record: CodexAgentSessionRecord) => void;
 }) {
   if (!isOpen) {
     return null;
@@ -9386,6 +9473,14 @@ function AgentSessionDialog({
                             className="rounded-full border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-600 transition hover:bg-slate-50"
                           >
                             תכנית
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onRequestDelete(record)}
+                            disabled={deletingAgentSessionId === record.id}
+                            className="rounded-full border border-rose-100 bg-rose-50 px-3 py-2 text-[11px] font-medium text-rose-600 transition hover:border-rose-200 hover:bg-rose-100 disabled:opacity-50"
+                          >
+                            {deletingAgentSessionId === record.id ? 'מוחק...' : 'מחק'}
                           </button>
                           {isReadyToLaunch && (
                             <button
@@ -10358,6 +10453,13 @@ export function CodexMobileApp() {
   const [markedSessionIdsForCopy, setMarkedSessionIdsForCopy] = useState<string[]>([]);
   const [isCopyingSessions, setIsCopyingSessions] = useState(false);
   const [sessionCopyNotice, setSessionCopyNotice] = useState<string | null>(null);
+  const [sessionCompletionToast, setSessionCompletionToast] = useState<{
+    queueItemId: string;
+    sessionId: string | null;
+    status: 'completed' | 'failed' | 'cancelled';
+    title: string;
+    message: string;
+  } | null>(null);
   const [isBooting, setIsBooting] = useState(true);
   const [isCheckingAccess, setIsCheckingAccess] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -10504,6 +10606,8 @@ export function CodexMobileApp() {
   const [isSavingTrigger, setIsSavingTrigger] = useState(false);
   const [pendingDeleteTopic, setPendingDeleteTopic] = useState<CodexSessionTopic | null>(null);
   const [deletingTopicId, setDeletingTopicId] = useState<string | null>(null);
+  const [pendingDeleteAgentSession, setPendingDeleteAgentSession] = useState<CodexAgentSessionRecord | null>(null);
+  const [deletingAgentSessionId, setDeletingAgentSessionId] = useState<string | null>(null);
   const [customSessionTitle, setCustomSessionTitle] = useState('');
   const [isSavingSessionTitle, setIsSavingSessionTitle] = useState(false);
   const [transferringEntryId, setTransferringEntryId] = useState<string | null>(null);
@@ -10564,6 +10668,9 @@ export function CodexMobileApp() {
   const activeProfileRef = useRef(profileId);
   const activeSelectedSessionIdRef = useRef<string | null>(selectedSessionId);
   const selectedSessionRef = useRef<CodexSessionDetail | null>(selectedSession);
+  const queueTerminalStatusHydratedRef = useRef(false);
+  const queueStatusByIdRef = useRef<Record<string, CodexQueueServerItem['status']>>({});
+  const sessionCompletionToastTimerRef = useRef<number | null>(null);
   const isTranscriptNearBottomRef = useRef(true);
   const lastTranscriptSignatureRef = useRef('');
   const transcriptViewportSnapshotRef = useRef({
@@ -10735,6 +10842,10 @@ export function CodexMobileApp() {
     () => Object.fromEntries(sessions.map((session) => [session.id, session])),
     [sessions]
   );
+  const agentSessionsById = useMemo(
+    () => Object.fromEntries(agentSessions.map((record) => [record.id, record])),
+    [agentSessions]
+  );
   const sessionTaskSummaries = useMemo(() => {
     const nextSummaries: Record<string, { assignedCount: number; completedCount: number }> = {};
 
@@ -10765,6 +10876,85 @@ export function CodexMobileApp() {
 
     return nextSummaries;
   }, [sessionSubtasks]);
+
+  useEffect(() => {
+    return () => {
+      if (sessionCompletionToastTimerRef.current) {
+        window.clearTimeout(sessionCompletionToastTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const nextStatuses: Record<string, CodexQueueServerItem['status']> = {};
+    const nextToastCandidates: Array<{
+      queueItemId: string;
+      sessionId: string | null;
+      status: 'completed' | 'failed' | 'cancelled';
+      title: string;
+      message: string;
+      updatedAt: string;
+    }> = [];
+
+    for (const item of queueItems) {
+      nextStatuses[item.id] = item.status;
+      if (!queueTerminalStatusHydratedRef.current) {
+        continue;
+      }
+      if (item.status !== 'completed' && item.status !== 'failed' && item.status !== 'cancelled') {
+        continue;
+      }
+
+      const previousStatus = queueStatusByIdRef.current[item.id];
+      if (previousStatus === item.status) {
+        continue;
+      }
+
+      const linkedSession = item.sessionId ? sessionsById[item.sessionId] : null;
+      const title = linkedSession?.title || item.promptPreview || 'שיחה ללא כותרת';
+      const message = item.status === 'completed'
+        ? 'השיחה הסתיימה בהצלחה.'
+        : item.status === 'failed'
+          ? 'השיחה נעצרה עם שגיאה.'
+          : 'השיחה הופסקה.';
+      nextToastCandidates.push({
+        queueItemId: item.id,
+        sessionId: item.sessionId,
+        status: item.status,
+        title,
+        message,
+        updatedAt: item.updatedAt,
+      });
+    }
+
+    queueStatusByIdRef.current = nextStatuses;
+
+    if (!queueTerminalStatusHydratedRef.current) {
+      queueTerminalStatusHydratedRef.current = true;
+      return;
+    }
+
+    if (nextToastCandidates.length === 0) {
+      return;
+    }
+
+    nextToastCandidates.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    const nextToast = nextToastCandidates[0];
+    if (sessionCompletionToastTimerRef.current) {
+      window.clearTimeout(sessionCompletionToastTimerRef.current);
+    }
+    setSessionCompletionToast({
+      queueItemId: nextToast.queueItemId,
+      sessionId: nextToast.sessionId,
+      status: nextToast.status,
+      title: nextToast.title,
+      message: nextToast.message,
+    });
+    sessionCompletionToastTimerRef.current = window.setTimeout(() => {
+      setSessionCompletionToast((current) => current?.queueItemId === nextToast.queueItemId ? null : current);
+      sessionCompletionToastTimerRef.current = null;
+    }, 5200);
+  }, [queueItems, sessionsById]);
 
   useEffect(() => {
     const previousTitle = document.title;
@@ -11548,7 +11738,7 @@ export function CodexMobileApp() {
       }
 
       startTransition(() => {
-        setSelectedSessionId(sessionId);
+        setSelectedSessionId(nextSession.id);
         setSelectedSession(nextSession);
         setIsDraftConversation(false);
         setForkDraftContext(null);
@@ -13889,6 +14079,62 @@ export function CodexMobileApp() {
     }
   }
 
+  async function deleteAgentSessionFromManager() {
+    if (!profileId || !pendingDeleteAgentSession) {
+      return;
+    }
+
+    setDeletingAgentSessionId(pendingDeleteAgentSession.id);
+    try {
+      const response = await deleteAgentSessionRequest(profileId, pendingDeleteAgentSession.id);
+      const affectedSessionIds = new Set(response.deletedSessionIds);
+      const deletedAgentSessionId = pendingDeleteAgentSession.id;
+
+      startTransition(() => {
+        setAgentSessions((current) => current.filter((record) => record.id !== deletedAgentSessionId));
+        setSessions((current) => current.filter((session) => (
+          !affectedSessionIds.has(session.id)
+          && session.agentSession?.id !== deletedAgentSessionId
+        )));
+        setSelectedSession((current) => (
+          current && (affectedSessionIds.has(current.id) || current.agentSession?.id === deletedAgentSessionId)
+            ? null
+            : current
+        ));
+        setSelectedSessionId((current) => (
+          current && affectedSessionIds.has(current)
+            ? null
+            : current
+        ));
+      });
+
+      if (sessionContextSelection.agentSessionDraftId === deletedAgentSessionId) {
+        await persistSessionContextSelection({
+          anchorIds: sessionContextSelection.anchorIds,
+          skillIds: sessionContextSelection.skillIds,
+          reminderIds: sessionContextSelection.reminderIds,
+          agentSessionDraftId: null,
+          professionalMode: false,
+        });
+      }
+
+      if (activeAgentPlanEditorRecord?.id === deletedAgentSessionId) {
+        setActiveAgentPlanEditorRecord(null);
+        setAgentPlanEditorValue('');
+      }
+
+      if (response.errors.length > 0) {
+        setError(`סשן הסוכנים נמחק, אך חלק מהשיחות המשויכות לא נמחקו: ${response.errors.map((item) => item.sessionId).join(', ')}`);
+      }
+
+      setPendingDeleteAgentSession(null);
+    } catch (agentSessionError: any) {
+      setError(agentSessionError.message || 'Failed to delete agent session');
+    } finally {
+      setDeletingAgentSessionId(null);
+    }
+  }
+
   function resetTaskDraft() {
     setTaskDraftId(null);
     setTaskDraftTitle('');
@@ -14797,17 +15043,6 @@ export function CodexMobileApp() {
                 >
                   <FolderTree className="h-5 w-5" />
                   <span className="text-xs font-semibold">עץ קבצים</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsHeaderActionsOpen(false);
-                    window.location.href = '/gemini-observatory';
-                  }}
-                  className="col-span-2 flex items-center justify-center gap-2 rounded-[1.25rem] bg-sky-50 px-3 py-3 text-center text-sky-700 transition hover:bg-sky-100"
-                >
-                  <Eye className="h-4 w-4" />
-                  <span className="text-xs font-semibold">Gemini Observatory</span>
                 </button>
                 <button
                   type="button"
@@ -16362,6 +16597,7 @@ export function CodexMobileApp() {
         draftPlannerProvider={agentSessionDraftPlannerProvider}
         isSaving={isAgentSessionSaving}
         isApproving={isAgentSessionApproving}
+        deletingAgentSessionId={deletingAgentSessionId}
         onClose={() => setIsAgentSessionDialogOpen(false)}
         onDraftTitleChange={setAgentSessionDraftTitle}
         onDraftGoalChange={setAgentSessionDraftGoal}
@@ -16370,6 +16606,7 @@ export function CodexMobileApp() {
         onCreateDraft={() => void createAgentSessionDraft()}
         onOpenPlan={(agentSessionId) => void openAgentPlanEditor(agentSessionId)}
         onApprove={(agentSessionId) => void approveAgentSessionPlan(agentSessionId)}
+        onRequestDelete={setPendingDeleteAgentSession}
       />
 
       <AgentPlanEditorDialog
@@ -16517,6 +16754,7 @@ export function CodexMobileApp() {
       {topicSession && (
         <TopicManagerDialog
           session={topicSession}
+          agentSessionRecord={topicSession.agentSession ? (agentSessionsById[topicSession.agentSession.id] || null) : null}
           topics={folderTopics}
           isLoading={isTopicLoading}
           error={topicError}
@@ -16532,6 +16770,7 @@ export function CodexMobileApp() {
           triggerBaseUrl={window.location.origin}
           pendingDeleteTopic={pendingDeleteTopic}
           deletingTopicId={deletingTopicId}
+          deletingAgentSessionId={deletingAgentSessionId}
           onClose={() => {
             setTopicSession(null);
             setPendingDeleteTopic(null);
@@ -16557,10 +16796,103 @@ export function CodexMobileApp() {
           }}
           onDeleteTopicMoveToUntagged={() => void deleteTopicFromManager(false)}
           onDeleteTopicWithSessions={() => void deleteTopicFromManager(true)}
+          onEditAgentSession={(agentSessionId) => void openAgentPlanEditor(agentSessionId)}
+          onRequestDeleteAgentSession={setPendingDeleteAgentSession}
           onChangeName={setNewTopicName}
           onChangeIcon={setNewTopicIcon}
           onChangeColorKey={(value) => setNewTopicColorKey(value as keyof typeof TOPIC_COLOR_PRESETS)}
         />
+      )}
+
+      {sessionCompletionToast && (
+        <button
+          type="button"
+          onClick={() => {
+            const sessionId = sessionCompletionToast.sessionId;
+            setSessionCompletionToast(null);
+            if (sessionCompletionToastTimerRef.current) {
+              window.clearTimeout(sessionCompletionToastTimerRef.current);
+              sessionCompletionToastTimerRef.current = null;
+            }
+            if (sessionId) {
+              void handleOpenSession(sessionId);
+            }
+          }}
+          className={cn(
+            'fixed inset-x-0 top-[max(0.9rem,env(safe-area-inset-top))] z-[82] mx-auto flex w-[min(92vw,24rem)] items-center justify-between gap-3 rounded-full border px-4 py-3 text-right shadow-[0_16px_42px_-26px_rgba(15,23,42,0.28)] backdrop-blur-sm transition hover:shadow-[0_18px_48px_-24px_rgba(15,23,42,0.34)]',
+            sessionCompletionToast.status === 'completed'
+              ? 'border-emerald-100 bg-white/92 text-emerald-700'
+              : sessionCompletionToast.status === 'failed'
+                ? 'border-rose-100 bg-white/92 text-rose-700'
+                : 'border-amber-100 bg-white/92 text-amber-700'
+          )}
+        >
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[11px] font-semibold leading-5">{sessionCompletionToast.title}</div>
+            <div className="truncate text-[11px] leading-5 opacity-80">{sessionCompletionToast.message}</div>
+          </div>
+          <div className={cn(
+            'shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold',
+            sessionCompletionToast.status === 'completed'
+              ? 'bg-emerald-50 text-emerald-700'
+              : sessionCompletionToast.status === 'failed'
+                ? 'bg-rose-50 text-rose-700'
+                : 'bg-amber-50 text-amber-700'
+          )}>
+            פתח
+          </div>
+        </button>
+      )}
+
+      {pendingDeleteAgentSession && (
+        <div className="fixed inset-0 z-[62] flex items-end justify-center bg-slate-950/18 p-4 backdrop-blur-sm sm:items-center">
+          <button
+            type="button"
+            className="absolute inset-0 cursor-default"
+            onClick={() => {
+              if (deletingAgentSessionId) {
+                return;
+              }
+              setPendingDeleteAgentSession(null);
+            }}
+            aria-label="Close delete agent session dialog"
+          />
+          <div className="relative z-10 w-full max-w-[22rem] overflow-hidden rounded-[1.6rem] border border-slate-100/90 bg-white px-4 py-4 text-right shadow-[0_26px_70px_-34px_rgba(15,23,42,0.28)]">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-rose-50 text-rose-500">
+                <Trash2 className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-slate-800">
+                  למחוק את סשן הסוכנים {pendingDeleteAgentSession.title}?
+                </div>
+                <div className="mt-1 text-[12px] leading-6 text-slate-500">
+                  המחיקה תסיר את תכנית הסוכנים, קבצי התיאום, ואת כל הסשנים המשויכים לסשן הסוכנים הזה.
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteAgentSession(null)}
+                disabled={Boolean(deletingAgentSessionId)}
+                className="h-11 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50"
+              >
+                בטל
+              </button>
+              <button
+                type="button"
+                onClick={() => void deleteAgentSessionFromManager()}
+                disabled={Boolean(deletingAgentSessionId)}
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-rose-100 bg-rose-50 text-rose-600 transition hover:border-rose-200 hover:bg-rose-100 disabled:opacity-50"
+                aria-label="אשר מחיקת סשן סוכנים"
+              >
+                {deletingAgentSessionId ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {pendingDeleteTurn && (
