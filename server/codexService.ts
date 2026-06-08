@@ -15,6 +15,7 @@ import type { CodexSessionTopic } from './codexSessionTopics.js';
 import { listHiddenSessionIds } from './codexSessionVisibility.js';
 import { getSessionTopicMap } from './codexSessionTopics.js';
 import { getSelectedPermissionMode, resolvePermissionMode } from './providerPermissions.js';
+import { alignPathOwnershipToProfile, getProfileSpawnIdentity } from './providerRuntimeOwnership.js';
 
 export interface CodexProfile {
   id: string;
@@ -696,6 +697,7 @@ function readRootTomlString(rawToml: string, key: string): string | null {
 }
 
 async function writeRootTomlString(
+  profile: CodexProfile,
   filePath: string,
   key: string,
   value: string | null
@@ -725,9 +727,10 @@ async function writeRootTomlString(
 
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, nextRaw, 'utf-8');
+  alignPathOwnershipToProfile(profile, filePath);
 }
 
-async function normalizeLegacyCodexServiceTierConfig(filePath: string): Promise<void> {
+async function normalizeLegacyCodexServiceTierConfig(profile: CodexProfile, filePath: string): Promise<void> {
   let raw = '';
 
   try {
@@ -750,7 +753,7 @@ async function normalizeLegacyCodexServiceTierConfig(filePath: string): Promise<
     return;
   }
 
-  await writeRootTomlString(filePath, 'service_tier', normalizedValue);
+  await writeRootTomlString(profile, filePath, 'service_tier', normalizedValue);
 }
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -2328,6 +2331,7 @@ export async function createCodexForkSession(
 
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
   await fs.writeFile(targetPath, `${forkMetaLine}\n${rawLines.join('\n')}\n`, 'utf-8');
+  alignPathOwnershipToProfile(profile, targetPath);
 
   return {
     sessionId: nextSessionId,
@@ -2524,6 +2528,7 @@ async function appendSessionIndexEntryIfMissing(
   const indexPath = path.join(targetProfile.codexHome, 'session_index.jsonl');
   await fs.mkdir(path.dirname(indexPath), { recursive: true });
   await fs.appendFile(indexPath, `${JSON.stringify(entry)}\n`, 'utf-8');
+  alignPathOwnershipToProfile(targetProfile, indexPath);
 }
 
 export async function copyCodexSessionToProfile(
@@ -2582,6 +2587,7 @@ export async function copyCodexSessionToProfile(
 
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
   await fs.writeFile(targetPath, targetContent, 'utf-8');
+  alignPathOwnershipToProfile(targetProfile, targetPath);
   await appendSessionIndexEntryIfMissing(
     targetProfile,
     sourceIndexEntry
@@ -2706,6 +2712,7 @@ export async function deleteCodexTurn(
 
   const remainingLines = rawLines.filter((_, index) => index < targetTurn.startLine || index > targetTurn.endLine);
   await fs.writeFile(sessionRecord.path, `${remainingLines.join('\n')}\n`, 'utf-8');
+  alignPathOwnershipToProfile(profile, sessionRecord.path);
 }
 
 export async function getCodexSessionDetail(
@@ -2943,7 +2950,7 @@ async function readCodexExecutionDefaults(profile: CodexProfile): Promise<CodexC
   const configPath = path.join(profile.codexHome, 'config.toml');
 
   try {
-    await normalizeLegacyCodexServiceTierConfig(configPath);
+    await normalizeLegacyCodexServiceTierConfig(profile, configPath);
     const raw = await fs.readFile(configPath, 'utf-8');
     return {
       model: normalizeExecutionSettingValue(readRootTomlString(raw, 'model')),
@@ -2985,6 +2992,7 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
     env,
     encoding: 'utf-8',
     maxBuffer: 12 * 1024 * 1024,
+    ...getProfileSpawnIdentity(profile),
   });
 
   let result = runModelCatalogCommand(buildCodexProcessEnv(profile));
@@ -3134,6 +3142,7 @@ export async function updateCodexResponseSpeed(profileId: string | undefined, mo
 
   const configPath = path.join(profile.codexHome, 'config.toml');
   await writeRootTomlString(
+    profile,
     configPath,
     'service_tier',
     normalizeCodexServiceTierConfigValue(normalizedModeId)
@@ -3358,6 +3367,7 @@ export async function runCodexPrompt(
         cwd: runCwd,
         env: buildCodexProcessEnv(profile),
         stdio: ['pipe', 'pipe', 'pipe'],
+        ...getProfileSpawnIdentity(profile),
       });
       const activeRunId = options.runId;
 

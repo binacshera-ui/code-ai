@@ -5084,7 +5084,7 @@ function FolderPickerDialog({
         onClick={onClose}
         aria-label="Close folder picker"
       />
-      <div className="relative z-10 flex w-full max-w-2xl max-h-[82dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+      <div className="relative z-10 flex w-full max-w-2xl max-h-[calc(100dvh-2rem)] sm:max-h-[82dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
         <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
           <div className="flex items-start gap-3">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500">
@@ -5113,105 +5113,110 @@ function FolderPickerDialog({
           </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 px-5 py-3">
-          <div className="flex min-w-full items-center gap-2">
-            <input
-              type="text"
-              value={pathValue}
-              onChange={(event) => onPathChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault();
-                  onOpenPath();
-                }
-              }}
-              placeholder="/root/projects או C:\\repo"
-              dir="ltr"
-              className="h-10 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm text-slate-700 outline-none transition focus:border-slate-300"
-            />
-            <button
-              type="button"
-              onClick={onOpenPath}
-              className="shrink-0 rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800"
-            >
-              פתח נתיב
-            </button>
-          </div>
-          <button
-            type="button"
-            onClick={onNavigateBack}
-            disabled={!canGoBack}
-            className="rounded-full border border-slate-200 bg-white p-2 text-slate-500 transition disabled:opacity-40"
-            title="אחורה"
-          >
-            <ChevronRight className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={onNavigateForward}
-            disabled={!canGoForward}
-            className="rounded-full border border-slate-200 bg-white p-2 text-slate-500 transition disabled:opacity-40"
-            title="קדימה"
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </button>
-          {browser?.parentPath && (
-            <button
-              type="button"
-              onClick={() => onNavigateTo(browser.parentPath!)}
-              className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500 transition hover:bg-slate-50"
-              title="תיקיית אב"
-            >
-              למעלה
-            </button>
-          )}
-          {browser?.rootPath && browser.currentPath !== browser.rootPath && (
-            <button
-              type="button"
-              onClick={() => onNavigateTo(browser.rootPath)}
-              className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500 transition hover:bg-slate-50"
-              title="חזור ל-root"
-            >
-              root
-            </button>
-          )}
-          <div className="min-w-0 flex-1 overflow-x-auto">
-            <div className="flex items-center gap-2">
-              {browser?.breadcrumbs.map((crumb) => (
-                <button
-                  key={crumb.path}
-                  type="button"
-                  onClick={() => onNavigateTo(crumb.path)}
-                  className="shrink-0 rounded-full bg-slate-100 px-3 py-1.5 text-xs text-slate-600 transition hover:bg-slate-200"
-                >
-                  {crumb.name}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
         <div className="border-b border-slate-100 px-5 py-3">
-          <div className="flex flex-wrap gap-2">
-            {browser?.roots.map((root) => (
+          <div className="flex max-h-40 flex-col gap-2 overflow-y-auto overscroll-contain touch-pan-y [-webkit-overflow-scrolling:touch]">
+            <div className="flex min-w-full items-center gap-2">
+              <input
+                type="text"
+                value={pathValue}
+                onChange={(event) => onPathChange(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    onOpenPath();
+                  }
+                }}
+                placeholder="/root/projects או C:\\repo"
+                dir="ltr"
+                className="h-10 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm text-slate-700 outline-none transition focus:border-slate-300"
+              />
               <button
-                key={root.path}
                 type="button"
-                onClick={() => onNavigateTo(root.path)}
-                className={cn(
-                  'rounded-full px-3 py-1.5 text-xs transition',
-                  browser.rootPath === root.path
-                    ? 'bg-slate-900 text-white'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                )}
+                onClick={onOpenPath}
+                className="shrink-0 rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800"
               >
-                {root.label}
+                פתח נתיב
               </button>
-            ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={onNavigateBack}
+                disabled={!canGoBack}
+                className="rounded-full border border-slate-200 bg-white p-2 text-slate-500 transition disabled:opacity-40"
+                title="אחורה"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onNavigateForward}
+                disabled={!canGoForward}
+                className="rounded-full border border-slate-200 bg-white p-2 text-slate-500 transition disabled:opacity-40"
+                title="קדימה"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              {browser?.parentPath && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateTo(browser.parentPath!)}
+                  className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500 transition hover:bg-slate-50"
+                  title="תיקיית אב"
+                >
+                  למעלה
+                </button>
+              )}
+              {browser?.rootPath && browser.currentPath !== browser.rootPath && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateTo(browser.rootPath)}
+                  className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500 transition hover:bg-slate-50"
+                  title="חזור ל-root"
+                >
+                  root
+                </button>
+              )}
+            </div>
+            <div className="min-w-0 overflow-x-auto">
+              <div className="flex min-w-max items-center gap-2">
+                {browser?.breadcrumbs.map((crumb) => (
+                  <button
+                    key={crumb.path}
+                    type="button"
+                    onClick={() => onNavigateTo(crumb.path)}
+                    className="shrink-0 rounded-full bg-slate-100 px-3 py-1.5 text-xs text-slate-600 transition hover:bg-slate-200"
+                  >
+                    {crumb.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {browser?.roots.length ? (
+              <div className="min-w-0 overflow-x-auto">
+                <div className="flex min-w-max items-center gap-2">
+                  {browser.roots.map((root) => (
+                    <button
+                      key={root.path}
+                      type="button"
+                      onClick={() => onNavigateTo(root.path)}
+                      className={cn(
+                        'shrink-0 rounded-full px-3 py-1.5 text-xs transition',
+                        browser.rootPath === root.path
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      )}
+                    >
+                      {root.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5 touch-pan-y [-webkit-overflow-scrolling:touch]">
           {isLoading ? (
             <div className="flex min-h-[260px] items-center justify-center rounded-[1.5rem] border border-slate-100 bg-slate-50/70 text-sm text-slate-500">
               <div className="flex items-center gap-2">
@@ -6009,7 +6014,7 @@ function FileTreeDialog({
         onClick={onClose}
         aria-label="Close file tree"
       />
-      <div className="relative z-10 flex w-full max-w-3xl max-h-[84dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+      <div className="relative z-10 flex w-full max-w-3xl max-h-[calc(100dvh-2rem)] sm:max-h-[84dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
         <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
           <div className="flex items-start gap-3">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500">
@@ -6039,81 +6044,87 @@ function FileTreeDialog({
         </div>
 
         <div className="border-b border-slate-100 px-5 py-3">
-          <div className="flex min-w-full items-center gap-2">
-            <input
-              type="text"
-              value={pathValue}
-              onChange={(event) => onPathChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault();
-                  onOpenPath();
-                }
-              }}
-              placeholder="/workspace/project"
-              dir="ltr"
-              className="h-10 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm text-slate-700 outline-none transition focus:border-slate-300"
-            />
-            <button
-              type="button"
-              onClick={onOpenPath}
-              className="shrink-0 rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800"
-            >
-              טען עץ
-            </button>
-          </div>
-          <div className="mt-2 flex items-center gap-2">
-            <input
-              type="text"
-              value={filterValue}
-              onChange={(event) => onFilterChange(event.target.value)}
-              placeholder="סנן קבצים ותיקיות"
-              className="h-10 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm text-slate-700 outline-none transition focus:border-slate-300"
-            />
-            {browser?.parentPath && (
+          <div className="flex max-h-40 flex-col gap-2 overflow-y-auto overscroll-contain touch-pan-y [-webkit-overflow-scrolling:touch]">
+            <div className="flex min-w-full items-center gap-2">
+              <input
+                type="text"
+                value={pathValue}
+                onChange={(event) => onPathChange(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    onOpenPath();
+                  }
+                }}
+                placeholder="/workspace/project"
+                dir="ltr"
+                className="h-10 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm text-slate-700 outline-none transition focus:border-slate-300"
+              />
               <button
                 type="button"
-                onClick={() => onNavigateTo(browser.parentPath!)}
-                className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 transition hover:bg-slate-50"
+                onClick={onOpenPath}
+                className="shrink-0 rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800"
               >
-                למעלה
+                טען עץ
               </button>
-            )}
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {browser?.breadcrumbs.map((crumb) => (
-              <button
-                key={crumb.path}
-                type="button"
-                onClick={() => onNavigateTo(crumb.path)}
-                className="rounded-full bg-slate-100 px-3 py-1.5 text-xs text-slate-600 transition hover:bg-slate-200"
-              >
-                {crumb.name}
-              </button>
-            ))}
-          </div>
-          {browser?.roots?.length ? (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {browser.roots.map((root) => (
-                <button
-                  key={root.path}
-                  type="button"
-                  onClick={() => onNavigateTo(root.path)}
-                  className={cn(
-                    'rounded-full px-3 py-1.5 text-xs transition',
-                    browser.rootPath === root.path
-                      ? 'bg-slate-900 text-white'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  )}
-                >
-                  {root.label}
-                </button>
-              ))}
             </div>
-          ) : null}
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={filterValue}
+                onChange={(event) => onFilterChange(event.target.value)}
+                placeholder="סנן קבצים ותיקיות"
+                className="h-10 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm text-slate-700 outline-none transition focus:border-slate-300"
+              />
+              {browser?.parentPath && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateTo(browser.parentPath!)}
+                  className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 transition hover:bg-slate-50"
+                >
+                  למעלה
+                </button>
+              )}
+            </div>
+            <div className="min-w-0 overflow-x-auto">
+              <div className="mt-1 flex min-w-max items-center gap-2">
+                {browser?.breadcrumbs.map((crumb) => (
+                  <button
+                    key={crumb.path}
+                    type="button"
+                    onClick={() => onNavigateTo(crumb.path)}
+                    className="shrink-0 rounded-full bg-slate-100 px-3 py-1.5 text-xs text-slate-600 transition hover:bg-slate-200"
+                  >
+                    {crumb.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {browser?.roots?.length ? (
+              <div className="min-w-0 overflow-x-auto">
+                <div className="flex min-w-max items-center gap-2">
+                  {browser.roots.map((root) => (
+                    <button
+                      key={root.path}
+                      type="button"
+                      onClick={() => onNavigateTo(root.path)}
+                      className={cn(
+                        'shrink-0 rounded-full px-3 py-1.5 text-xs transition',
+                        browser.rootPath === root.path
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      )}
+                    >
+                      {root.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5 touch-pan-y [-webkit-overflow-scrolling:touch]">
           {error ? (
             <div className="rounded-[1.5rem] border border-red-100 bg-red-50 px-4 py-4 text-sm text-red-700">
               {error}
@@ -14744,8 +14755,9 @@ export function CodexMobileApp() {
               onClick={() => setIsHeaderActionsOpen(false)}
               aria-label="Close actions menu"
             />
-            <div className="fixed left-1/2 top-[4.75rem] z-[55] w-[15.5rem] max-w-[calc(100vw-2rem)] -translate-x-1/2 rounded-[1.75rem] border border-slate-200 bg-white p-3 shadow-[0_24px_90px_-32px_rgba(15,23,42,0.35)]">
-              <div className="grid grid-cols-2 gap-2">
+            <div className="fixed left-1/2 top-[4.75rem] z-[55] w-[15.5rem] max-w-[calc(100vw-2rem)] max-h-[min(22rem,calc(100dvh-6.25rem))] -translate-x-1/2 overflow-hidden rounded-[1.75rem] border border-slate-200 bg-white shadow-[0_24px_90px_-32px_rgba(15,23,42,0.35)]">
+              <div className="flex max-h-full flex-col overflow-y-auto overscroll-contain p-3 touch-pan-y [-webkit-overflow-scrolling:touch]">
+                <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => {
@@ -14789,6 +14801,17 @@ export function CodexMobileApp() {
                 <button
                   type="button"
                   onClick={() => {
+                    setIsHeaderActionsOpen(false);
+                    window.location.href = '/gemini-observatory';
+                  }}
+                  className="col-span-2 flex items-center justify-center gap-2 rounded-[1.25rem] bg-sky-50 px-3 py-3 text-center text-sky-700 transition hover:bg-sky-100"
+                >
+                  <Eye className="h-4 w-4" />
+                  <span className="text-xs font-semibold">Gemini Observatory</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
                     setIsTranscriptCollapsed((current) => !current);
                     setIsHeaderActionsOpen(false);
                   }}
@@ -14804,45 +14827,46 @@ export function CodexMobileApp() {
                     {isTranscriptCollapsed ? 'בטל כיווץ ציר' : 'כיווץ ציר'}
                   </span>
                 </button>
-              </div>
-              {activeComposerCwd && (
-                <div className="mt-3 rounded-[1.25rem] border border-slate-200 bg-slate-50/70 px-3 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-                        <FolderOpen className="h-4 w-4 text-slate-400" />
-                        <span>{getPathBaseName(activeComposerCwd)}</span>
-                      </div>
-                      <div className="mt-1 truncate text-[11px] text-slate-400" dir="ltr" title={activeComposerCwd}>
-                        {activeComposerCwd}
-                      </div>
-                    </div>
-                    {selectedSessionId ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsHeaderActionsOpen(false);
-                          handleNewConversation(activeSessionCwd || currentProfile?.workspaceCwd || null);
-                        }}
-                        className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
-                      >
-                        שיחה חדשה כאן
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsHeaderActionsOpen(false);
-                          openFolderPicker();
-                        }}
-                        className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
-                      >
-                        בחר תיקייה
-                      </button>
-                    )}
-                  </div>
                 </div>
-              )}
+                {activeComposerCwd && (
+                  <div className="mt-3 max-h-20 overflow-y-auto overscroll-contain rounded-[1.1rem] border border-slate-200 bg-slate-50/70 px-3 py-2 touch-pan-y [-webkit-overflow-scrolling:touch]">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                          <FolderOpen className="h-4 w-4 text-slate-400" />
+                          <span>{getPathBaseName(activeComposerCwd)}</span>
+                        </div>
+                        <div className="mt-1 truncate text-[11px] text-slate-400" dir="ltr" title={activeComposerCwd}>
+                          {activeComposerCwd}
+                        </div>
+                      </div>
+                      {selectedSessionId ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsHeaderActionsOpen(false);
+                            handleNewConversation(activeSessionCwd || currentProfile?.workspaceCwd || null);
+                          }}
+                          className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
+                        >
+                          שיחה חדשה כאן
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsHeaderActionsOpen(false);
+                            openFolderPicker();
+                          }}
+                          className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
+                        >
+                          בחר תיקייה
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </>
         )}

@@ -646,7 +646,7 @@ function clearCodexAuthCookies(res: Response) {
   });
 }
 
-function readAuthenticatedUser(req: Request) {
+export function readAuthenticatedUser(req: Request) {
   const deviceUnlocked = hasUnlockedDevice(req);
 
   if (isPublicCodexHost(req)) {
@@ -721,7 +721,7 @@ function readAuthenticatedUser(req: Request) {
   };
 }
 
-function requireCodexAccess(req: Request, res: Response, next: NextFunction) {
+export function requireCodexAccess(req: Request, res: Response, next: NextFunction) {
   const authState = readAuthenticatedUser(req);
 
   if (!authState.authenticated) {

@@ -29,6 +29,7 @@ import type {
   CodexUploadedAttachment,
 } from './codexService.js';
 import { getSelectedPermissionMode, resolvePermissionMode } from './providerPermissions.js';
+import { alignPathOwnershipToProfile, getProfileSpawnIdentity } from './providerRuntimeOwnership.js';
 
 interface ClaudeSessionScanRecord {
   id: string;
@@ -336,6 +337,7 @@ async function readClaudeCredentials(profile: CodexProfile): Promise<ClaudeCrede
 async function writeClaudeCredentials(profile: CodexProfile, credentials: ClaudeCredentialsFile): Promise<void> {
   await fs.mkdir(profile.codexHome, { recursive: true });
   await fs.writeFile(getClaudeCredentialsPath(profile), JSON.stringify(credentials, null, 2), 'utf-8');
+  alignPathOwnershipToProfile(profile, getClaudeCredentialsPath(profile));
 }
 
 function buildClaudeProcessEnv(profile: CodexProfile): NodeJS.ProcessEnv {
@@ -821,6 +823,7 @@ async function readClaudeAuthStatus(profile: CodexProfile): Promise<ClaudeAuthSt
     maxBuffer: 1024 * 1024,
     timeout: 10_000,
     killSignal: 'SIGKILL',
+    ...getProfileSpawnIdentity(profile),
   });
 
   if (result.error || result.status !== 0) {
@@ -864,6 +867,7 @@ async function writeClaudeSettings(profile: CodexProfile, patch: Partial<ClaudeS
 
   await fs.mkdir(path.dirname(settingsPath), { recursive: true });
   await fs.writeFile(settingsPath, `${JSON.stringify(next, null, 2)}\n`, 'utf-8');
+  alignPathOwnershipToProfile(profile, settingsPath);
 }
 
 async function readFileChunk(filePath: string, start: number, length: number): Promise<string> {
@@ -1883,6 +1887,7 @@ export async function deleteClaudeTurn(
     `${remainingRows.filter(Boolean).map((row) => JSON.stringify(row)).join('\n')}\n`,
     'utf-8'
   );
+  alignPathOwnershipToProfile(profile, sessionRecord.path);
 }
 
 export async function getClaudeSessionDetail(
@@ -2189,6 +2194,7 @@ export async function runClaudePrompt(
         cwd: runCwd,
         env: buildClaudeProcessEnv(profile),
         stdio: ['pipe', 'pipe', 'pipe'],
+        ...getProfileSpawnIdentity(profile),
       });
       const activeRunId = options.runId;
 

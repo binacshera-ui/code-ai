@@ -7,6 +7,7 @@ import type {
   CodexSessionSummary,
   CodexTimelineEntry,
 } from './codexService.js';
+import { alignPathOwnershipToProfile } from './providerRuntimeOwnership.js';
 
 type SupportRequestSource = 'ui' | 'api' | 'webhook';
 
@@ -242,6 +243,7 @@ export async function prepareSupportProfileHome(profile: CodexProfile): Promise<
       copyFileIfFresh(path.join(sourceProfile.codexHome, 'settings.json'), path.join(profile.codexHome, 'settings.json')),
       copyFileIfFresh(path.join(sourceProfile.codexHome, 'mcp-needs-auth-cache.json'), path.join(profile.codexHome, 'mcp-needs-auth-cache.json')),
     ]);
+    alignPathOwnershipToProfile(profile, getProfileHomeRoot(profile));
     return;
   }
 
@@ -253,6 +255,7 @@ export async function prepareSupportProfileHome(profile: CodexProfile): Promise<
       copyFileIfFresh(path.join(sourceProfile.codexHome, 'projects.json'), path.join(profile.codexHome, 'projects.json')),
       copyFileIfFresh(path.join(sourceProfile.codexHome, 'installation_id'), path.join(profile.codexHome, 'installation_id')),
     ]);
+    alignPathOwnershipToProfile(profile, getProfileHomeRoot(profile));
     return;
   }
 
@@ -262,6 +265,7 @@ export async function prepareSupportProfileHome(profile: CodexProfile): Promise<
     copyFileIfFresh(path.join(sourceProfile.codexHome, 'installation_id'), path.join(profile.codexHome, 'installation_id')),
     copyFileIfFresh(path.join(sourceProfile.codexHome, 'models_cache.json'), path.join(profile.codexHome, 'models_cache.json')),
   ]);
+  alignPathOwnershipToProfile(profile, profile.codexHome);
 }
 
 export async function prepareAllSupportProfileHomes(): Promise<Set<string>> {

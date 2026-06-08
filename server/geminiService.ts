@@ -27,6 +27,7 @@ import type {
   CodexUploadedAttachment,
 } from './codexService.js';
 import { getSelectedPermissionMode, resolvePermissionMode } from './providerPermissions.js';
+import { alignPathOwnershipToProfile, getProfileSpawnIdentity } from './providerRuntimeOwnership.js';
 
 interface GeminiSessionScanRecord {
   id: string;
@@ -1583,6 +1584,7 @@ export async function deleteGeminiTurn(
     ];
     parsed.lastUpdated = nowIso;
     await fs.writeFile(sessionRecord.path, `${JSON.stringify(parsed, null, 2)}\n`, 'utf-8');
+    alignPathOwnershipToProfile(profile, sessionRecord.path);
     return;
   }
 
@@ -1608,6 +1610,7 @@ export async function deleteGeminiTurn(
     `${remainingRows.map((row) => JSON.stringify(row)).join('\n')}\n`,
     'utf-8'
   );
+  alignPathOwnershipToProfile(profile, sessionRecord.path);
 }
 
 export async function getGeminiSessionDetail(
@@ -1860,6 +1863,7 @@ export async function runGeminiPrompt(
           cwd: runCwd,
           env,
           stdio: ['pipe', 'pipe', 'pipe'],
+          ...getProfileSpawnIdentity(profile),
         });
 
         if (activeRunId) {

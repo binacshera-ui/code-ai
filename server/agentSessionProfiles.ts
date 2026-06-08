@@ -2,6 +2,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import type { CodexProfile } from './codexService.js';
 import { CODEX_APP_CONFIG } from './config.js';
+import { alignPathOwnershipToProfile } from './providerRuntimeOwnership.js';
 
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
@@ -63,6 +64,7 @@ export async function prepareAgentSessionProfileHome(profile: CodexProfile): Pro
       copyFileIfFresh(path.join(sourceProfile.codexHome, 'settings.json'), path.join(profile.codexHome, 'settings.json')),
       copyFileIfFresh(path.join(sourceProfile.codexHome, 'mcp-needs-auth-cache.json'), path.join(profile.codexHome, 'mcp-needs-auth-cache.json')),
     ]);
+    alignPathOwnershipToProfile(profile, getProfileHomeRoot(profile));
     return;
   }
 
@@ -74,6 +76,7 @@ export async function prepareAgentSessionProfileHome(profile: CodexProfile): Pro
       copyFileIfFresh(path.join(sourceProfile.codexHome, 'projects.json'), path.join(profile.codexHome, 'projects.json')),
       copyFileIfFresh(path.join(sourceProfile.codexHome, 'installation_id'), path.join(profile.codexHome, 'installation_id')),
     ]);
+    alignPathOwnershipToProfile(profile, getProfileHomeRoot(profile));
     return;
   }
 
@@ -81,4 +84,5 @@ export async function prepareAgentSessionProfileHome(profile: CodexProfile): Pro
     copyFileIfFresh(path.join(sourceProfile.codexHome, 'auth.json'), path.join(profile.codexHome, 'auth.json')),
     copyFileIfFresh(path.join(sourceProfile.codexHome, 'config.toml'), path.join(profile.codexHome, 'config.toml')),
   ]);
+  alignPathOwnershipToProfile(profile, profile.codexHome);
 }
