@@ -776,6 +776,41 @@ async function rebindQueueItemsToSession(profileId: string, queueKey: string, se
   }
 }
 
+async function copySessionSidebarMetadataToRecoveredSession(
+  profileId: string,
+  sourceSessionId: string,
+  targetSessionId: string
+) {
+  if (!sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) {
+    return;
+  }
+
+  const sourceSession = await getAgentSessionDetail(sourceSessionId, profileId, { tail: 1 }).catch(() => null);
+  if (!sourceSession) {
+    return;
+  }
+
+  const [hiddenIds, topicMap, titleMap] = await Promise.all([
+    listHiddenSessionIds(profileId),
+    getSessionTopicMap(profileId),
+    getSessionTitleMap(profileId),
+  ]);
+
+  if (hiddenIds.has(sourceSessionId)) {
+    await setSessionHidden(profileId, targetSessionId, true);
+  }
+
+  const sourceTopic = topicMap[sourceSessionId];
+  if (sourceTopic) {
+    await setSessionTopic(profileId, targetSessionId, sourceTopic.id, sourceSession.cwd || sourceTopic.cwd);
+  }
+
+  const sourceTitle = titleMap[sourceSessionId];
+  if (sourceTitle) {
+    await setSessionCustomTitle(profileId, targetSessionId, sourceTitle);
+  }
+}
+
 async function persistPlannerOutputFromDisk(item: CodexQueueItem, sessionId: string) {
   if (!item.agentSessionId || item.agentLinkKind !== 'planner') {
     return;
@@ -920,6 +955,10 @@ async function processQueueItem(item: CodexQueueItem) {
         executionConfig,
       }
     );
+
+    if (resolvedSessionId && result.sessionId !== resolvedSessionId) {
+      await copySessionSidebarMetadataToRecoveredSession(item.profileId, resolvedSessionId, result.sessionId);
+    }
 
     await rebindQueueItemsToSession(item.profileId, item.queueKey, result.sessionId);
 

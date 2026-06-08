@@ -1,5 +1,5 @@
-const SHELL_CACHE = 'code-ai-shell-v3';
-const ASSET_CACHE = 'code-ai-assets-v3';
+const SHELL_CACHE = 'code-ai-shell-v4';
+const ASSET_CACHE = 'code-ai-assets-v4';
 const SHELL_URLS = [
   '/',
   '/manifest.webmanifest',

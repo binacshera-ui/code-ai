@@ -8,6 +8,7 @@ import {
   getForkDraftSession,
   getForkSessionMetadata,
   listForkDraftSessions,
+  type CodexForkContext,
   type CodexForkDraftSession,
   type CodexForkSessionMetadata,
 } from './codexForkSessions.js';
@@ -218,6 +219,16 @@ interface SessionSummaryHints {
 interface CodexRunResult {
   sessionId: string;
   finalMessage: string;
+  recoveredFromSessionId?: string | null;
+  recoveryMode?: 'compact-clone' | null;
+}
+
+interface CodexCompactionRecoveryContext {
+  sourceSessionId: string;
+  sourceTitle: string;
+  sourceCwd: string | null;
+  promptPrefix: string;
+  forkContext: CodexForkContext;
 }
 
 export interface CodexExecutionConfig {
@@ -483,8 +494,34 @@ function parseCompactClonePrompt(text: string): {
   };
 }
 
+function isCodexContextCompactionFailureText(text: string): boolean {
+  const normalized = (text || '').trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /Invalid value:\s*'context_compaction'/i.test(normalized)
+    || (/context_compaction/i.test(normalized) && /invalid_enum_value/i.test(normalized))
+  );
+}
+
+export function isCodexContextCompactionFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return isCodexContextCompactionFailureText(message);
+}
+
 function clipLongText(text: string, limit = MAX_TOOL_TEXT): string {
   const normalized = text.trim();
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, limit - 1).trimEnd()}\n…`;
+}
+
+function clipCompactionRecoveryText(text: string, limit = 12_000): string {
+  const normalized = text.replace(/\s+\n/g, '\n').trim();
   if (normalized.length <= limit) {
     return normalized;
   }
@@ -1504,6 +1541,107 @@ function timelineEntryToMessage(entry: CodexTimelineEntry): CodexSessionMessage 
     kind: entry.kind,
     text: entry.text,
     timestamp: entry.timestamp,
+  };
+}
+
+function renderCompactionRecoveryTimelineEntry(
+  entry: CodexTimelineEntry,
+  sourceProviderLabel: string
+): string | null {
+  if (entry.entryType === 'message' && typeof entry.text === 'string') {
+    const prefix = entry.role === 'user'
+      ? 'משתמש'
+      : entry.kind === 'commentary'
+        ? `${sourceProviderLabel} (עובד)`
+        : sourceProviderLabel;
+    return `${prefix}:\n${clipCompactionRecoveryText(entry.text, entry.kind === 'commentary' ? 4_000 : 10_000)}`;
+  }
+
+  if (entry.entryType === 'tool') {
+    const title = entry.title || entry.toolName || 'Tool';
+    const details = [entry.subtitle, entry.text].filter(Boolean).join('\n');
+    return `כלי ${title}:\n${clipCompactionRecoveryText(details || 'Tool event without textual details.', 4_000)}`;
+  }
+
+  if (entry.entryType === 'status') {
+    const details = [entry.title || entry.status || 'Status', entry.subtitle].filter(Boolean).join('\n');
+    return `סטטוס:\n${clipCompactionRecoveryText(details, 2_500)}`;
+  }
+
+  return null;
+}
+
+function buildCompactionRecoveryTranscript(
+  timeline: CodexTimelineEntry[],
+  sourceProviderLabel: string,
+  maxChars = 120_000
+): string {
+  const rendered = timeline
+    .map((entry) => renderCompactionRecoveryTimelineEntry(entry, sourceProviderLabel))
+    .filter((value): value is string => Boolean(value));
+
+  if (rendered.length === 0) {
+    return 'לא נמצאה היסטוריית שיחה מפורשת לשחזור. המשך רק מההודעה החדשה שתגיע אחר כך.';
+  }
+
+  let keptChars = 0;
+  const kept: string[] = [];
+  for (let index = rendered.length - 1; index >= 0; index -= 1) {
+    const chunk = rendered[index]!;
+    const extraChars = chunk.length + (kept.length > 0 ? 2 : 0);
+    if (kept.length > 0 && keptChars + extraChars > maxChars) {
+      break;
+    }
+    kept.unshift(chunk);
+    keptChars += extraChars;
+  }
+
+  if (kept.length < rendered.length) {
+    kept.unshift(`הערת מערכת: ${rendered.length - kept.length} קטעי היסטוריה מוקדמים הושמטו כדי לשמור על recovery יציב. המשך מההיסטוריה המופיעה כאן בלבד.`);
+  }
+
+  return kept.join('\n\n');
+}
+
+export async function buildCodexCompactionRecoveryContext(
+  sessionId: string,
+  profileId?: string
+): Promise<CodexCompactionRecoveryContext> {
+  const profile = resolveProfile(profileId);
+  const sourceSession = await getCodexSessionDetail(sessionId, profile.id, { full: true });
+  const sourceProviderLabel = getProviderDisplayLabel(profile.provider);
+  const transcript = buildCompactionRecoveryTranscript(sourceSession.timeline, sourceProviderLabel);
+  const lastTimelineEntry = sourceSession.timeline.at(-1);
+  const forkEntryId = lastTimelineEntry?.id || `${sessionId}-compact-repair`;
+  const sourceCwd = sourceSession.cwd || profile.workspaceCwd;
+  const promptPrefix = [
+    `Compact clone of session ${sourceSession.id}`,
+    `- Thread: ${sourceSession.title}`,
+    sourceCwd ? `- CWD: ${sourceCwd}` : '',
+    `- Provider: ${sourceProviderLabel}`,
+    '',
+    'This session hit an internal Codex context compaction incompatibility during resume.',
+    'The transcript below is the reconstructed canonical context. Continue naturally from it, without explaining the repair process to the user.',
+    '',
+    transcript,
+    '',
+    'עד כאן ההקשר המשוחזר. אל תסכם את השיחה ואל תדבר עליה מבחוץ. המשך ישירות מהנקודה האחרונה ומההודעה החדשה שתופיע מיד אחר כך.',
+  ].filter(Boolean).join('\n');
+
+  return {
+    sourceSessionId: sourceSession.id,
+    sourceTitle: sourceSession.title,
+    sourceCwd,
+    promptPrefix,
+    forkContext: {
+      sourceSessionId: sourceSession.id,
+      sourceTitle: sourceSession.title,
+      sourceCwd,
+      forkEntryId,
+      transferSourceProvider: profile.provider,
+      transferTargetProvider: profile.provider,
+      timeline: sourceSession.timeline.map((entry) => ({ ...entry })),
+    },
   };
 }
 
@@ -3338,7 +3476,9 @@ export async function runCodexPrompt(
     runId?: string;
     cwd?: string;
     injectDirectoryContext?: boolean;
+    contextPrefix?: string;
     executionConfig?: CodexExecutionConfig | null;
+    allowCompactionResumeRepair?: boolean;
   } = {}
 ): Promise<CodexRunResult> {
   const profile = resolveProfile(profileId);
@@ -3354,6 +3494,9 @@ export async function runCodexPrompt(
     cwdContext: runCwd,
     injectDirectoryContext: Boolean(!sessionId && options.injectDirectoryContext),
   });
+  const effectivePromptText = options.contextPrefix?.trim()
+    ? `${options.contextPrefix.trim()}\n\nהודעת ההמשך החדשה:\n${promptText}`
+    : promptText;
   const queueKey = `${profile.id}:${sessionId || '__new__'}`;
   const executionConfig = await resolveCodexExecutionConfig(profile, options.executionConfig);
 
@@ -3397,7 +3540,7 @@ export async function runCodexPrompt(
 
       child.stdout.setEncoding('utf-8');
       child.stderr.setEncoding('utf-8');
-      child.stdin.end(promptText);
+      child.stdin.end(effectivePromptText);
 
       child.stdout.on('data', (chunk: string) => {
         stdoutBuffer += chunk;
@@ -3467,6 +3610,43 @@ export async function runCodexPrompt(
             stdoutLines,
             structuredErrors
           );
+          if (
+            sessionId
+            && options.allowCompactionResumeRepair !== false
+            && isCodexContextCompactionFailureText(failureDetails)
+          ) {
+            try {
+              const recovery = await buildCodexCompactionRecoveryContext(sessionId, profile.id);
+              const repairedResult = await runCodexPrompt(
+                trimmedPrompt,
+                undefined,
+                profile.id,
+                attachments,
+                {
+                  runId: activeRunId,
+                  cwd: runCwd,
+                  injectDirectoryContext: false,
+                  contextPrefix: recovery.promptPrefix,
+                  executionConfig,
+                  allowCompactionResumeRepair: false,
+                }
+              );
+              resolve({
+                ...repairedResult,
+                recoveredFromSessionId: sessionId,
+                recoveryMode: 'compact-clone',
+              });
+              return;
+            } catch (recoveryError) {
+              const recoveryMessage = recoveryError instanceof Error
+                ? recoveryError.message
+                : String(recoveryError || 'Unknown recovery error');
+              reject(new Error(
+                `${sanitizeCodexCliFailure(profile, failureDetails, `Codex exited with code ${code}`)}\n\nAutomatic compact-clone recovery also failed:\n${recoveryMessage}`
+              ));
+              return;
+            }
+          }
           reject(new Error(sanitizeCodexCliFailure(profile, failureDetails, `Codex exited with code ${code}`)));
           return;
         }

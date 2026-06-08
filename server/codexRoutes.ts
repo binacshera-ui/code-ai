@@ -3639,6 +3639,21 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         injectDirectoryContext: !sessionId,
         executionConfig,
       });
+      if (sessionId && result.sessionId !== sessionId) {
+        const sourceSession = await getAgentSessionDetail(sessionId, visibleProfileId, {
+          tail: 1,
+        }).catch(() => null);
+        if (sourceSession) {
+          await copySessionSidebarMetadataToForkSession(
+            visibleProfileId,
+            visibleProfileId,
+            sourceSession,
+            result.sessionId
+          );
+        }
+        await rebindSessionInstruction(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionReminders(visibleProfileId, sessionId, result.sessionId);
+      }
       if (!sessionId && supportSessionKey !== result.sessionId) {
         await rebindSessionInstruction(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionReminders(visibleProfileId, supportSessionKey, result.sessionId);
