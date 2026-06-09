@@ -98,6 +98,7 @@ import {
   type AgentSessionRecord,
 } from './codexAgentSessions.js';
 import {
+  clearSessionContextSelection,
   deleteSessionContextSelection,
   getSessionContextSelection,
   rebindSessionContextSelection,
@@ -917,6 +918,7 @@ async function copySessionContextSelectionToSession(
     && selection.reminderIds.length === 0
     && !selection.agentSessionDraftId
     && !selection.professionalMode
+    && !selection.actionRestriction
   ) {
     return;
   }
@@ -939,7 +941,7 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
     deleteSessionTopicAssignment(profileId, sessionId),
     deleteSessionCustomTitle(profileId, sessionId),
     deleteSessionInstruction(profileId, sessionId),
-    deleteSessionContextSelection(profileId, sessionId),
+    clearSessionContextSelection(profileId, sessionId),
     deleteSessionReminders(profileId, sessionId),
     deleteSessionTrigger(profileId, sessionId),
     deleteForkSessionMetadata(sessionId),
@@ -2441,6 +2443,7 @@ router.post('/session-triggers/:triggerId/fire', async (req, res) => {
 
     const detail = await getAgentSessionDetail(trigger.sessionId, trigger.profileId, { tail: 1 });
     const sessionInstruction = await getSessionInstruction(trigger.profileId, trigger.sessionId);
+    const sessionContextSelection = await getSessionContextSelection(trigger.profileId, trigger.sessionId);
     const triggerPrompt = buildSessionTriggerPrompt(trigger.label, req.body);
     const item = await enqueueCodexQueueItem({
       profileId: trigger.profileId,
@@ -2453,6 +2456,7 @@ router.post('/session-triggers/:triggerId/fire', async (req, res) => {
       prompt: triggerPrompt.prompt,
       promptPreview: triggerPrompt.preview,
       sessionInstruction: sessionInstruction || undefined,
+      actionRestriction: sessionContextSelection.actionRestriction,
     });
 
     await recordSessionTriggerInvocation(trigger.profileId, trigger.sessionId, triggerPrompt.payloadPreview);
@@ -2580,6 +2584,7 @@ router.post('/session-context-selection', requireCodexAccess, async (req, res) =
       reminderIds: req.body?.reminderIds,
       agentSessionDraftId: req.body?.agentSessionDraftId,
       professionalMode: req.body?.professionalMode,
+      actionRestriction: req.body?.actionRestriction,
     });
     res.json({ selection });
   } catch (error: any) {
@@ -3321,7 +3326,14 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     const sessionContextKey = sessionId || queueKey;
     const sessionContextSelection = sessionContextKey
       ? await getSessionContextSelection(visibleProfileId, sessionContextKey)
-      : { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false };
+      : {
+        anchorIds: [],
+        skillIds: [],
+        reminderIds: [],
+        agentSessionDraftId: null,
+        professionalMode: false,
+        actionRestriction: null,
+      };
     const contextCwd = cwd || (
       sessionId
         ? (await getAgentSessionDetail(sessionId, profileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
@@ -3342,6 +3354,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       .join('\n\n');
 
     if (sessionContextSelection.agentSessionDraftId) {
+      if (sessionContextSelection.actionRestriction?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב הגבלת פעולה עם מצב סוכנים באותו שלב.' });
+        return;
+      }
       const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
       if (!sourceProfile) {
         res.status(404).json({ error: 'The selected profile was not found' });
@@ -3407,6 +3423,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           promptPreview: spec.promptPreview,
           contextPrefix: combinedContextPrefix || undefined,
           sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -3442,6 +3459,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       promptPreview: effectivePromptPreview,
       contextPrefix: combinedContextPrefix || undefined,
       sessionInstruction: effectiveSessionInstruction,
+      actionRestriction: sessionContextSelection.actionRestriction,
       forkContext: hydratedForkDraft.forkContext,
       scheduledAt,
       attachments,
@@ -3454,7 +3472,9 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
 
     res.status(202).json({ item });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to enqueue Codex task' });
+    res.status(typeof error?.statusCode === 'number' ? error.statusCode : 500).json({
+      error: error.message || 'Failed to enqueue Codex task',
+    });
   }
 });
 
@@ -3620,6 +3640,10 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       : promptWithForkContext;
 
     if (sessionContextSelection.agentSessionDraftId) {
+      if (sessionContextSelection.actionRestriction?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב הגבלת פעולה עם מצב סוכנים באותו שלב.' });
+        return;
+      }
       const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
       if (!sourceProfile) {
         res.status(404).json({ error: 'The selected profile was not found' });
@@ -3715,6 +3739,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         cwd,
         injectDirectoryContext: !sessionId,
         executionConfig,
+        actionRestriction: sessionContextSelection.actionRestriction,
       });
       if (sessionId && result.sessionId !== sessionId) {
         const sourceSession = await getAgentSessionDetail(sessionId, visibleProfileId, {
@@ -3729,10 +3754,12 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           );
         }
         await rebindSessionInstruction(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionContextSelection(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionReminders(visibleProfileId, sessionId, result.sessionId);
       }
       if (!sessionId && supportSessionKey !== result.sessionId) {
         await rebindSessionInstruction(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionContextSelection(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionReminders(visibleProfileId, supportSessionKey, result.sessionId);
       }
       if (supportEnvelope && supportSessionKey !== result.sessionId) {
@@ -3773,6 +3800,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       promptPreview: supportEnvelope?.promptPreview || promptPreview,
       contextPrefix: combinedContextPrefix || undefined,
       sessionInstruction: effectiveSessionInstruction,
+      actionRestriction: sessionContextSelection.actionRestriction,
       forkContext: hydratedForkDraft.forkContext,
       attachments,
       recurrence,
@@ -3782,7 +3810,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
 
     res.status(202).json({ job: item });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Codex request failed' });
+    res.status(typeof error?.statusCode === 'number' ? error.statusCode : 500).json({
+      error: error.message || 'Codex request failed',
+    });
   }
 });
 

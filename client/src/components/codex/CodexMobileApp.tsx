@@ -613,6 +613,13 @@ interface CodexSessionContextSelection {
   reminderIds: string[];
   agentSessionDraftId: string | null;
   professionalMode: boolean;
+  actionRestriction: CodexSessionActionRestriction | null;
+}
+
+interface CodexSessionActionRestriction {
+  enabled: boolean;
+  targetPath: string;
+  targetKind: 'file' | 'directory';
 }
 
 interface CodexSessionTasksResponse {
@@ -758,6 +765,67 @@ type WorkspaceMode = 'standard' | 'support';
 const INITIAL_TIMELINE_WINDOW_SIZE = 120;
 const TIMELINE_WINDOW_INCREMENT = 120;
 const TIMELINE_FULL_LOAD_CHUNK_SIZE = 400;
+
+function createEmptySessionContextSelection(
+  actionRestriction: CodexSessionActionRestriction | null = null
+): CodexSessionContextSelection {
+  return {
+    anchorIds: [],
+    skillIds: [],
+    reminderIds: [],
+    agentSessionDraftId: null,
+    professionalMode: false,
+    actionRestriction,
+  };
+}
+
+function getPathBasename(value: string): string {
+  const normalized = value.replace(/[\\/]+$/, '');
+  const segments = normalized.split(/[\\/]/).filter(Boolean);
+  return segments[segments.length - 1] || normalized;
+}
+
+function getPathExtension(value: string): string | null {
+  const basename = getPathBasename(value);
+  const dotIndex = basename.lastIndexOf('.');
+  if (dotIndex <= 0 || dotIndex === basename.length - 1) {
+    return null;
+  }
+  return basename.slice(dotIndex + 1).toLowerCase();
+}
+
+function normalizeSessionActionRestriction(
+  value: CodexSessionActionRestriction | null | undefined
+): CodexSessionActionRestriction | null {
+  if (!value?.targetPath?.trim()) {
+    return null;
+  }
+
+  return {
+    enabled: value.enabled !== false,
+    targetPath: value.targetPath.trim(),
+    targetKind: value.targetKind === 'file' ? 'file' : 'directory',
+  };
+}
+
+function buildDraftFileTreeEntryFromRestriction(
+  restriction: CodexSessionActionRestriction | null
+): CodexFileTreeEntry | null {
+  if (!restriction?.targetPath?.trim()) {
+    return null;
+  }
+
+  const normalizedPath = restriction.targetPath.trim();
+  return {
+    name: getPathBasename(normalizedPath) || normalizedPath,
+    path: normalizedPath,
+    relativePath: normalizedPath,
+    rootPath: normalizedPath,
+    kind: restriction.targetKind,
+    size: null,
+    extension: restriction.targetKind === 'file' ? getPathExtension(normalizedPath) : null,
+  };
+}
 const APP_DISPLAY_NAME = 'code-ai';
 const APP_ICON_PATH = '/icons/code-ai-512.png';
 const APPLE_TOUCH_ICON_PATH = '/icons/apple-touch-icon.png';
@@ -2230,7 +2298,7 @@ async function fetchSessionContextSelection(profileId: string, sessionKey: strin
   const data = await fetchJson<CodexSessionContextSelectionResponse>(
     `/api/codex/session-context-selection?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
   );
-  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false };
+  return data.selection || createEmptySessionContextSelection();
 }
 
 async function saveSessionContextSelection(
@@ -2251,9 +2319,10 @@ async function saveSessionContextSelection(
       reminderIds: selection.reminderIds,
       agentSessionDraftId: selection.agentSessionDraftId,
       professionalMode: selection.professionalMode,
+      actionRestriction: selection.actionRestriction,
     }),
   });
-  return data.selection || { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false };
+  return data.selection || createEmptySessionContextSelection();
 }
 
 async function fetchAgentSessions(profileId: string, cwd?: string | null): Promise<CodexAgentSessionRecord[]> {
@@ -6178,7 +6247,7 @@ function FileTreeDialog({
           <div className="border-t border-slate-100 px-5 py-4">
             <div className="rounded-[1.25rem] border border-slate-100 bg-slate-50/70 px-4 py-3">
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                Anchor Target
+                Selection Target
               </div>
               <div className="mt-1 text-sm font-semibold text-slate-700">{selectionState.title}</div>
               <div className="mt-1 text-xs leading-6 text-slate-500">{selectionState.description}</div>
@@ -9510,16 +9579,20 @@ function ModePickerDialog({
   isOpen,
   isProfessionalModeSelected,
   selectedAgentSessionDraft,
+  selectedActionRestriction,
   onClose,
   onToggleProfessionalMode,
   onOpenAgentSessions,
+  onOpenActionRestriction,
 }: {
   isOpen: boolean;
   isProfessionalModeSelected: boolean;
   selectedAgentSessionDraft: CodexAgentSessionRecord | null;
+  selectedActionRestriction: CodexSessionActionRestriction | null;
   onClose: () => void;
   onToggleProfessionalMode: () => void;
   onOpenAgentSessions: () => void;
+  onOpenActionRestriction: () => void;
 }) {
   if (!isOpen) {
     return null;
@@ -9620,6 +9693,191 @@ function ModePickerDialog({
               <Bot className="h-4 w-4" />
             </div>
           </button>
+
+          <button
+            type="button"
+            onClick={onOpenActionRestriction}
+            className={cn(
+              'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
+              selectedActionRestriction
+                ? 'border-amber-200 bg-amber-50/80'
+                : 'border-slate-100 bg-slate-50/80 hover:border-amber-200 hover:bg-amber-50/50'
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-800">מצב הגבלת פעולה</div>
+                {selectedActionRestriction?.enabled && (
+                  <span className="rounded-full bg-amber-600 px-2 py-0.5 text-[10px] font-medium text-white">
+                    פעיל
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">
+                הסוכן יקבל הוראה מפורשת לערוך רק קובץ או תיקייה שתבחר, ואנחנו נדחה שינויים חורגים כשאפשר לזהותם.
+              </div>
+              {selectedActionRestriction?.targetPath && (
+                <div className="mt-2 truncate rounded-full bg-white/85 px-3 py-1.5 text-[10px] text-slate-500" dir="ltr">
+                  {selectedActionRestriction.targetPath}
+                </div>
+              )}
+            </div>
+            <div className={cn(
+              'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+              selectedActionRestriction ? 'bg-amber-100 text-amber-700' : 'bg-white text-amber-500'
+            )}>
+              <ShieldCheck className="h-4 w-4" />
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ActionRestrictionDialog({
+  isOpen,
+  draft,
+  isSaving,
+  onClose,
+  onToggleEnabled,
+  onOpenPicker,
+  onSave,
+  onClear,
+}: {
+  isOpen: boolean;
+  draft: CodexSessionActionRestriction | null;
+  isSaving: boolean;
+  onClose: () => void;
+  onToggleEnabled: () => void;
+  onOpenPicker: () => void;
+  onSave: () => void;
+  onClear: () => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[78] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close action restriction dialog"
+      />
+      <div className="relative z-10 flex w-full max-w-xl max-h-[88dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-50 text-amber-700">
+              <ShieldCheck className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Action Restriction
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">מצב הגבלת פעולה</div>
+              <div className="mt-1 text-sm leading-6 text-slate-500">
+                בחר קובץ או תיקייה שסביבם מותר לסוכן לערוך. הקריאה נשארת רגילה, אבל שינויים חורגים שנוכל לזהות יידחו.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          <div className="rounded-[1.5rem] border border-slate-100 bg-slate-50/70 px-4 py-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-800">סטטוס ההגבלה</div>
+                <div className="mt-1 text-xs leading-6 text-slate-500">
+                  אפשר לכבות זמנית את ההגבלה בלי לאבד את הנתיב שנבחר.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={draft?.enabled === true}
+                onClick={onToggleEnabled}
+                className={`relative inline-flex h-7 w-12 items-center rounded-full transition ${
+                  draft?.enabled ? 'bg-amber-400/90' : 'bg-slate-200'
+                }`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 rounded-full bg-white shadow transition ${
+                    draft?.enabled ? 'translate-x-1' : 'translate-x-6'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-[1.5rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-slate-800">יעד מותר לעריכה</div>
+                <div className="mt-1 text-xs leading-6 text-slate-500">
+                  בחר קובץ יחיד או תיקייה. קבצים מחוץ ליעד הזה ייחשבו חריגה.
+                </div>
+              </div>
+              {draft?.targetKind && (
+                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-medium text-slate-600">
+                  {draft.targetKind === 'file' ? 'קובץ' : 'תיקייה'}
+                </span>
+              )}
+            </div>
+            <div className="mt-3 truncate rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600" dir="ltr">
+              {draft?.targetPath || 'עדיין לא נבחר נתיב'}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={onOpenPicker}
+                className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+              >
+                בחר קובץ או תיקייה
+              </button>
+              <div className="text-[11px] leading-5 text-slate-400">
+                במצב זה לא נשנה את הרשאות ה־CLI, רק נדחה שינויים חורגים כשנוכל לזהותם.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-slate-100 px-5 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={onClear}
+              disabled={isSaving && !draft}
+              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
+            >
+              נקה מצב
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+              >
+                בטל
+              </button>
+              <button
+                type="button"
+                onClick={onSave}
+                disabled={isSaving || !draft?.targetPath}
+                className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
+              >
+                {isSaving ? 'שומר...' : 'שמור'}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -10480,6 +10738,8 @@ export function CodexMobileApp() {
   const [isAnchorCreateDialogOpen, setIsAnchorCreateDialogOpen] = useState(false);
   const [isCreateReminderDialogOpen, setIsCreateReminderDialogOpen] = useState(false);
   const [isAnchorTargetPickerMode, setIsAnchorTargetPickerMode] = useState(false);
+  const [isActionRestrictionDialogOpen, setIsActionRestrictionDialogOpen] = useState(false);
+  const [isActionRestrictionPickerMode, setIsActionRestrictionPickerMode] = useState(false);
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
   const [activeModelPanelSection, setActiveModelPanelSection] = useState<'permissions' | 'speed' | 'models' | 'reasoning'>('permissions');
   const [isReasoningPickerOpen, setIsReasoningPickerOpen] = useState(false);
@@ -10515,13 +10775,9 @@ export function CodexMobileApp() {
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
   const [isSessionInstructionEnabled, setIsSessionInstructionEnabled] = useState(true);
-  const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>({
-    anchorIds: [],
-    skillIds: [],
-    reminderIds: [],
-    agentSessionDraftId: null,
-    professionalMode: false,
-  });
+  const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>(
+    createEmptySessionContextSelection()
+  );
   const [instructionDraft, setInstructionDraft] = useState('');
   const [projectAnchors, setProjectAnchors] = useState<CodexProjectAnchor[]>([]);
   const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
@@ -10554,6 +10810,7 @@ export function CodexMobileApp() {
   const [sessionTasksError, setSessionTasksError] = useState<string | null>(null);
   const [sessionSubtasksError, setSessionSubtasksError] = useState<string | null>(null);
   const [anchorDraftTargetEntry, setAnchorDraftTargetEntry] = useState<CodexFileTreeEntry | null>(null);
+  const [actionRestrictionDraft, setActionRestrictionDraft] = useState<CodexSessionActionRestriction | null>(null);
   const [anchorDraftName, setAnchorDraftName] = useState('');
   const [anchorDraftDescription, setAnchorDraftDescription] = useState('');
   const [agentSessionDraftTitle, setAgentSessionDraftTitle] = useState('');
@@ -12089,7 +12346,10 @@ export function CodexMobileApp() {
     setIsAnchorCreateDialogOpen(false);
     setIsCreateReminderDialogOpen(false);
     setIsAnchorTargetPickerMode(false);
+    setIsActionRestrictionDialogOpen(false);
+    setIsActionRestrictionPickerMode(false);
     setAnchorDraftTargetEntry(null);
+    setActionRestrictionDraft(null);
     setAnchorDraftName('');
     setAnchorDraftDescription('');
     setActiveAgentPlanEditorRecord(null);
@@ -12101,6 +12361,7 @@ export function CodexMobileApp() {
     setAgentSessionDraftGoal('');
     setSessionReminders([]);
     setSessionRemindersError(null);
+    setSessionContextSelection(createEmptySessionContextSelection());
     clearDraftAttachments();
     setScheduledFor('');
     setIsScheduleOpen(false);
@@ -12181,7 +12442,10 @@ export function CodexMobileApp() {
     setIsAnchorCreateDialogOpen(false);
     setIsCreateReminderDialogOpen(false);
     setIsAnchorTargetPickerMode(false);
+    setIsActionRestrictionDialogOpen(false);
+    setIsActionRestrictionPickerMode(false);
     setAnchorDraftTargetEntry(null);
+    setActionRestrictionDraft(null);
     setAnchorDraftName('');
     setAnchorDraftDescription('');
     setActiveAgentPlanEditorRecord(null);
@@ -12199,7 +12463,7 @@ export function CodexMobileApp() {
     setSessionRemindersError(null);
     setSessionTasks([]);
     setSessionTasksError(null);
-    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false });
+    setSessionContextSelection(createEmptySessionContextSelection());
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
@@ -13498,7 +13762,7 @@ export function CodexMobileApp() {
 
   async function loadCurrentSessionContextSelection(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
     if (!nextProfileId || !nextSessionKey) {
-      setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false });
+      setSessionContextSelection(createEmptySessionContextSelection());
       return;
     }
 
@@ -13512,7 +13776,7 @@ export function CodexMobileApp() {
       setSessionContextSelection(selection);
     } catch (selectionError: any) {
       if (requestToken === latestSessionContextSelectionLoadTokenRef.current) {
-        setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false });
+        setSessionContextSelection(createEmptySessionContextSelection());
         setError(selectionError.message || 'Failed to load anchor, skill and reminder selection');
       }
     } finally {
@@ -13540,14 +13804,33 @@ export function CodexMobileApp() {
     }
   }
 
+  function buildNextSessionContextSelection(
+    overrides: Partial<CodexSessionContextSelection>
+  ): CodexSessionContextSelection {
+    return {
+      anchorIds: overrides.anchorIds ?? sessionContextSelection.anchorIds,
+      skillIds: overrides.skillIds ?? sessionContextSelection.skillIds,
+      reminderIds: overrides.reminderIds ?? sessionContextSelection.reminderIds,
+      agentSessionDraftId: overrides.agentSessionDraftId ?? sessionContextSelection.agentSessionDraftId,
+      professionalMode: overrides.professionalMode ?? sessionContextSelection.professionalMode,
+      actionRestriction: overrides.actionRestriction !== undefined
+        ? normalizeSessionActionRestriction(overrides.actionRestriction)
+        : normalizeSessionActionRestriction(sessionContextSelection.actionRestriction),
+    };
+  }
+
   function clearSessionContextSelectionAfterSend() {
-    setSessionContextSelection({ anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false });
+    setSessionContextSelection(createEmptySessionContextSelection(
+      normalizeSessionActionRestriction(sessionContextSelection.actionRestriction)
+    ));
     setIsAdditionsMenuOpen(false);
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
     setIsReminderPickerDialogOpen(false);
     setIsModePickerDialogOpen(false);
     setIsAgentSessionDialogOpen(false);
+    setIsActionRestrictionDialogOpen(false);
+    setIsActionRestrictionPickerMode(false);
   }
 
   async function loadCurrentAgentSessions(nextProfileId = profileId, nextCwd = activeComposerCwd) {
@@ -13719,13 +14002,9 @@ export function CodexMobileApp() {
     } else {
       currentIds.add(anchorId);
     }
-    void persistSessionContextSelection({
+    void persistSessionContextSelection(buildNextSessionContextSelection({
       anchorIds: [...currentIds],
-      skillIds: sessionContextSelection.skillIds,
-      reminderIds: sessionContextSelection.reminderIds,
-      agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
-      professionalMode: sessionContextSelection.professionalMode,
-    });
+    }));
   }
 
   function toggleSkillSelection(skillId: string) {
@@ -13735,13 +14014,9 @@ export function CodexMobileApp() {
     } else {
       currentIds.add(skillId);
     }
-    void persistSessionContextSelection({
-      anchorIds: sessionContextSelection.anchorIds,
+    void persistSessionContextSelection(buildNextSessionContextSelection({
       skillIds: [...currentIds],
-      reminderIds: sessionContextSelection.reminderIds,
-      agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
-      professionalMode: sessionContextSelection.professionalMode,
-    });
+    }));
   }
 
   function toggleReminderSelection(reminderId: string) {
@@ -13751,13 +14026,9 @@ export function CodexMobileApp() {
     } else {
       currentIds.add(reminderId);
     }
-    void persistSessionContextSelection({
-      anchorIds: sessionContextSelection.anchorIds,
-      skillIds: sessionContextSelection.skillIds,
+    void persistSessionContextSelection(buildNextSessionContextSelection({
       reminderIds: [...currentIds],
-      agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
-      professionalMode: sessionContextSelection.professionalMode,
-    });
+    }));
   }
 
   function openAdditionsMenu() {
@@ -13797,6 +14068,76 @@ export function CodexMobileApp() {
     setIsModePickerDialogOpen(true);
   }
 
+  function openActionRestrictionDialog() {
+    setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(false);
+    setActionRestrictionDraft(normalizeSessionActionRestriction(sessionContextSelection.actionRestriction));
+    setIsActionRestrictionDialogOpen(true);
+  }
+
+  function toggleActionRestrictionDraftEnabled() {
+    setActionRestrictionDraft((current) => {
+      if (!current?.targetPath) {
+        return current;
+      }
+      return {
+        ...current,
+        enabled: current.enabled !== false ? false : true,
+      };
+    });
+  }
+
+  function openActionRestrictionTargetPicker() {
+    if (!activeComposerCwd && !currentProfile?.workspaceCwd) {
+      setError('אין תיקייה פעילה לבחירת יעד להגבלה.');
+      return;
+    }
+
+    setIsActionRestrictionDialogOpen(false);
+    setIsActionRestrictionPickerMode(true);
+    setIsFileTreeOpen(true);
+    setFileTreeFilter('');
+    setFileTreePathInput(activeComposerCwd || currentProfile?.workspaceCwd || '');
+    setFileTreeNodes({});
+    setFileTreeExpandedPaths({});
+    void loadFileTree(undefined, { replaceRoot: true, expandRoot: true });
+  }
+
+  function confirmActionRestrictionTargetSelection() {
+    setIsActionRestrictionPickerMode(false);
+    setIsFileTreeOpen(false);
+    setIsActionRestrictionDialogOpen(true);
+  }
+
+  async function saveActionRestrictionDraft() {
+    const normalizedDraft = normalizeSessionActionRestriction(actionRestrictionDraft);
+    if (!normalizedDraft) {
+      setError('יש לבחור קובץ או תיקייה להגבלת הפעולה.');
+      return;
+    }
+
+    if (sessionContextSelection.agentSessionDraftId) {
+      setError('לא ניתן לשלב מצב הגבלת פעולה עם מצב סוכנים באותו שלב.');
+      return;
+    }
+
+    await persistSessionContextSelection(buildNextSessionContextSelection({
+      actionRestriction: normalizedDraft,
+    }));
+    setIsActionRestrictionDialogOpen(false);
+    setIsModePickerDialogOpen(false);
+  }
+
+  async function clearActionRestriction() {
+    await persistSessionContextSelection(buildNextSessionContextSelection({
+      actionRestriction: null,
+    }));
+    setActionRestrictionDraft(null);
+    setIsActionRestrictionDialogOpen(false);
+    setIsActionRestrictionPickerMode(false);
+    setIsModePickerDialogOpen(false);
+  }
+
   function openAgentSessionDialog() {
     setIsAdditionsMenuOpen(false);
     setIsModePickerDialogOpen(false);
@@ -13807,15 +14148,12 @@ export function CodexMobileApp() {
   }
 
   function toggleProfessionalMode() {
-    void persistSessionContextSelection({
-      anchorIds: sessionContextSelection.anchorIds,
-      skillIds: sessionContextSelection.skillIds,
-      reminderIds: sessionContextSelection.reminderIds,
+    void persistSessionContextSelection(buildNextSessionContextSelection({
       agentSessionDraftId: sessionContextSelection.professionalMode
         ? sessionContextSelection.agentSessionDraftId
         : null,
       professionalMode: !sessionContextSelection.professionalMode,
-    });
+    }));
     setIsAdditionsMenuOpen(false);
     setIsModePickerDialogOpen(false);
   }
@@ -13876,13 +14214,9 @@ export function CodexMobileApp() {
       });
       setProjectAnchors((current) => [anchor, ...current.filter((currentAnchor) => currentAnchor.id !== anchor.id)]);
       const nextAnchorIds = Array.from(new Set([anchor.id, ...sessionContextSelection.anchorIds]));
-      await persistSessionContextSelection({
+      await persistSessionContextSelection(buildNextSessionContextSelection({
         anchorIds: nextAnchorIds,
-        skillIds: sessionContextSelection.skillIds,
-        reminderIds: sessionContextSelection.reminderIds,
-        agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
-        professionalMode: sessionContextSelection.professionalMode,
-      });
+      }));
       setIsAnchorCreateDialogOpen(false);
       setIsAnchorManagerOpen(true);
       setAnchorDraftTargetEntry(null);
@@ -13905,13 +14239,9 @@ export function CodexMobileApp() {
       await deleteProjectAnchorRequest(profileId, activeComposerCwd, anchorId);
       setProjectAnchors((current) => current.filter((anchor) => anchor.id !== anchorId));
       if (sessionContextSelection.anchorIds.includes(anchorId)) {
-        await persistSessionContextSelection({
+        await persistSessionContextSelection(buildNextSessionContextSelection({
           anchorIds: sessionContextSelection.anchorIds.filter((currentId) => currentId !== anchorId),
-          skillIds: sessionContextSelection.skillIds,
-          reminderIds: sessionContextSelection.reminderIds,
-          agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
-          professionalMode: sessionContextSelection.professionalMode,
-        });
+        }));
       }
     } catch (anchorError: any) {
       setError(anchorError.message || 'Failed to delete anchor');
@@ -13955,13 +14285,9 @@ export function CodexMobileApp() {
       await deleteSessionReminderRequest(profileId, currentQueueKey, reminderId);
       setSessionReminders((current) => current.filter((reminder) => reminder.id !== reminderId));
       if (sessionContextSelection.reminderIds.includes(reminderId)) {
-        await persistSessionContextSelection({
-          anchorIds: sessionContextSelection.anchorIds,
-          skillIds: sessionContextSelection.skillIds,
+        await persistSessionContextSelection(buildNextSessionContextSelection({
           reminderIds: sessionContextSelection.reminderIds.filter((currentId) => currentId !== reminderId),
-          agentSessionDraftId: sessionContextSelection.agentSessionDraftId,
-          professionalMode: sessionContextSelection.professionalMode,
-        });
+        }));
       }
     } catch (reminderError: any) {
       setError(reminderError.message || 'Failed to delete reminder');
@@ -13975,13 +14301,15 @@ export function CodexMobileApp() {
       return;
     }
 
-    await persistSessionContextSelection({
-      anchorIds: sessionContextSelection.anchorIds,
-      skillIds: sessionContextSelection.skillIds,
-      reminderIds: sessionContextSelection.reminderIds,
+    if (sessionContextSelection.actionRestriction?.enabled) {
+      setError('לא ניתן לשלב מצב הגבלת פעולה עם מצב סוכנים באותו שלב.');
+      return;
+    }
+
+    await persistSessionContextSelection(buildNextSessionContextSelection({
       agentSessionDraftId,
       professionalMode: false,
-    });
+    }));
   }
 
   async function createAgentSessionDraft() {
@@ -14109,13 +14437,10 @@ export function CodexMobileApp() {
       });
 
       if (sessionContextSelection.agentSessionDraftId === deletedAgentSessionId) {
-        await persistSessionContextSelection({
-          anchorIds: sessionContextSelection.anchorIds,
-          skillIds: sessionContextSelection.skillIds,
-          reminderIds: sessionContextSelection.reminderIds,
+        await persistSessionContextSelection(buildNextSessionContextSelection({
           agentSessionDraftId: null,
           professionalMode: false,
-        });
+        }));
       }
 
       if (activeAgentPlanEditorRecord?.id === deletedAgentSessionId) {
@@ -14445,6 +14770,10 @@ export function CodexMobileApp() {
     [sessionContextSelection.reminderIds, sessionReminders]
   );
   const isProfessionalModeSelected = sessionContextSelection.professionalMode === true;
+  const selectedActionRestriction = useMemo(
+    () => normalizeSessionActionRestriction(sessionContextSelection.actionRestriction),
+    [sessionContextSelection.actionRestriction]
+  );
   const selectedAgentSessionDraft = useMemo(
     () => agentSessions.find((record) => record.id === sessionContextSelection.agentSessionDraftId) || null,
     [agentSessions, sessionContextSelection.agentSessionDraftId]
@@ -15354,7 +15683,7 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || isProfessionalModeSelected || isSessionContextSelectionSaving) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || isProfessionalModeSelected || isSessionContextSelectionSaving) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
                 {isProfessionalModeSelected && (
                   <button
@@ -15364,6 +15693,18 @@ export function CodexMobileApp() {
                   >
                     <Zap className="h-3.5 w-3.5" />
                     <span>מצב מקצועי · 3 שלבים</span>
+                  </button>
+                )}
+                {selectedActionRestriction && (
+                  <button
+                    type="button"
+                    onClick={openActionRestrictionDialog}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] font-medium text-amber-700 transition hover:bg-amber-100"
+                  >
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    <span className="truncate">
+                      {selectedActionRestriction.targetKind === 'file' ? 'קובץ' : 'תיקייה'} · {getPathBasename(selectedActionRestriction.targetPath)}
+                    </span>
                   </button>
                 )}
                 {selectedAgentSessionDraft && (
@@ -16515,6 +16856,7 @@ export function CodexMobileApp() {
           onClose={() => {
             setIsFileTreeOpen(false);
             setIsAnchorTargetPickerMode(false);
+            setIsActionRestrictionPickerMode(false);
           }}
           onPathChange={setFileTreePathInput}
           onFilterChange={setFileTreeFilter}
@@ -16536,6 +16878,18 @@ export function CodexMobileApp() {
             selectedPath: anchorDraftTargetEntry?.path || null,
             onSelectEntry: setAnchorDraftTargetEntry,
             onConfirmSelection: confirmAnchorTargetSelection,
+          } : isActionRestrictionPickerMode ? {
+            title: 'בחירת יעד להגבלת פעולה',
+            description: 'בחר קובץ יחיד או תיקייה אחת. הסוכן יורשה לערוך רק את הנתיב הזה, וכל חריגה שנוכל לזהות תידחה.',
+            selectedPath: actionRestrictionDraft?.targetPath || null,
+            onSelectEntry: (entry) => {
+              setActionRestrictionDraft({
+                enabled: actionRestrictionDraft?.enabled !== false,
+                targetPath: entry.path,
+                targetKind: entry.kind === 'directory' ? 'directory' : 'file',
+              });
+            },
+            onConfirmSelection: confirmActionRestrictionTargetSelection,
           } : null}
         />
       )}
@@ -16580,9 +16934,25 @@ export function CodexMobileApp() {
         isOpen={isModePickerDialogOpen}
         isProfessionalModeSelected={isProfessionalModeSelected}
         selectedAgentSessionDraft={selectedAgentSessionDraft}
+        selectedActionRestriction={selectedActionRestriction}
         onClose={() => setIsModePickerDialogOpen(false)}
         onToggleProfessionalMode={toggleProfessionalMode}
         onOpenAgentSessions={openAgentSessionDialog}
+        onOpenActionRestriction={openActionRestrictionDialog}
+      />
+
+      <ActionRestrictionDialog
+        isOpen={isActionRestrictionDialogOpen}
+        draft={actionRestrictionDraft}
+        isSaving={isSessionContextSelectionSaving}
+        onClose={() => {
+          setIsActionRestrictionDialogOpen(false);
+          setActionRestrictionDraft(normalizeSessionActionRestriction(sessionContextSelection.actionRestriction));
+        }}
+        onToggleEnabled={toggleActionRestrictionDraftEnabled}
+        onOpenPicker={openActionRestrictionTargetPicker}
+        onSave={() => void saveActionRestrictionDraft()}
+        onClear={() => void clearActionRestriction()}
       />
 
       <AgentSessionDialog

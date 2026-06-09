@@ -8,6 +8,13 @@ export interface CodexSessionContextSelection {
   reminderIds: string[];
   agentSessionDraftId: string | null;
   professionalMode: boolean;
+  actionRestriction: CodexSessionActionRestriction | null;
+}
+
+export interface CodexSessionActionRestriction {
+  enabled: boolean;
+  targetPath: string;
+  targetKind: 'file' | 'directory';
 }
 
 interface SessionContextSelectionsState {
@@ -53,6 +60,38 @@ function cloneSelection(selection: CodexSessionContextSelection): CodexSessionCo
     reminderIds: [...selection.reminderIds],
     agentSessionDraftId: selection.agentSessionDraftId || null,
     professionalMode: selection.professionalMode === true,
+    actionRestriction: selection.actionRestriction
+      ? {
+        enabled: selection.actionRestriction.enabled === true,
+        targetPath: selection.actionRestriction.targetPath,
+        targetKind: selection.actionRestriction.targetKind,
+      }
+      : null,
+  };
+}
+
+function normalizeActionRestriction(value: unknown): CodexSessionActionRestriction | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const targetPath = typeof (value as any).targetPath === 'string'
+    ? (value as any).targetPath.trim()
+    : '';
+  const targetKind = (value as any).targetKind === 'file' || (value as any).targetKind === 'directory'
+    ? (value as any).targetKind
+    : null;
+
+  if (!targetPath || !targetKind) {
+    return null;
+  }
+
+  return {
+    enabled: typeof (value as any).enabled === 'boolean'
+      ? (value as any).enabled
+      : true,
+    targetPath,
+    targetKind,
   };
 }
 
@@ -71,18 +110,19 @@ async function ensureStateLoaded() {
             .filter(([key]) => Boolean(key))
             .map(([key, value]) => {
               const selection = value as Partial<CodexSessionContextSelection> | null | undefined;
-              return [
-                key,
-                {
-                  anchorIds: normalizeIdList(selection?.anchorIds),
-                  skillIds: normalizeIdList(selection?.skillIds),
-                  reminderIds: normalizeIdList(selection?.reminderIds),
-                  agentSessionDraftId: typeof selection?.agentSessionDraftId === 'string' && selection.agentSessionDraftId.trim()
-                    ? selection.agentSessionDraftId.trim()
-                    : null,
-                  professionalMode: selection?.professionalMode === true,
-                },
-              ];
+	              return [
+	                key,
+	                {
+	                  anchorIds: normalizeIdList(selection?.anchorIds),
+	                  skillIds: normalizeIdList(selection?.skillIds),
+	                  reminderIds: normalizeIdList(selection?.reminderIds),
+	                  agentSessionDraftId: typeof selection?.agentSessionDraftId === 'string' && selection.agentSessionDraftId.trim()
+	                    ? selection.agentSessionDraftId.trim()
+	                    : null,
+	                  professionalMode: selection?.professionalMode === true,
+	                  actionRestriction: normalizeActionRestriction(selection?.actionRestriction),
+	                },
+	              ];
             })
         )
         : {};
@@ -121,7 +161,14 @@ export async function getSessionContextSelection(
   const selection = state.selectionsByKey[buildSelectionKey(profileId, sessionKey)];
   return selection
     ? cloneSelection(selection)
-    : { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false };
+    : {
+      anchorIds: [],
+      skillIds: [],
+      reminderIds: [],
+      agentSessionDraftId: null,
+      professionalMode: false,
+      actionRestriction: null,
+    };
 }
 
 export async function setSessionContextSelection(
@@ -139,6 +186,7 @@ export async function setSessionContextSelection(
       ? selection.agentSessionDraftId.trim()
       : null,
     professionalMode: selection?.professionalMode === true,
+    actionRestriction: normalizeActionRestriction(selection?.actionRestriction),
   };
 
   if (
@@ -147,10 +195,18 @@ export async function setSessionContextSelection(
     && normalized.reminderIds.length === 0
     && !normalized.agentSessionDraftId
     && !normalized.professionalMode
+    && !normalized.actionRestriction
   ) {
     delete state.selectionsByKey[key];
     await persistState();
-    return { anchorIds: [], skillIds: [], reminderIds: [], agentSessionDraftId: null, professionalMode: false };
+    return {
+      anchorIds: [],
+      skillIds: [],
+      reminderIds: [],
+      agentSessionDraftId: null,
+      professionalMode: false,
+      actionRestriction: null,
+    };
   }
 
   state.selectionsByKey[key] = normalized;
@@ -183,6 +239,36 @@ export async function rebindSessionContextSelection(
 }
 
 export async function deleteSessionContextSelection(
+  profileId: string,
+  sessionKey: string
+): Promise<void> {
+  await ensureStateLoaded();
+  const key = buildSelectionKey(profileId, sessionKey);
+  if (!state.selectionsByKey[key]) {
+    return;
+  }
+
+  const current = state.selectionsByKey[key];
+  if (current?.actionRestriction) {
+    state.selectionsByKey[key] = {
+      anchorIds: [],
+      skillIds: [],
+      reminderIds: [],
+      agentSessionDraftId: null,
+      professionalMode: false,
+      actionRestriction: {
+        enabled: current.actionRestriction.enabled === true,
+        targetPath: current.actionRestriction.targetPath,
+        targetKind: current.actionRestriction.targetKind,
+      },
+    };
+  } else {
+    delete state.selectionsByKey[key];
+  }
+  await persistState();
+}
+
+export async function clearSessionContextSelection(
   profileId: string,
   sessionKey: string
 ): Promise<void> {

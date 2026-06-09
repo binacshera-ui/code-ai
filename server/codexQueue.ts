@@ -19,7 +19,10 @@ import {
   type CodexForkTimelineEntry,
 } from './codexForkSessions.js';
 import { CODEX_APP_CONFIG } from './config.js';
-import { rebindSessionContextSelection } from './codexSessionContextSelections.js';
+import {
+  rebindSessionContextSelection,
+  type CodexSessionActionRestriction,
+} from './codexSessionContextSelections.js';
 import { rebindSessionInstruction } from './codexSessionInstructions.js';
 import { rebindSessionReminders } from './codexSessionReminders.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
@@ -32,6 +35,7 @@ import {
   saveAgentSessionPlan,
   updateAgentRuntimeStatus,
 } from './codexAgentSessions.js';
+import { buildActionRestrictionPromptAdditions } from './sessionPromptAdditions.js';
 
 export type CodexQueueItemStatus =
   | 'scheduled'
@@ -61,6 +65,7 @@ export interface CodexQueueItem {
   promptPreview: string;
   contextPrefix?: string | null;
   sessionInstruction?: string | null;
+  actionRestriction: CodexSessionActionRestriction | null;
   forkContext?: CodexForkContext | null;
   attachments: CodexUploadedAttachment[];
   status: CodexQueueItemStatus;
@@ -101,6 +106,7 @@ interface EnqueueCodexQueueInput {
   promptPreview?: string | null;
   contextPrefix?: string | null;
   sessionInstruction?: string | null;
+  actionRestriction?: CodexSessionActionRestriction | null;
   forkContext?: unknown;
   scheduledAt?: string | null;
   attachments?: CodexUploadedAttachment[];
@@ -198,6 +204,35 @@ function cloneQueueItem(item: CodexQueueItem): CodexQueueItem {
   return {
     ...item,
     attachments: item.attachments.map((attachment) => ({ ...attachment })),
+    actionRestriction: item.actionRestriction
+      ? {
+        enabled: item.actionRestriction.enabled === true,
+        targetPath: item.actionRestriction.targetPath,
+        targetKind: item.actionRestriction.targetKind,
+      }
+      : null,
+  };
+}
+
+function normalizeActionRestriction(value: unknown): CodexSessionActionRestriction | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const targetPath = typeof (value as any).targetPath === 'string'
+    ? (value as any).targetPath.trim()
+    : '';
+  const targetKind = (value as any).targetKind === 'file' || (value as any).targetKind === 'directory'
+    ? (value as any).targetKind
+    : null;
+  if (!targetPath || !targetKind) {
+    return null;
+  }
+
+  return {
+    enabled: (value as any).enabled === true,
+    targetPath,
+    targetKind,
   };
 }
 
@@ -607,6 +642,7 @@ async function loadState() {
         sessionInstruction: typeof item.sessionInstruction === 'string' && item.sessionInstruction.trim()
           ? item.sessionInstruction.trim()
           : null,
+        actionRestriction: normalizeActionRestriction(item.actionRestriction),
         forkContext: normalizeForkContext(item.forkContext),
         scheduleMode: item.scheduleMode === 'recurring' ? 'recurring' : 'once',
         recurringFrequency: isRecurringFrequency(item.recurringFrequency) ? item.recurringFrequency : null,
@@ -968,6 +1004,12 @@ async function processQueueItem(item: CodexQueueItem) {
   const runPrompt = item.sessionInstruction
     ? `${promptWithForkContext}\n\nהוראה קבועה לסשן זה. יש ליישם אותה גם אם המשתמש לא חזר עליה בהודעה הנוכחית:\n${item.sessionInstruction}`
     : promptWithForkContext;
+  const restrictionPrompt = item.actionRestriction?.enabled
+    ? buildActionRestrictionPromptAdditions(item.actionRestriction)
+    : null;
+  const effectiveRunPrompt = restrictionPrompt?.trim()
+    ? `${runPrompt}\n\n${restrictionPrompt.trim()}`
+    : runPrompt;
   const executionConfig: CodexExecutionConfig = {
     model: item.model,
     reasoningEffort: item.reasoningEffort,
@@ -1005,7 +1047,7 @@ async function processQueueItem(item: CodexQueueItem) {
 
   try {
     const result = await runAgentPrompt(
-      runPrompt,
+      effectiveRunPrompt,
       resolvedSessionId,
       item.profileId,
       item.attachments,
@@ -1014,6 +1056,7 @@ async function processQueueItem(item: CodexQueueItem) {
         cwd: item.cwd || undefined,
         injectDirectoryContext: !resolvedSessionId,
         executionConfig,
+        actionRestriction: item.actionRestriction,
       }
     );
 
@@ -1267,6 +1310,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
     sessionInstruction: typeof input.sessionInstruction === 'string' && input.sessionInstruction.trim()
       ? input.sessionInstruction.trim()
       : null,
+    actionRestriction: normalizeActionRestriction(input.actionRestriction),
     forkContext: normalizeForkContext(input.forkContext),
     attachments: (input.attachments || []).map((attachment) => ({ ...attachment })),
     status: new Date(scheduledAt).getTime() > Date.now() ? 'scheduled' : 'queued',

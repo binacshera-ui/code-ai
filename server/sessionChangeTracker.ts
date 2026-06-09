@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
+import type { CodexSessionActionRestriction } from './codexSessionContextSelections.js';
 import type { CodexTimelineEntry } from './codexService.js';
 
 export type SessionChangeFileStatus = 'created' | 'modified' | 'deleted' | 'renamed';
@@ -64,6 +65,10 @@ interface SessionChangeCapture {
 interface FinalizeSessionChangeCaptureInput {
   sessionId: string;
   entryId: string | null;
+}
+
+interface FinalizeSessionChangeCaptureOptions {
+  cleanup?: boolean;
 }
 
 interface TrackedFileDelta {
@@ -450,10 +455,31 @@ function buildSummary(files: SessionChangeFileRecord[]): SessionChangeSummary {
   });
 }
 
+export class SessionActionRestrictionViolationError extends Error {
+  readonly statusCode = 403;
+  readonly violations: SessionChangeFileRecord[];
+  readonly restriction: CodexSessionActionRestriction;
+
+  constructor(restriction: CodexSessionActionRestriction, violations: SessionChangeFileRecord[]) {
+    const pathsPreview = violations
+      .map((file) => file.displayPath || file.path)
+      .slice(0, 4)
+      .join(', ');
+    const moreCount = Math.max(0, violations.length - 4);
+    super(
+      `אין הרשאה לשנות מחוץ ל-${restriction.targetKind === 'file' ? 'קובץ' : 'תיקייה'} שהוגדרו: ${pathsPreview}${moreCount > 0 ? ` ועוד ${moreCount}` : ''}`
+    );
+    this.name = 'SessionActionRestrictionViolationError';
+    this.violations = violations;
+    this.restriction = restriction;
+  }
+}
+
 export async function beginSessionChangeCapture(input: {
   provider: AppProvider;
   profileId: string;
   cwd: string;
+  captureWholeRepo?: boolean;
 }): Promise<SessionChangeCapture | null> {
   const normalizedCwd = path.resolve(input.cwd);
   const repoRoot = resolveGitRepoRoot(normalizedCwd);
@@ -461,7 +487,7 @@ export async function beginSessionChangeCapture(input: {
     return null;
   }
 
-  const scopePath = normalizeScopePath(repoRoot, normalizedCwd);
+  const scopePath = input.captureWholeRepo ? null : normalizeScopePath(repoRoot, normalizedCwd);
   const tempRoot = path.join(SESSION_CHANGE_TEMP_ROOT, randomUUID());
   await fs.mkdir(tempRoot, { recursive: true });
   const startUntrackedFiles = await snapshotUntrackedFiles(
@@ -485,7 +511,8 @@ export async function beginSessionChangeCapture(input: {
 
 export async function finalizeSessionChangeCapture(
   capture: SessionChangeCapture | null,
-  input: FinalizeSessionChangeCaptureInput
+  input: FinalizeSessionChangeCaptureInput,
+  options: FinalizeSessionChangeCaptureOptions = {}
 ): Promise<SessionChangeRecord | null> {
   if (!capture || !input.entryId) {
     return null;
@@ -613,7 +640,9 @@ export async function finalizeSessionChangeCapture(
 
     return record;
   } finally {
-    await fs.rm(capture?.tempRoot || SESSION_CHANGE_TEMP_ROOT, { recursive: true, force: true }).catch(() => undefined);
+    if (options.cleanup !== false) {
+      await fs.rm(capture?.tempRoot || SESSION_CHANGE_TEMP_ROOT, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 }
 
@@ -623,6 +652,129 @@ export async function discardSessionChangeCapture(capture: SessionChangeCapture 
   }
 
   await fs.rm(capture.tempRoot, { recursive: true, force: true }).catch(() => undefined);
+}
+
+function isPathInsideRestriction(relativePath: string, restrictionPath: string, targetKind: 'file' | 'directory') {
+  if (targetKind === 'file') {
+    return relativePath === restrictionPath;
+  }
+
+  return relativePath === restrictionPath || relativePath.startsWith(`${restrictionPath}/`);
+}
+
+function resolveRestrictionTarget(
+  capture: SessionChangeCapture,
+  restriction: CodexSessionActionRestriction
+): { absolutePath: string; relativePath: string } | null {
+  if (!capture.repoRoot) {
+    return null;
+  }
+
+  return resolveRepoRelativePath(capture.repoRoot, capture.cwd, restriction.targetPath);
+}
+
+function hasTrackedBaseline(capture: SessionChangeCapture, relativePath: string): boolean {
+  if (!capture.repoRoot || !capture.trackedSnapshotRef) {
+    return false;
+  }
+
+  const result = spawnSync(
+    'git',
+    ['cat-file', '-e', `${capture.trackedSnapshotRef}:${relativePath}`],
+    {
+      cwd: capture.repoRoot,
+      stdio: 'ignore',
+    }
+  );
+
+  return result.status === 0;
+}
+
+async function restoreTrackedBaseline(capture: SessionChangeCapture, relativePath: string): Promise<void> {
+  if (!capture.repoRoot || !capture.trackedSnapshotRef) {
+    return;
+  }
+
+  const absolutePath = path.join(capture.repoRoot, relativePath);
+  const result = spawnSync(
+    'git',
+    ['show', `${capture.trackedSnapshotRef}:${relativePath}`],
+    {
+      cwd: capture.repoRoot,
+      encoding: null,
+      maxBuffer: 16 * 1024 * 1024,
+    }
+  );
+
+  if (result.status !== 0) {
+    throw new Error(`Failed to restore tracked baseline for ${relativePath}`);
+  }
+
+  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+  await fs.writeFile(absolutePath, result.stdout as Buffer);
+}
+
+async function restorePathToBaseline(capture: SessionChangeCapture, relativePath: string): Promise<void> {
+  if (!capture.repoRoot) {
+    return;
+  }
+
+  const absolutePath = path.join(capture.repoRoot, relativePath);
+  const startUntracked = capture.startUntrackedFiles.find((file) => file.relativePath === relativePath) || null;
+
+  if (startUntracked) {
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.copyFile(startUntracked.snapshotPath, absolutePath);
+    return;
+  }
+
+  if (hasTrackedBaseline(capture, relativePath)) {
+    await restoreTrackedBaseline(capture, relativePath);
+    return;
+  }
+
+  await fs.rm(absolutePath, { recursive: true, force: true }).catch(() => undefined);
+}
+
+export async function enforceSessionActionRestriction(
+  capture: SessionChangeCapture | null,
+  record: SessionChangeRecord | null,
+  restriction: CodexSessionActionRestriction | null
+): Promise<SessionChangeFileRecord[]> {
+  if (!capture || !record || !restriction?.enabled || !capture.repoRoot) {
+    return [];
+  }
+
+  const restrictionTarget = resolveRestrictionTarget(capture, restriction);
+  if (!restrictionTarget) {
+    return record.files;
+  }
+
+  const violations = record.files.filter((file) => {
+    const currentAllowed = isPathInsideRestriction(file.path, restrictionTarget.relativePath, restriction.targetKind);
+    const previousAllowed = file.previousPath
+      ? isPathInsideRestriction(file.previousPath, restrictionTarget.relativePath, restriction.targetKind)
+      : true;
+    return !(currentAllowed && previousAllowed);
+  });
+
+  if (violations.length === 0) {
+    return [];
+  }
+
+  const restorePaths = new Set<string>();
+  for (const violation of violations) {
+    restorePaths.add(violation.path);
+    if (violation.previousPath) {
+      restorePaths.add(violation.previousPath);
+    }
+  }
+
+  for (const relativePath of restorePaths) {
+    await restorePathToBaseline(capture, relativePath);
+  }
+
+  return violations;
 }
 
 function parseApplyPatchFileRecords(

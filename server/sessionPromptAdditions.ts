@@ -51,13 +51,39 @@ function renderReminderBlock(reminders: Awaited<ReturnType<typeof getSessionRemi
   )).join('\n\n');
 }
 
+export function buildActionRestrictionPromptAdditions(
+  restriction: NonNullable<Awaited<ReturnType<typeof getSessionContextSelection>>['actionRestriction']>
+) {
+  if (restriction.enabled !== true) {
+    return [
+      'מצב הגבלת פעולה בוטל:',
+      `ההגבלה הקודמת על ${restriction.targetKind === 'file' ? 'הקובץ' : 'התיקייה'} ${restriction.targetPath} אינה פעילה יותר.`,
+      'החל מהודעה זו אין מגבלת כתיבה ייעודית של מצב הגבלת פעולה.',
+      'אם המשתמש לא הוסיף מגבלה חדשה, אפשר לחזור להתנהגות הרגילה של הסשן.',
+    ].join('\n');
+  }
+
+  return [
+    'מצב הגבלת פעולה פעיל:',
+    `מותר לך לערוך רק ${restriction.targetKind === 'file' ? 'את הקובץ' : 'בתוך התיקייה'}: ${restriction.targetPath}`,
+    'אסור לך לכתוב, למחוק, לשנות שם או ליצור קבצים מחוץ לנתיב הזה.',
+    'אם שינוי הכרחי נוגע לנתיב אחר, עצור, דווח על כך במפורש, ואל תנסה לעקוף את ההגבלה.',
+    'אם כלי כלשהו יחזיר שינוי מחוץ לנתיב הזה, השרת עשוי לדחות את הפעולה ולהחזיר שגיאת הרשאה.',
+  ].join('\n');
+}
+
 export async function buildSessionPromptAdditionsContext(options: {
   profileId: string;
   sessionKey: string;
   cwd: string | null;
 }): Promise<string | null> {
   const selection = await getSessionContextSelection(options.profileId, options.sessionKey);
-  if (selection.anchorIds.length === 0 && selection.skillIds.length === 0 && selection.reminderIds.length === 0) {
+  if (
+    selection.anchorIds.length === 0
+    && selection.skillIds.length === 0
+    && selection.reminderIds.length === 0
+    && !selection.actionRestriction
+  ) {
     return null;
   }
 
@@ -69,7 +95,12 @@ export async function buildSessionPromptAdditionsContext(options: {
   const selectedAnchorIdSet = new Set(selection.anchorIds);
   const selectedAnchors = allAnchors.filter((anchor) => selectedAnchorIdSet.has(anchor.id));
 
-  if (selectedAnchors.length === 0 && selectedSkills.length === 0 && selectedReminders.length === 0) {
+  if (
+    selectedAnchors.length === 0
+    && selectedSkills.length === 0
+    && selectedReminders.length === 0
+    && !selection.actionRestriction
+  ) {
     return null;
   }
 
@@ -77,6 +108,13 @@ export async function buildSessionPromptAdditionsContext(options: {
     '# Code-AI context pack',
     'הקובץ הזה נוצר על ידי Code-AI כדי לטעון לשיחה עוגנים, סקילים ותזכורות שנבחרו ידנית למהלך השיחה.',
   ];
+
+  if (selection.actionRestriction) {
+    packSections.push(
+      selection.actionRestriction.enabled ? '## הגבלת פעולה פעילה' : '## הגבלת פעולה בוטלה',
+      buildActionRestrictionPromptAdditions(selection.actionRestriction)
+    );
+  }
 
   if (selectedAnchors.length > 0) {
     packSections.push('## עוגנים נבחרים', renderAnchorBlock(selectedAnchors));
@@ -106,11 +144,19 @@ export async function buildSessionPromptAdditionsContext(options: {
   const remindersPreview = selectedReminders.length > 0
     ? `תזכורות פעילות: ${selectedReminders.map((reminder) => reminder.name).join(', ')}.`
     : null;
+  const restrictionPreview = selection.actionRestriction
+    ? (
+      selection.actionRestriction.enabled
+        ? `הגבלת פעולה פעילה: ${selection.actionRestriction.targetKind === 'file' ? 'קובץ' : 'תיקייה'} ${selection.actionRestriction.targetPath}.`
+        : `הגבלת פעולה בוטלה: ${selection.actionRestriction.targetKind === 'file' ? 'קובץ' : 'תיקייה'} ${selection.actionRestriction.targetPath}.`
+    )
+    : null;
 
   return [
     anchorsPreview,
     skillsPreview,
     remindersPreview,
+    restrictionPreview,
     'הפריטים הבאים מצורפים להודעה הנוכחית כהקשר להבנה ולביצוע:',
     packContent.trim().replace(/^# Code-AI context pack\s*/m, '').replace(/^הקובץ הזה נוצר על ידי Code-AI כדי לטעון לשיחה עוגנים, סקילים ותזכורות שנבחרו ידנית למהלך השיחה\.\s*/m, '').trim(),
     `קובץ מעקב מקומי: ${packPath}`,

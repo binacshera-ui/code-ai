@@ -55,8 +55,10 @@ import {
   beginSessionChangeCapture,
   discardSessionChangeCapture,
   deriveSessionChangeRecordFromTimeline,
+  enforceSessionActionRestriction,
   finalizeSessionChangeCapture,
   readSessionChangeRecord,
+  SessionActionRestrictionViolationError,
   type SessionChangeRecord,
 } from './sessionChangeTracker.js';
 import {
@@ -73,6 +75,7 @@ import {
   getSelectedPermissionModeId,
   setSelectedPermissionModeId,
 } from './providerPermissions.js';
+import type { CodexSessionActionRestriction } from './codexSessionContextSelections.js';
 
 export type AgentProfile = CodexProfile;
 
@@ -312,6 +315,7 @@ export async function runAgentPrompt(
     cwd?: string;
     injectDirectoryContext?: boolean;
     executionConfig?: CodexExecutionConfig | null;
+    actionRestriction?: CodexSessionActionRestriction | null;
   } = {}
 ): Promise<AgentRunResult> {
   const profile = resolveProfile(profileId);
@@ -329,6 +333,7 @@ export async function runAgentPrompt(
     provider: profile.provider,
     profileId: profile.id,
     cwd: resolvedCwd,
+    captureWholeRepo: options.actionRestriction?.enabled === true,
   }).catch(() => null);
 
   try {
@@ -343,10 +348,23 @@ export async function runAgentPrompt(
 
     const afterDetail = await getAgentSessionDetail(result.sessionId, profile.id, { tail: 160 }).catch(() => null);
     const entryId = afterDetail ? resolveLatestAssistantEntryId(afterDetail, baselineEntryIds) : null;
-    await finalizeSessionChangeCapture(capture, {
+    const changeRecord = await finalizeSessionChangeCapture(capture, {
       sessionId: result.sessionId,
       entryId,
+    }, {
+      cleanup: false,
     }).catch(() => null);
+
+    const violations = await enforceSessionActionRestriction(
+      capture,
+      changeRecord,
+      options.actionRestriction || null,
+    ).catch(() => []);
+    if (violations.length > 0 && options.actionRestriction?.enabled) {
+      throw new SessionActionRestrictionViolationError(options.actionRestriction, violations);
+    }
+
+    await discardSessionChangeCapture(capture);
 
     return result;
   } catch (error) {
