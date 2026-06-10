@@ -11,6 +11,8 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ClipboardEvent,
+  type DragEvent,
   type PointerEvent,
   type TouchEvent,
 } from 'react';
@@ -3289,6 +3291,55 @@ async function uploadFiles(files: File[]): Promise<DraftAttachment[]> {
       ? URL.createObjectURL(files[index])
       : undefined,
   }));
+}
+
+const LONG_PASTE_WORD_THRESHOLD = 1000;
+
+function countWords(value: string): number {
+  const normalized = value.trim();
+  if (!normalized) {
+    return 0;
+  }
+
+  return normalized.split(/\s+/u).filter(Boolean).length;
+}
+
+function formatAttachmentTimestamp(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+}
+
+function createPastedTextFile(text: string): File {
+  return new File(
+    [text],
+    `pasted-text-${formatAttachmentTimestamp()}.txt`,
+    { type: 'text/plain;charset=utf-8' }
+  );
+}
+
+function clipboardItemsToFiles(items: DataTransferItemList | null | undefined): File[] {
+  if (!items) {
+    return [];
+  }
+
+  return Array.from(items)
+    .filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+}
+
+function hasFileDrag(event: Pick<DragEvent<HTMLElement>, 'dataTransfer'>): boolean {
+  const types = event.dataTransfer?.types;
+  if (!types) {
+    return false;
+  }
+
+  return Array.from(types).includes('Files');
 }
 
 const MessageMarkdown = memo(function MessageMarkdown({
@@ -10899,10 +10950,13 @@ export function CodexMobileApp() {
   const [queuePanelStage, setQueuePanelStage] = useState<'closed' | 'summary' | 'details'>('closed');
   const [expandedToolGroups, setExpandedToolGroups] = useState<Record<string, boolean>>({});
   const [thinkingPulseIndex, setThinkingPulseIndex] = useState(0);
+  const [isComposerDragActive, setIsComposerDragActive] = useState(false);
   const mainScrollRef = useRef<HTMLElement | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerControlsRef = useRef<HTMLDivElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerDragDepthRef = useRef(0);
   const pollInFlightRef = useRef(false);
   const sendInFlightRef = useRef(false);
   const sendDedupRef = useRef<{ fingerprint: string; requestId: string; expiresAt: number } | null>(null);
@@ -12515,8 +12569,7 @@ export function CodexMobileApp() {
     void handleOpenSession(sessionId);
   }
 
-  async function handleFilesSelected(event: ChangeEvent<HTMLInputElement>) {
-    const selectedFiles = Array.from(event.target.files || []);
+  async function appendUploadedFiles(selectedFiles: File[], source: 'picker' | 'drop' | 'paste-image' | 'paste-text') {
     if (selectedFiles.length === 0) {
       return;
     }
@@ -12528,20 +12581,100 @@ export function CodexMobileApp() {
       const uploadedFiles = await uploadFiles(selectedFiles);
       recordCodexBreadcrumb('attachments-uploaded', {
         count: uploadedFiles.length,
+        source,
       });
       setDraftAttachments((current) => [...current, ...uploadedFiles]);
     } catch (uploadError: any) {
       reportCodexClientLog({
         type: 'upload-failed',
         message: uploadError.message || 'Failed to upload files',
+        details: {
+          source,
+          count: selectedFiles.length,
+        },
       });
       setError(uploadError.message || 'Failed to upload files');
     } finally {
       setIsUploading(false);
+    }
+  }
+
+  async function handleFilesSelected(event: ChangeEvent<HTMLInputElement>) {
+    const selectedFiles = Array.from(event.target.files || []);
+    if (selectedFiles.length === 0) {
+      return;
+    }
+
+    try {
+      await appendUploadedFiles(selectedFiles, 'picker');
+    } finally {
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
     }
+  }
+
+  function handleComposerDragEnter(event: DragEvent<HTMLDivElement>) {
+    if (!hasFileDrag(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    composerDragDepthRef.current += 1;
+    setIsComposerDragActive(true);
+  }
+
+  function handleComposerDragOver(event: DragEvent<HTMLDivElement>) {
+    if (!hasFileDrag(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  }
+
+  function handleComposerDragLeave(event: DragEvent<HTMLDivElement>) {
+    if (!hasFileDrag(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    composerDragDepthRef.current = Math.max(0, composerDragDepthRef.current - 1);
+    if (composerDragDepthRef.current === 0) {
+      setIsComposerDragActive(false);
+    }
+  }
+
+  async function handleComposerDrop(event: DragEvent<HTMLDivElement>) {
+    if (!hasFileDrag(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    composerDragDepthRef.current = 0;
+    setIsComposerDragActive(false);
+    const droppedFiles = Array.from(event.dataTransfer.files || []);
+    if (droppedFiles.length === 0) {
+      return;
+    }
+    await appendUploadedFiles(droppedFiles, 'drop');
+  }
+
+  async function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const pastedFiles = clipboardItemsToFiles(event.clipboardData?.items).filter((file) => file.type.startsWith('image/'));
+    if (pastedFiles.length > 0) {
+      event.preventDefault();
+      await appendUploadedFiles(pastedFiles, 'paste-image');
+      return;
+    }
+
+    const pastedText = event.clipboardData?.getData('text/plain') || '';
+    if (countWords(pastedText) <= LONG_PASTE_WORD_THRESHOLD) {
+      return;
+    }
+
+    event.preventDefault();
+    await appendUploadedFiles([createPastedTextFile(pastedText)], 'paste-text');
   }
 
   function removeAttachment(attachmentId: string) {
@@ -15875,7 +16008,14 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            <div ref={composerControlsRef} className="relative">
+            <div
+              ref={composerControlsRef}
+              className="relative"
+              onDragEnter={handleComposerDragEnter}
+              onDragOver={handleComposerDragOver}
+              onDragLeave={handleComposerDragLeave}
+              onDrop={(event) => { void handleComposerDrop(event); }}
+            >
               {queuePanelStage === 'details' && collapsedQueueItems.length > 0 && (
                 <div className="absolute bottom-full -left-1.5 -right-1.5 z-20 mb-3 flex max-h-[40vh] flex-col gap-3 overflow-y-auto px-1.5 pb-2 pt-1.5">
                   {collapsedQueueItems.map((item) => (
@@ -15943,6 +16083,15 @@ export function CodexMobileApp() {
                     : 'rounded-[2rem]'
                 )}
               >
+                {isComposerDragActive && (
+                  <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-[2rem] border-2 border-dashed border-indigo-300/90 bg-indigo-50/92 text-center text-sm font-medium text-indigo-700 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.65)]">
+                    <div className="flex items-center gap-2 px-5">
+                      <Paperclip className="h-4 w-4" />
+                      <span>שחרר כאן כדי לצרף קבצים לשיחה</span>
+                    </div>
+                  </div>
+                )}
+
                 <div className="relative mr-1 flex shrink-0 flex-col items-center justify-end gap-1 self-stretch">
                   <button
                     type="button"
@@ -16367,9 +16516,11 @@ export function CodexMobileApp() {
                 </div>
 
                 <Textarea
+                  ref={composerTextareaRef}
                   dir="rtl"
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
+                  onPaste={(event) => { void handleComposerPaste(event); }}
                   placeholder="הודעה חדשה, בקשה או תזמון..."
                   className="max-h-32 flex-1 resize-none border-0 bg-transparent px-2 py-3 text-right text-[15px] text-slate-800 shadow-none placeholder:text-slate-300 focus-visible:ring-0"
                   rows={1}
