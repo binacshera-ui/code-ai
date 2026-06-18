@@ -625,6 +625,12 @@ interface CodexSessionActionRestriction {
   targetKind: 'file' | 'directory';
 }
 
+interface CodexSessionBrowserMode {
+  enabled: boolean;
+  headless: boolean;
+  profileSeed: 'seeded' | 'empty';
+}
+
 interface CodexSessionTasksResponse {
   tasks: CodexSessionTask[];
 }
@@ -635,6 +641,10 @@ interface CodexSessionSubtasksResponse {
 
 interface CodexSessionContextSelectionResponse {
   selection: CodexSessionContextSelection;
+}
+
+interface CodexSessionBrowserModeResponse {
+  browserMode: CodexSessionBrowserMode;
 }
 
 interface CodexSessionReminder {
@@ -780,6 +790,14 @@ function createEmptySessionContextSelection(
     professionalMode: false,
     annotationsMode: false,
     actionRestriction,
+  };
+}
+
+function createEmptySessionBrowserMode(): CodexSessionBrowserMode {
+  return {
+    enabled: false,
+    headless: true,
+    profileSeed: 'seeded',
   };
 }
 
@@ -2328,6 +2346,32 @@ async function saveSessionContextSelection(
     }),
   });
   return data.selection || createEmptySessionContextSelection();
+}
+
+async function fetchSessionBrowserMode(profileId: string, sessionKey: string): Promise<CodexSessionBrowserMode> {
+  const data = await fetchJson<CodexSessionBrowserModeResponse>(
+    `/api/codex/session-browser-mode?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
+  );
+  return data.browserMode || createEmptySessionBrowserMode();
+}
+
+async function saveSessionBrowserMode(
+  profileId: string,
+  sessionKey: string,
+  browserMode: CodexSessionBrowserMode
+): Promise<CodexSessionBrowserMode> {
+  const data = await fetchJson<CodexSessionBrowserModeResponse>('/api/codex/session-browser-mode', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      sessionKey,
+      browserMode,
+    }),
+  });
+  return data.browserMode || createEmptySessionBrowserMode();
 }
 
 async function fetchAgentSessions(profileId: string, cwd?: string | null): Promise<CodexAgentSessionRecord[]> {
@@ -9631,26 +9675,32 @@ function AgentSessionDialog({
 
 function ModePickerDialog({
   isOpen,
+  currentProvider,
   isProfessionalModeSelected,
   isAnnotationsModeSelected,
   selectedAgentSessionDraft,
   selectedActionRestriction,
+  selectedBrowserMode,
   onClose,
   onToggleProfessionalMode,
   onToggleAnnotationsMode,
   onOpenAgentSessions,
   onOpenActionRestriction,
+  onOpenBrowserMode,
 }: {
   isOpen: boolean;
+  currentProvider: CodexProfile['provider'] | null;
   isProfessionalModeSelected: boolean;
   isAnnotationsModeSelected: boolean;
   selectedAgentSessionDraft: CodexAgentSessionRecord | null;
   selectedActionRestriction: CodexSessionActionRestriction | null;
+  selectedBrowserMode: CodexSessionBrowserMode;
   onClose: () => void;
   onToggleProfessionalMode: () => void;
   onToggleAnnotationsMode: () => void;
   onOpenAgentSessions: () => void;
   onOpenActionRestriction: () => void;
+  onOpenBrowserMode: () => void;
 }) {
   if (!isOpen) {
     return null;
@@ -9690,6 +9740,49 @@ function ModePickerDialog({
         </div>
 
         <div className="space-y-3 px-5 py-5">
+          <button
+            type="button"
+            onClick={onOpenBrowserMode}
+            disabled={currentProvider !== 'codex'}
+            className={cn(
+              'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
+              selectedBrowserMode.enabled
+                ? 'border-violet-200 bg-violet-50/80'
+                : 'border-slate-100 bg-slate-50/80 hover:border-violet-200 hover:bg-violet-50/50',
+              currentProvider !== 'codex' && 'cursor-not-allowed opacity-60 hover:border-slate-100 hover:bg-slate-50/80'
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-800">מצב דפדפן אמיתי</div>
+                {selectedBrowserMode.enabled && (
+                  <span className="rounded-full bg-violet-600 px-2 py-0.5 text-[10px] font-medium text-white">
+                    פעיל
+                  </span>
+                )}
+                <span className="rounded-full bg-white/90 px-2 py-0.5 text-[10px] font-medium text-slate-500">
+                  Codex בלבד
+                </span>
+              </div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">
+                Chromium אמיתי דרך MCP פרטי עם פרופיל persisted מבודד לסשן.
+              </div>
+              <div className="mt-2 text-[11px] leading-5 text-slate-400">
+                {selectedBrowserMode.enabled
+                  ? `${selectedBrowserMode.headless ? 'Headless' : 'Visual'} · ${selectedBrowserMode.profileSeed === 'seeded' ? 'Seeded profile' : 'Empty profile'}`
+                  : currentProvider === 'codex'
+                    ? 'כבה או הפעל דפדפן אמיתי לסשן הזה.'
+                    : 'זמין רק כאשר הפרופיל הפעיל הוא Codex.'}
+              </div>
+            </div>
+            <div className={cn(
+              'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+              selectedBrowserMode.enabled ? 'bg-violet-100 text-violet-700' : 'bg-white text-violet-500'
+            )}>
+              <Command className="h-4 w-4" />
+            </div>
+          </button>
+
           <button
             type="button"
             onClick={onToggleProfessionalMode}
@@ -9894,13 +9987,14 @@ function ActionRestrictionDialog({
                 role="switch"
                 aria-checked={draft?.enabled === true}
                 onClick={onToggleEnabled}
-                className={`relative inline-flex h-7 w-12 items-center rounded-full transition ${
+                dir="ltr"
+                className={`relative inline-flex h-7 w-12 shrink-0 rounded-full p-1 transition ${
                   draft?.enabled ? 'bg-amber-400/90' : 'bg-slate-200'
                 }`}
               >
                 <span
-                  className={`inline-block h-5 w-5 rounded-full bg-white shadow transition ${
-                    draft?.enabled ? 'translate-x-1' : 'translate-x-6'
+                  className={`block h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                    draft?.enabled ? 'translate-x-5' : 'translate-x-0'
                   }`}
                 />
               </button>
@@ -9961,6 +10055,212 @@ function ActionRestrictionDialog({
                 type="button"
                 onClick={onSave}
                 disabled={isSaving || !draft?.targetPath}
+                className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
+              >
+                {isSaving ? 'שומר...' : 'שמור'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BrowserModeDialog({
+  isOpen,
+  provider,
+  draft,
+  isSaving,
+  onClose,
+  onChange,
+  onSave,
+  onDisable,
+}: {
+  isOpen: boolean;
+  provider: CodexProfile['provider'] | null;
+  draft: CodexSessionBrowserMode;
+  isSaving: boolean;
+  onClose: () => void;
+  onChange: (value: CodexSessionBrowserMode) => void;
+  onSave: () => void;
+  onDisable: () => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  const codexOnly = provider === 'codex';
+
+  return (
+    <div className="fixed inset-0 z-[78] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close browser mode dialog"
+      />
+      <div className="relative z-10 flex w-full max-w-xl max-h-[88dvh] flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-violet-50 text-violet-700">
+              <Command className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Browser Mode
+              </div>
+              <div className="mt-1 text-lg font-semibold text-slate-800">מצב דפדפן אמיתי</div>
+              <div className="mt-1 text-sm leading-6 text-slate-500">
+                מחבר ל־Codex MCP פרטי עם Chromium אמיתי ופרופיל persisted מבודד לסשן הזה בלבד.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          {!codexOnly && (
+            <div className="rounded-[1.25rem] border border-amber-100 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
+              מצב הדפדפן האמיתי זמין כרגע רק כאשר הפרופיל הפעיל הוא Codex.
+            </div>
+          )}
+
+          <div className="rounded-[1.5rem] border border-slate-100 bg-slate-50/70 px-4 py-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-800">הפעלה לסשן הנוכחי</div>
+                <div className="mt-1 text-xs leading-6 text-slate-500">
+                  ההגדרה נשמרת לסשן עצמו, לא לכל הפרופיל, ותישאר עד שתכבה אותה.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={draft.enabled}
+                onClick={() => codexOnly && onChange({ ...draft, enabled: !draft.enabled })}
+                disabled={!codexOnly}
+                dir="ltr"
+                className={cn(
+                  'relative inline-flex h-7 w-12 shrink-0 rounded-full p-1 transition',
+                  draft.enabled ? 'bg-violet-400/90' : 'bg-slate-200',
+                  !codexOnly && 'opacity-50'
+                )}
+              >
+                <span
+                  className={cn(
+                    'block h-5 w-5 rounded-full bg-white shadow transition-transform',
+                    draft.enabled ? 'translate-x-5' : 'translate-x-0'
+                  )}
+                />
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-[1.5rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
+            <div className="text-sm font-semibold text-slate-800">מקור הפרופיל</div>
+            <div className="mt-1 text-xs leading-6 text-slate-500">
+              אפשר להתחיל מפרופיל seed persisted או מפרופיל ריק ומבודד לחלוטין.
+            </div>
+            <div className="mt-3 grid gap-2">
+              {[
+                {
+                  id: 'seeded' as const,
+                  label: 'Seeded persisted profile',
+                  description: 'משכפל את פרופיל ה-seed שהוגדר למצב הדפדפן לתוך פרופיל פרטי של הסשן.',
+                },
+                {
+                  id: 'empty' as const,
+                  label: 'Empty isolated profile',
+                  description: 'מתחיל דפדפן נקי בלי cookies/history קיימים.',
+                },
+              ].map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  disabled={!codexOnly}
+                  onClick={() => onChange({ ...draft, profileSeed: option.id })}
+                  className={cn(
+                    'rounded-[1.2rem] border px-4 py-3 text-right transition',
+                    draft.profileSeed === option.id
+                      ? 'border-violet-200 bg-violet-50/80'
+                      : 'border-slate-100 bg-slate-50/70 hover:border-violet-200 hover:bg-violet-50/50',
+                    !codexOnly && 'opacity-50'
+                  )}
+                >
+                  <div className="text-sm font-semibold text-slate-800">{option.label}</div>
+                  <div className="mt-1 text-xs leading-6 text-slate-500">{option.description}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-[1.5rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
+            <div className="text-sm font-semibold text-slate-800">מצב תצוגה</div>
+            <div className="mt-1 text-xs leading-6 text-slate-500">
+              Headless מהיר יותר; Visual שימושי כשצריך לראות חלון אמיתי.
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                disabled={!codexOnly}
+                onClick={() => onChange({ ...draft, headless: true })}
+                className={cn(
+                  'rounded-full border px-4 py-2 text-sm font-medium transition',
+                  draft.headless
+                    ? 'border-violet-200 bg-violet-50 text-violet-700'
+                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50',
+                  !codexOnly && 'opacity-50'
+                )}
+              >
+                Headless
+              </button>
+              <button
+                type="button"
+                disabled={!codexOnly}
+                onClick={() => onChange({ ...draft, headless: false })}
+                className={cn(
+                  'rounded-full border px-4 py-2 text-sm font-medium transition',
+                  !draft.headless
+                    ? 'border-violet-200 bg-violet-50 text-violet-700'
+                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50',
+                  !codexOnly && 'opacity-50'
+                )}
+              >
+                Visual
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-slate-100 px-5 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={onDisable}
+              disabled={isSaving || !draft.enabled}
+              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
+            >
+              כבה מצב
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+              >
+                בטל
+              </button>
+              <button
+                type="button"
+                onClick={onSave}
+                disabled={isSaving || !codexOnly}
                 className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
               >
                 {isSaving ? 'שומר...' : 'שמור'}
@@ -10821,6 +11121,7 @@ export function CodexMobileApp() {
   const [isSkillPickerDialogOpen, setIsSkillPickerDialogOpen] = useState(false);
   const [isReminderPickerDialogOpen, setIsReminderPickerDialogOpen] = useState(false);
   const [isModePickerDialogOpen, setIsModePickerDialogOpen] = useState(false);
+  const [isBrowserModeDialogOpen, setIsBrowserModeDialogOpen] = useState(false);
   const [isAgentSessionDialogOpen, setIsAgentSessionDialogOpen] = useState(false);
   const [isTaskBoardOpen, setIsTaskBoardOpen] = useState(false);
   const [isSessionTaskDialogOpen, setIsSessionTaskDialogOpen] = useState(false);
@@ -10867,6 +11168,9 @@ export function CodexMobileApp() {
   const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>(
     createEmptySessionContextSelection()
   );
+  const [sessionBrowserMode, setSessionBrowserMode] = useState<CodexSessionBrowserMode>(
+    createEmptySessionBrowserMode()
+  );
   const [instructionDraft, setInstructionDraft] = useState('');
   const [projectAnchors, setProjectAnchors] = useState<CodexProjectAnchor[]>([]);
   const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
@@ -10877,7 +11181,9 @@ export function CodexMobileApp() {
   const [isInstructionDialogOpen, setIsInstructionDialogOpen] = useState(false);
   const [isInstructionLoading, setIsInstructionLoading] = useState(false);
   const [isSessionContextSelectionLoading, setIsSessionContextSelectionLoading] = useState(false);
+  const [isSessionBrowserModeLoading, setIsSessionBrowserModeLoading] = useState(false);
   const [isSessionContextSelectionSaving, setIsSessionContextSelectionSaving] = useState(false);
+  const [isSessionBrowserModeSaving, setIsSessionBrowserModeSaving] = useState(false);
   const [isProjectAnchorsLoading, setIsProjectAnchorsLoading] = useState(false);
   const [isUnifiedSkillsLoading, setIsUnifiedSkillsLoading] = useState(false);
   const [isSessionRemindersLoading, setIsSessionRemindersLoading] = useState(false);
@@ -10900,6 +11206,7 @@ export function CodexMobileApp() {
   const [sessionSubtasksError, setSessionSubtasksError] = useState<string | null>(null);
   const [anchorDraftTargetEntry, setAnchorDraftTargetEntry] = useState<CodexFileTreeEntry | null>(null);
   const [actionRestrictionDraft, setActionRestrictionDraft] = useState<CodexSessionActionRestriction | null>(null);
+  const [browserModeDraft, setBrowserModeDraft] = useState<CodexSessionBrowserMode>(createEmptySessionBrowserMode());
   const [anchorDraftName, setAnchorDraftName] = useState('');
   const [anchorDraftDescription, setAnchorDraftDescription] = useState('');
   const [agentSessionDraftTitle, setAgentSessionDraftTitle] = useState('');
@@ -10993,7 +11300,6 @@ export function CodexMobileApp() {
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerControlsRef = useRef<HTMLDivElement | null>(null);
-  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composerDragDepthRef = useRef(0);
   const pollInFlightRef = useRef(false);
   const sendInFlightRef = useRef(false);
@@ -11004,6 +11310,7 @@ export function CodexMobileApp() {
   const latestFullTimelineLoadTokenRef = useRef(0);
   const latestInstructionLoadTokenRef = useRef(0);
   const latestSessionContextSelectionLoadTokenRef = useRef(0);
+  const latestSessionBrowserModeLoadTokenRef = useRef(0);
   const latestProjectAnchorsLoadTokenRef = useRef(0);
   const latestUnifiedSkillsLoadTokenRef = useRef(0);
   const latestSessionRemindersLoadTokenRef = useRef(0);
@@ -13975,6 +14282,57 @@ export function CodexMobileApp() {
     }
   }
 
+  async function loadCurrentSessionBrowserMode(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
+    if (!nextProfileId || !nextSessionKey) {
+      const emptyMode = createEmptySessionBrowserMode();
+      setSessionBrowserMode(emptyMode);
+      setBrowserModeDraft(emptyMode);
+      return;
+    }
+
+    const requestToken = ++latestSessionBrowserModeLoadTokenRef.current;
+    setIsSessionBrowserModeLoading(true);
+    try {
+      const mode = await fetchSessionBrowserMode(nextProfileId, nextSessionKey);
+      if (requestToken !== latestSessionBrowserModeLoadTokenRef.current) {
+        return;
+      }
+      setSessionBrowserMode(mode);
+      setBrowserModeDraft(mode);
+    } catch (browserModeError: any) {
+      if (requestToken === latestSessionBrowserModeLoadTokenRef.current) {
+        const emptyMode = createEmptySessionBrowserMode();
+        setSessionBrowserMode(emptyMode);
+        setBrowserModeDraft(emptyMode);
+        setError(browserModeError.message || 'Failed to load browser mode');
+      }
+    } finally {
+      if (requestToken === latestSessionBrowserModeLoadTokenRef.current) {
+        setIsSessionBrowserModeLoading(false);
+      }
+    }
+  }
+
+  async function persistSessionBrowserMode(nextMode: CodexSessionBrowserMode) {
+    if (!profileId || !currentQueueKey) {
+      return;
+    }
+
+    setSessionBrowserMode(nextMode);
+    setBrowserModeDraft(nextMode);
+    setIsSessionBrowserModeSaving(true);
+    try {
+      const savedMode = await saveSessionBrowserMode(profileId, currentQueueKey, nextMode);
+      setSessionBrowserMode(savedMode);
+      setBrowserModeDraft(savedMode);
+    } catch (browserModeError: any) {
+      setError(browserModeError.message || 'Failed to save browser mode');
+      void loadCurrentSessionBrowserMode(profileId, currentQueueKey);
+    } finally {
+      setIsSessionBrowserModeSaving(false);
+    }
+  }
+
   function buildNextSessionContextSelection(
     overrides: Partial<CodexSessionContextSelection>
   ): CodexSessionContextSelection {
@@ -14238,6 +14596,29 @@ export function CodexMobileApp() {
   function openModePickerDialog() {
     setIsAdditionsMenuOpen(false);
     setIsModePickerDialogOpen(true);
+  }
+
+  function openBrowserModeDialog() {
+    setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(false);
+    setBrowserModeDraft(sessionBrowserMode);
+    setIsBrowserModeDialogOpen(true);
+  }
+
+  async function saveBrowserModeDraft() {
+    await persistSessionBrowserMode(browserModeDraft);
+    setIsBrowserModeDialogOpen(false);
+    setIsModePickerDialogOpen(false);
+  }
+
+  async function disableBrowserMode() {
+    const nextMode = {
+      ...browserModeDraft,
+      enabled: false,
+    };
+    await persistSessionBrowserMode(nextMode);
+    setIsBrowserModeDialogOpen(false);
+    setIsModePickerDialogOpen(false);
   }
 
   function openActionRestrictionDialog() {
@@ -15068,6 +15449,7 @@ export function CodexMobileApp() {
 
     void loadCurrentSessionInstruction(profileId, currentQueueKey);
     void loadCurrentSessionContextSelection(profileId, currentQueueKey);
+    void loadCurrentSessionBrowserMode(profileId, currentQueueKey);
     void loadCurrentSessionReminders(profileId, currentQueueKey);
   }, [currentQueueKey, profileId]);
 
@@ -15871,7 +16253,7 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || isProfessionalModeSelected || isAnnotationsModeSelected || isSessionContextSelectionSaving) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isSessionContextSelectionSaving) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
                 {isProfessionalModeSelected && (
                   <button
@@ -15891,6 +16273,18 @@ export function CodexMobileApp() {
                   >
                     <FileText className="h-3.5 w-3.5" />
                     <span>מצב ביאורים · 2 שלבים</span>
+                  </button>
+                )}
+                {sessionBrowserMode.enabled && (
+                  <button
+                    type="button"
+                    onClick={openBrowserModeDialog}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-3 py-1.5 text-[11px] font-medium text-violet-700 transition hover:bg-violet-100"
+                  >
+                    <Command className="h-3.5 w-3.5" />
+                    <span className="truncate">
+                      דפדפן אמיתי · {sessionBrowserMode.headless ? 'Headless' : 'Visual'} · {sessionBrowserMode.profileSeed === 'seeded' ? 'Seeded' : 'Empty'}
+                    </span>
                   </button>
                 )}
                 {selectedActionRestriction && (
@@ -16581,7 +16975,6 @@ export function CodexMobileApp() {
                 </div>
 
                 <Textarea
-                  ref={composerTextareaRef}
                   dir="rtl"
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
@@ -16929,13 +17322,14 @@ export function CodexMobileApp() {
                       role="switch"
                       aria-checked={isSessionInstructionEnabled}
                       onClick={() => setIsSessionInstructionEnabled((current) => !current)}
-                      className={`relative inline-flex h-7 w-12 items-center rounded-full transition ${
+                      dir="ltr"
+                      className={`relative inline-flex h-7 w-12 shrink-0 rounded-full p-1 transition ${
                         isSessionInstructionEnabled ? 'bg-amber-400/90' : 'bg-slate-200'
                       }`}
                     >
                       <span
-                        className={`inline-block h-5 w-5 rounded-full bg-white shadow transition ${
-                          isSessionInstructionEnabled ? 'translate-x-1' : 'translate-x-6'
+                        className={`block h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                          isSessionInstructionEnabled ? 'translate-x-5' : 'translate-x-0'
                         }`}
                       />
                     </button>
@@ -17148,15 +17542,32 @@ export function CodexMobileApp() {
 
       <ModePickerDialog
         isOpen={isModePickerDialogOpen}
+        currentProvider={currentProfile?.provider || null}
         isProfessionalModeSelected={isProfessionalModeSelected}
         isAnnotationsModeSelected={isAnnotationsModeSelected}
         selectedAgentSessionDraft={selectedAgentSessionDraft}
         selectedActionRestriction={selectedActionRestriction}
+        selectedBrowserMode={sessionBrowserMode}
         onClose={() => setIsModePickerDialogOpen(false)}
         onToggleProfessionalMode={toggleProfessionalMode}
         onToggleAnnotationsMode={toggleAnnotationsMode}
         onOpenAgentSessions={openAgentSessionDialog}
         onOpenActionRestriction={openActionRestrictionDialog}
+        onOpenBrowserMode={openBrowserModeDialog}
+      />
+
+      <BrowserModeDialog
+        isOpen={isBrowserModeDialogOpen}
+        provider={currentProfile?.provider || null}
+        draft={browserModeDraft}
+        isSaving={isSessionBrowserModeSaving}
+        onClose={() => {
+          setIsBrowserModeDialogOpen(false);
+          setBrowserModeDraft(sessionBrowserMode);
+        }}
+        onChange={setBrowserModeDraft}
+        onSave={() => void saveBrowserModeDraft()}
+        onDisable={() => void disableBrowserMode()}
       />
 
       <ActionRestrictionDialog

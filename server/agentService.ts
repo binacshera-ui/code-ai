@@ -76,6 +76,7 @@ import {
   setSelectedPermissionModeId,
 } from './providerPermissions.js';
 import type { CodexSessionActionRestriction } from './codexSessionContextSelections.js';
+import type { CodexSessionBrowserMode } from './codexBrowserMode.js';
 
 export type AgentProfile = CodexProfile;
 
@@ -316,6 +317,9 @@ export async function runAgentPrompt(
     injectDirectoryContext?: boolean;
     executionConfig?: CodexExecutionConfig | null;
     actionRestriction?: CodexSessionActionRestriction | null;
+    browserMode?: CodexSessionBrowserMode | null;
+    browserModeProfileId?: string | null;
+    browserModeSessionKey?: string | null;
   } = {}
 ): Promise<AgentRunResult> {
   const profile = resolveProfile(profileId);

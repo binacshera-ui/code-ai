@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual, randomUUID } from 'crypto';
+import { createHmac, timingSafeEqual, randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { Router, Request, Response, NextFunction } from 'express';
@@ -99,11 +99,21 @@ import {
 } from './codexAgentSessions.js';
 import {
   clearSessionContextSelection,
+  type CodexSessionActionRestriction,
   deleteSessionContextSelection,
   getSessionContextSelection,
   rebindSessionContextSelection,
   setSessionContextSelection,
 } from './codexSessionContextSelections.js';
+import {
+  buildSessionBrowserModePromptAdditions,
+  consumeSessionBrowserModeAfterDispatch,
+  deleteSessionBrowserMode,
+  getSessionBrowserMode,
+  getSessionBrowserModeRecord,
+  rebindSessionBrowserMode,
+  setSessionBrowserMode,
+} from './codexBrowserMode.js';
 import {
   copySessionReminders,
   createSessionReminder,
@@ -944,6 +954,7 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
     deleteSessionInstruction(profileId, sessionId),
     clearSessionContextSelection(profileId, sessionId),
     deleteSessionReminders(profileId, sessionId),
+    deleteSessionBrowserMode(profileId, sessionId),
     deleteSessionTrigger(profileId, sessionId),
     deleteForkSessionMetadata(sessionId),
     deleteSupportSessionRecord(profileId, sessionId),
@@ -992,6 +1003,7 @@ interface ProfessionalModeQueueSpec {
 interface AnnotationsModeQueueSpec {
   prompt: string;
   promptPreview: string;
+  reportPath?: string;
 }
 
 function buildProfessionalModeQueueSpecs(goal: string): ProfessionalModeQueueSpec[] {
@@ -1024,12 +1036,12 @@ function buildProfessionalModeQueueSpecs(goal: string): ProfessionalModeQueueSpe
 }
 
 function sanitizeFileSlug(value: string): string {
-  const collapsed = value
-    .replace(/\s+/g, '-')
-    .replace(/[^\p{L}\p{N}._-]+/gu, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-  return collapsed.slice(0, 80) || 'annotation-report';
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u0590-\u05ff]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'report';
 }
 
 async function prepareAnnotationsModeReportPath(
@@ -1038,11 +1050,11 @@ async function prepareAnnotationsModeReportPath(
   queueKey: string,
   actionRestriction: CodexSessionActionRestriction | null
 ): Promise<string> {
-  const timestamp = new Date().toISOString().replace(/[:]/g, '-').replace(/\./g, '-');
-  const hash = createHash('sha1').update(`${profileId}:${queueKey}:${goal}:${timestamp}`).digest('hex').slice(0, 8);
   const slug = sanitizeFileSlug(goal);
-  let reportDir = path.join(CODEX_APP_CONFIG.storageRoot, 'annotation-reports', profileId, queueKey);
+  const stamp = nowIso().replace(/[:.]/g, '-');
+  const suffix = randomUUID().slice(0, 8);
 
+  let reportDir: string;
   if (actionRestriction?.enabled) {
     if (actionRestriction.targetKind === 'file') {
       throw Object.assign(new Error('מצב ביאורים לא יכול לכתוב דוח כאשר מצב הגבלת פעולה מוגדר על קובץ יחיד. בחר תיקייה או כבה את ההגבלה.'), {
@@ -1050,10 +1062,17 @@ async function prepareAnnotationsModeReportPath(
       });
     }
     reportDir = path.join(actionRestriction.targetPath, '.code-ai-annotations');
+  } else {
+    reportDir = path.join(
+      CODEX_APP_CONFIG.storageRoot,
+      'annotation-reports',
+      profileId,
+      queueKey
+    );
   }
 
   await fs.mkdir(reportDir, { recursive: true });
-  return path.join(reportDir, `${timestamp}-${slug}-${hash}.md`);
+  return path.join(reportDir, `${stamp}-${slug}-${suffix}.md`);
 }
 
 async function buildAnnotationsModeQueueSpecs(
@@ -1064,23 +1083,28 @@ async function buildAnnotationsModeQueueSpecs(
 ): Promise<AnnotationsModeQueueSpec[]> {
   const trimmedGoal = goal.trim();
   const reportPath = await prepareAnnotationsModeReportPath(profileId, trimmedGoal, queueKey, actionRestriction);
-  const prompt = [
-    `בדוק כעת מקצה לקצה את "${trimmedGoal}".`,
-    'עליך להריץ בדיקה מקצועית לשינוי שכבר בוצע, ואז לכתוב דוח Markdown מלא בעברית לקובץ היעד שניתן כאן.',
-    'השתמש בסקיל הבא כדי לנסח את הדוח במבנה הנכון: /home/developer/.codex/skills/hebrew-code-change-report/SKILL.md',
-    `קובץ הדוח שיש לכתוב או לעדכן: ${reportPath}`,
-    'הדוח חייב לכלול לפחות: תקציר מנהלים, פירוט מפתחים, מה בוצע בפועל, מה אומת, מה לא אומת או נחסם, ונתיבי קבצים רלוונטיים.',
-    'אל תסתפק בתשובה בצ׳אט בלבד; כתוב בפועל את קובץ ה-Markdown ולאחר מכן דווח איפה נשמר הדוח.',
-  ].join('\n\n');
-
   return [
     {
       prompt: trimmedGoal,
       promptPreview: trimmedGoal,
     },
     {
-      prompt,
+      prompt: [
+        `בדוק כעת מקצה לקצה את "${trimmedGoal}" וכתוב דוח ביאורים מלא לקובץ Markdown.`,
+        'חובה לעבוד עם הסקיל הבא ולציית למבנה העבודה שלו:',
+        '/home/developer/.codex/skills/hebrew-code-change-report/SKILL.md',
+        `צור או עדכן את הקובץ הבא וכתוב בו את הדוח המלא בעברית:\n${reportPath}`,
+        'הדוח חייב לכלול לכל הפחות:',
+        '- תקציר מנהלים קצר וברור',
+        '- פירוט מפתחים טכני עם הקבצים והזרימות ששונו או נבדקו',
+        '- מה בוצע בפועל',
+        '- מה אומת בפועל',
+        '- מה לא אומת או נשאר חסם',
+        '- נתיבי קבצים רלוונטיים אם יש',
+        'אל תשאיר את הדוח רק בתשובת הצאט; הוא חייב להיכתב בפועל לקובץ ה-MD שצוין. לאחר הכתיבה דווח בקצרה שהדוח נשמר והיכן.',
+      ].join('\n\n'),
       promptPreview: `מצב ביאורים · דוח · ${trimmedGoal}`,
+      reportPath,
     },
   ];
 }
@@ -2512,6 +2536,7 @@ router.post('/session-triggers/:triggerId/fire', async (req, res) => {
     const detail = await getAgentSessionDetail(trigger.sessionId, trigger.profileId, { tail: 1 });
     const sessionInstruction = await getSessionInstruction(trigger.profileId, trigger.sessionId);
     const sessionContextSelection = await getSessionContextSelection(trigger.profileId, trigger.sessionId);
+    const browserMode = await getSessionBrowserMode(trigger.profileId, trigger.sessionId);
     const triggerPrompt = buildSessionTriggerPrompt(trigger.label, req.body);
     const item = await enqueueCodexQueueItem({
       profileId: trigger.profileId,
@@ -2525,6 +2550,7 @@ router.post('/session-triggers/:triggerId/fire', async (req, res) => {
       promptPreview: triggerPrompt.preview,
       sessionInstruction: sessionInstruction || undefined,
       actionRestriction: sessionContextSelection.actionRestriction,
+      browserMode,
     });
 
     await recordSessionTriggerInvocation(trigger.profileId, trigger.sessionId, triggerPrompt.payloadPreview);
@@ -2658,6 +2684,48 @@ router.post('/session-context-selection', requireCodexAccess, async (req, res) =
     res.json({ selection });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to update session context selection' });
+  }
+});
+
+router.get('/session-browser-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const browserMode = await getSessionBrowserMode(profileId, sessionKey);
+    res.json({ browserMode });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session browser mode' });
+  }
+});
+
+router.post('/session-browser-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const browserMode = await setSessionBrowserMode(profileId, sessionKey, req.body?.browserMode || null);
+    res.json({ browserMode });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to update session browser mode' });
   }
 });
 
@@ -3404,6 +3472,20 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
         annotationsMode: false,
         actionRestriction: null,
       };
+    const sessionBrowserModeRecord = sessionContextKey
+      ? await getSessionBrowserModeRecord(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionBrowserMode = sessionBrowserModeRecord
+      ? {
+        enabled: sessionBrowserModeRecord.enabled === true,
+        headless: sessionBrowserModeRecord.headless !== false,
+        profileSeed: sessionBrowserModeRecord.profileSeed,
+      }
+      : null;
+    if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
     const contextCwd = cwd || (
       sessionId
         ? (await getAgentSessionDetail(sessionId, profileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
@@ -3430,6 +3512,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       }
       if (sessionContextSelection.actionRestriction?.enabled) {
         res.status(400).json({ error: 'לא ניתן לשלב מצב הגבלת פעולה עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionBrowserModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב דפדפן אמיתי עם מצב סוכנים באותו שלב.' });
         return;
       }
       const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
@@ -3502,6 +3588,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           contextPrefix: combinedContextPrefix || undefined,
           sessionInstruction: effectiveSessionInstruction,
           actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -3549,6 +3636,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           contextPrefix: combinedContextPrefix || undefined,
           sessionInstruction: effectiveSessionInstruction,
           actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -3585,6 +3673,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       contextPrefix: combinedContextPrefix || undefined,
       sessionInstruction: effectiveSessionInstruction,
       actionRestriction: sessionContextSelection.actionRestriction,
+      browserMode: sessionBrowserMode,
       forkContext: hydratedForkDraft.forkContext,
       scheduledAt,
       attachments,
@@ -3742,6 +3831,18 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const providerPrompt = supportEnvelope?.compiledPrompt || prompt;
     const sessionContextKey = sessionId || effectiveQueueKey;
     const sessionContextSelection = await getSessionContextSelection(visibleProfileId, sessionContextKey);
+    const sessionBrowserModeRecord = await getSessionBrowserModeRecord(visibleProfileId, sessionContextKey);
+    const sessionBrowserMode = sessionBrowserModeRecord
+      ? {
+        enabled: sessionBrowserModeRecord.enabled === true,
+        headless: sessionBrowserModeRecord.headless !== false,
+        profileSeed: sessionBrowserModeRecord.profileSeed,
+      }
+      : null;
+    if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
     const contextCwd = cwd || (sessionId
       ? (await getAgentSessionDetail(sessionId, visibleProfileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
       : configuredProfile.workspaceCwd);
@@ -3750,7 +3851,10 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       sessionKey: sessionContextKey,
       cwd: contextCwd,
     });
-    const providerPromptWithAdditions = [providerPrompt, additionsPromptSuffix]
+    const browserModePromptSuffix = sessionBrowserModeRecord
+      ? buildSessionBrowserModePromptAdditions(sessionBrowserModeRecord)
+      : null;
+    const providerPromptWithAdditions = [providerPrompt, additionsPromptSuffix, browserModePromptSuffix]
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .join('\n\n');
     const combinedContextPrefix = [hydratedForkDraft.contextPrefix]
@@ -3767,6 +3871,10 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     if (sessionContextSelection.agentSessionDraftId) {
       if (sessionContextSelection.actionRestriction?.enabled) {
         res.status(400).json({ error: 'לא ניתן לשלב מצב הגבלת פעולה עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionBrowserModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב דפדפן אמיתי עם מצב סוכנים באותו שלב.' });
         return;
       }
       const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
@@ -3865,6 +3973,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         injectDirectoryContext: !sessionId,
         executionConfig,
         actionRestriction: sessionContextSelection.actionRestriction,
+        browserMode: sessionBrowserMode,
+        browserModeProfileId: visibleProfileId,
+        browserModeSessionKey: supportSessionKey,
       });
       if (sessionId && result.sessionId !== sessionId) {
         const sourceSession = await getAgentSessionDetail(sessionId, visibleProfileId, {
@@ -3881,14 +3992,19 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         await rebindSessionInstruction(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionContextSelection(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionReminders(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionBrowserMode(visibleProfileId, sessionId, result.sessionId);
       }
       if (!sessionId && supportSessionKey !== result.sessionId) {
         await rebindSessionInstruction(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionContextSelection(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionReminders(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionBrowserMode(visibleProfileId, supportSessionKey, result.sessionId);
       }
       if (supportEnvelope && supportSessionKey !== result.sessionId) {
         await rebindSupportSessionRecord(visibleProfileId, supportSessionKey, result.sessionId);
+      }
+      if (sessionBrowserModeRecord && sessionBrowserModeRecord.enabled !== true) {
+        await consumeSessionBrowserModeAfterDispatch(visibleProfileId, result.sessionId);
       }
       await deleteSessionContextSelection(visibleProfileId, supportSessionKey);
       const session = await decorateSessionDetailForClient(

@@ -17,6 +17,10 @@ import { listHiddenSessionIds } from './codexSessionVisibility.js';
 import { getSessionTopicMap } from './codexSessionTopics.js';
 import { getSelectedPermissionMode, resolvePermissionMode } from './providerPermissions.js';
 import { alignPathOwnershipToProfile, getProfileSpawnIdentity } from './providerRuntimeOwnership.js';
+import {
+  prepareCodexBrowserModeForRun,
+  type CodexSessionBrowserMode,
+} from './codexBrowserMode.js';
 
 export interface CodexProfile {
   id: string;
@@ -572,11 +576,12 @@ function normalizeCodexServiceTierConfigValue(value: string | null | undefined):
   return normalized === 'fast' ? 'fast' : null;
 }
 
-function buildCodexProcessEnv(profile: CodexProfile): NodeJS.ProcessEnv {
+function buildCodexProcessEnv(profile: CodexProfile, codexHomeOverride?: string | null): NodeJS.ProcessEnv {
+  const effectiveCodexHome = codexHomeOverride?.trim() || profile.codexHome;
   return {
     ...process.env,
-    HOME: path.dirname(profile.codexHome),
-    CODEX_HOME: profile.codexHome,
+    HOME: path.dirname(effectiveCodexHome),
+    CODEX_HOME: effectiveCodexHome,
     TERM: 'xterm-256color',
     NO_COLOR: '1',
   };
@@ -3520,6 +3525,9 @@ export async function runCodexPrompt(
     contextPrefix?: string;
     executionConfig?: CodexExecutionConfig | null;
     allowCompactionResumeRepair?: boolean;
+    browserMode?: CodexSessionBrowserMode | null;
+    browserModeProfileId?: string | null;
+    browserModeSessionKey?: string | null;
   } = {}
 ): Promise<CodexRunResult> {
   const profile = resolveProfile(profileId);
@@ -3567,6 +3575,9 @@ export async function runCodexPrompt(
           contextPrefix: recovery.promptPrefix,
           executionConfig,
           allowCompactionResumeRepair: false,
+          browserMode: options.browserMode,
+          browserModeProfileId: options.browserModeProfileId,
+          browserModeSessionKey: options.browserModeSessionKey,
         }
       );
 
@@ -3579,11 +3590,22 @@ export async function runCodexPrompt(
 
     const permissionArgs = await resolveCodexPermissionArgs(profile, executionConfig.permissionModeId);
     const args = collectCodexArgs(permissionArgs, sessionId, imagePaths, executionConfig);
+    const browserModeSessionKey = options.browserModeSessionKey?.trim()
+      || sessionId?.trim()
+      || null;
+    const preparedBrowserMode = browserModeSessionKey
+      ? await prepareCodexBrowserModeForRun(
+        profile,
+        options.browserModeProfileId?.trim() || profile.id,
+        browserModeSessionKey,
+        options.browserMode || null
+      )
+      : null;
 
     return new Promise<CodexRunResult>((resolve, reject) => {
       const child = spawn(CODEX_BIN, args, {
         cwd: runCwd,
-        env: buildCodexProcessEnv(profile),
+        env: buildCodexProcessEnv(profile, preparedBrowserMode?.envCodeXHome || null),
         stdio: ['pipe', 'pipe', 'pipe'],
         ...getProfileSpawnIdentity(profile),
       });
@@ -3704,6 +3726,9 @@ export async function runCodexPrompt(
                   contextPrefix: recovery.promptPrefix,
                   executionConfig,
                   allowCompactionResumeRepair: false,
+                  browserMode: options.browserMode,
+                  browserModeProfileId: options.browserModeProfileId,
+                  browserModeSessionKey: options.browserModeSessionKey,
                 }
               );
               resolve({

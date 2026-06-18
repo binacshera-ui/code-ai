@@ -25,6 +25,12 @@ import {
 } from './codexSessionContextSelections.js';
 import { rebindSessionInstruction } from './codexSessionInstructions.js';
 import { rebindSessionReminders } from './codexSessionReminders.js';
+import {
+  buildSessionBrowserModePromptAdditions,
+  consumeSessionBrowserModeAfterDispatch,
+  rebindSessionBrowserMode,
+  type CodexSessionBrowserMode,
+} from './codexBrowserMode.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
 import { getSessionTopicMap, setSessionTopic } from './codexSessionTopics.js';
 import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
@@ -66,6 +72,7 @@ export interface CodexQueueItem {
   contextPrefix?: string | null;
   sessionInstruction?: string | null;
   actionRestriction: CodexSessionActionRestriction | null;
+  browserMode: CodexSessionBrowserMode | null;
   forkContext?: CodexForkContext | null;
   attachments: CodexUploadedAttachment[];
   status: CodexQueueItemStatus;
@@ -107,6 +114,7 @@ interface EnqueueCodexQueueInput {
   contextPrefix?: string | null;
   sessionInstruction?: string | null;
   actionRestriction?: CodexSessionActionRestriction | null;
+  browserMode?: CodexSessionBrowserMode | null;
   forkContext?: unknown;
   scheduledAt?: string | null;
   attachments?: CodexUploadedAttachment[];
@@ -211,6 +219,13 @@ function cloneQueueItem(item: CodexQueueItem): CodexQueueItem {
         targetKind: item.actionRestriction.targetKind,
       }
       : null,
+    browserMode: item.browserMode
+      ? {
+        enabled: item.browserMode.enabled === true,
+        headless: item.browserMode.headless !== false,
+        profileSeed: item.browserMode.profileSeed === 'empty' ? 'empty' : 'seeded',
+      }
+      : null,
   };
 }
 
@@ -233,6 +248,18 @@ function normalizeActionRestriction(value: unknown): CodexSessionActionRestricti
     enabled: (value as any).enabled === true,
     targetPath,
     targetKind,
+  };
+}
+
+function normalizeBrowserMode(value: unknown): CodexSessionBrowserMode | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  return {
+    enabled: (value as any).enabled === true,
+    headless: (value as any).headless !== false,
+    profileSeed: (value as any).profileSeed === 'empty' ? 'empty' : 'seeded',
   };
 }
 
@@ -643,6 +670,7 @@ async function loadState() {
           ? item.sessionInstruction.trim()
           : null,
         actionRestriction: normalizeActionRestriction(item.actionRestriction),
+        browserMode: normalizeBrowserMode(item.browserMode),
         forkContext: normalizeForkContext(item.forkContext),
         scheduleMode: item.scheduleMode === 'recurring' ? 'recurring' : 'once',
         recurringFrequency: isRecurringFrequency(item.recurringFrequency) ? item.recurringFrequency : null,
@@ -1007,9 +1035,16 @@ async function processQueueItem(item: CodexQueueItem) {
   const restrictionPrompt = item.actionRestriction?.enabled
     ? buildActionRestrictionPromptAdditions(item.actionRestriction)
     : null;
-  const effectiveRunPrompt = restrictionPrompt?.trim()
-    ? `${runPrompt}\n\n${restrictionPrompt.trim()}`
-    : runPrompt;
+  const browserModePrompt = item.browserMode
+    ? buildSessionBrowserModePromptAdditions(item.browserMode)
+    : null;
+  const effectiveRunPrompt = [
+    runPrompt,
+    restrictionPrompt?.trim() || null,
+    browserModePrompt?.trim() || null,
+  ]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .join('\n\n');
   const executionConfig: CodexExecutionConfig = {
     model: item.model,
     reasoningEffort: item.reasoningEffort,
@@ -1057,14 +1092,22 @@ async function processQueueItem(item: CodexQueueItem) {
         injectDirectoryContext: !resolvedSessionId,
         executionConfig,
         actionRestriction: item.actionRestriction,
+        browserMode: item.browserMode,
+        browserModeProfileId: item.sourceProfileId || item.profileId,
+        browserModeSessionKey: resolvedSessionId || item.queueKey,
       }
     );
 
     if (resolvedSessionId && result.sessionId !== resolvedSessionId) {
       await copySessionSidebarMetadataToRecoveredSession(item.profileId, resolvedSessionId, result.sessionId);
+      await rebindSessionBrowserMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
     }
 
     await rebindQueueItemsToSession(item.profileId, item.queueKey, result.sessionId);
+    await rebindSessionBrowserMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
+    if (item.browserMode && item.browserMode.enabled !== true) {
+      await consumeSessionBrowserModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
+    }
 
     if (isRecurringItem(item)) {
       applyRecurringResult(item, 'completed', {
@@ -1311,6 +1354,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
       ? input.sessionInstruction.trim()
       : null,
     actionRestriction: normalizeActionRestriction(input.actionRestriction),
+    browserMode: normalizeBrowserMode(input.browserMode),
     forkContext: normalizeForkContext(input.forkContext),
     attachments: (input.attachments || []).map((attachment) => ({ ...attachment })),
     status: new Date(scheduledAt).getTime() > Date.now() ? 'scheduled' : 'queued',
