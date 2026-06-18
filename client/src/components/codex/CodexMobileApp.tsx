@@ -615,6 +615,7 @@ interface CodexSessionContextSelection {
   reminderIds: string[];
   agentSessionDraftId: string | null;
   professionalMode: boolean;
+  annotationsMode: boolean;
   actionRestriction: CodexSessionActionRestriction | null;
 }
 
@@ -777,6 +778,7 @@ function createEmptySessionContextSelection(
     reminderIds: [],
     agentSessionDraftId: null,
     professionalMode: false,
+    annotationsMode: false,
     actionRestriction,
   };
 }
@@ -2321,6 +2323,7 @@ async function saveSessionContextSelection(
       reminderIds: selection.reminderIds,
       agentSessionDraftId: selection.agentSessionDraftId,
       professionalMode: selection.professionalMode,
+      annotationsMode: selection.annotationsMode,
       actionRestriction: selection.actionRestriction,
     }),
   });
@@ -9629,19 +9632,23 @@ function AgentSessionDialog({
 function ModePickerDialog({
   isOpen,
   isProfessionalModeSelected,
+  isAnnotationsModeSelected,
   selectedAgentSessionDraft,
   selectedActionRestriction,
   onClose,
   onToggleProfessionalMode,
+  onToggleAnnotationsMode,
   onOpenAgentSessions,
   onOpenActionRestriction,
 }: {
   isOpen: boolean;
   isProfessionalModeSelected: boolean;
+  isAnnotationsModeSelected: boolean;
   selectedAgentSessionDraft: CodexAgentSessionRecord | null;
   selectedActionRestriction: CodexSessionActionRestriction | null;
   onClose: () => void;
   onToggleProfessionalMode: () => void;
+  onToggleAnnotationsMode: () => void;
   onOpenAgentSessions: () => void;
   onOpenActionRestriction: () => void;
 }) {
@@ -9711,6 +9718,37 @@ function ModePickerDialog({
               isProfessionalModeSelected ? 'bg-emerald-100 text-emerald-600' : 'bg-white text-emerald-500'
             )}>
               <Zap className="h-4 w-4" />
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={onToggleAnnotationsMode}
+            className={cn(
+              'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
+              isAnnotationsModeSelected
+                ? 'border-sky-200 bg-sky-50/80'
+                : 'border-slate-100 bg-slate-50/80 hover:border-sky-200 hover:bg-sky-50/50'
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-800">מצב ביאורים</div>
+                {isAnnotationsModeSelected && (
+                  <span className="rounded-full bg-sky-600 px-2 py-0.5 text-[10px] font-medium text-white">
+                    פעיל
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">
+                יוצר 2 משימות רצופות: ביצוע רגיל ואז בדיקה וכתיבת דוח Markdown.
+              </div>
+            </div>
+            <div className={cn(
+              'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+              isAnnotationsModeSelected ? 'bg-sky-100 text-sky-700' : 'bg-white text-sky-500'
+            )}>
+              <FileText className="h-4 w-4" />
             </div>
           </button>
 
@@ -13946,6 +13984,7 @@ export function CodexMobileApp() {
       reminderIds: overrides.reminderIds ?? sessionContextSelection.reminderIds,
       agentSessionDraftId: overrides.agentSessionDraftId ?? sessionContextSelection.agentSessionDraftId,
       professionalMode: overrides.professionalMode ?? sessionContextSelection.professionalMode,
+      annotationsMode: overrides.annotationsMode ?? sessionContextSelection.annotationsMode,
       actionRestriction: overrides.actionRestriction !== undefined
         ? normalizeSessionActionRestriction(overrides.actionRestriction)
         : normalizeSessionActionRestriction(sessionContextSelection.actionRestriction),
@@ -14286,6 +14325,19 @@ export function CodexMobileApp() {
         ? sessionContextSelection.agentSessionDraftId
         : null,
       professionalMode: !sessionContextSelection.professionalMode,
+      annotationsMode: false,
+    }));
+    setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(false);
+  }
+
+  function toggleAnnotationsMode() {
+    void persistSessionContextSelection(buildNextSessionContextSelection({
+      agentSessionDraftId: sessionContextSelection.annotationsMode
+        ? sessionContextSelection.agentSessionDraftId
+        : null,
+      professionalMode: false,
+      annotationsMode: !sessionContextSelection.annotationsMode,
     }));
     setIsAdditionsMenuOpen(false);
     setIsModePickerDialogOpen(false);
@@ -14442,6 +14494,7 @@ export function CodexMobileApp() {
     await persistSessionContextSelection(buildNextSessionContextSelection({
       agentSessionDraftId,
       professionalMode: false,
+      annotationsMode: false,
     }));
   }
 
@@ -14573,6 +14626,7 @@ export function CodexMobileApp() {
         await persistSessionContextSelection(buildNextSessionContextSelection({
           agentSessionDraftId: null,
           professionalMode: false,
+          annotationsMode: false,
         }));
       }
 
@@ -14903,6 +14957,7 @@ export function CodexMobileApp() {
     [sessionContextSelection.reminderIds, sessionReminders]
   );
   const isProfessionalModeSelected = sessionContextSelection.professionalMode === true;
+  const isAnnotationsModeSelected = sessionContextSelection.annotationsMode === true;
   const selectedActionRestriction = useMemo(
     () => normalizeSessionActionRestriction(sessionContextSelection.actionRestriction),
     [sessionContextSelection.actionRestriction]
@@ -15816,7 +15871,7 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || isProfessionalModeSelected || isSessionContextSelectionSaving) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || isProfessionalModeSelected || isAnnotationsModeSelected || isSessionContextSelectionSaving) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
                 {isProfessionalModeSelected && (
                   <button
@@ -15826,6 +15881,16 @@ export function CodexMobileApp() {
                   >
                     <Zap className="h-3.5 w-3.5" />
                     <span>מצב מקצועי · 3 שלבים</span>
+                  </button>
+                )}
+                {isAnnotationsModeSelected && (
+                  <button
+                    type="button"
+                    onClick={toggleAnnotationsMode}
+                    className="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-[11px] font-medium text-sky-700 transition hover:bg-sky-100"
+                  >
+                    <FileText className="h-3.5 w-3.5" />
+                    <span>מצב ביאורים · 2 שלבים</span>
                   </button>
                 )}
                 {selectedActionRestriction && (
@@ -17084,10 +17149,12 @@ export function CodexMobileApp() {
       <ModePickerDialog
         isOpen={isModePickerDialogOpen}
         isProfessionalModeSelected={isProfessionalModeSelected}
+        isAnnotationsModeSelected={isAnnotationsModeSelected}
         selectedAgentSessionDraft={selectedAgentSessionDraft}
         selectedActionRestriction={selectedActionRestriction}
         onClose={() => setIsModePickerDialogOpen(false)}
         onToggleProfessionalMode={toggleProfessionalMode}
+        onToggleAnnotationsMode={toggleAnnotationsMode}
         onOpenAgentSessions={openAgentSessionDialog}
         onOpenActionRestriction={openActionRestrictionDialog}
       />

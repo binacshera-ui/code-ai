@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual, randomUUID } from 'crypto';
+import { createHash, createHmac, timingSafeEqual, randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { Router, Request, Response, NextFunction } from 'express';
@@ -918,6 +918,7 @@ async function copySessionContextSelectionToSession(
     && selection.reminderIds.length === 0
     && !selection.agentSessionDraftId
     && !selection.professionalMode
+    && !selection.annotationsMode
     && !selection.actionRestriction
   ) {
     return;
@@ -988,6 +989,11 @@ interface ProfessionalModeQueueSpec {
   promptPreview: string;
 }
 
+interface AnnotationsModeQueueSpec {
+  prompt: string;
+  promptPreview: string;
+}
+
 function buildProfessionalModeQueueSpecs(goal: string): ProfessionalModeQueueSpec[] {
   const trimmedGoal = goal.trim();
   return [
@@ -1013,6 +1019,68 @@ function buildProfessionalModeQueueSpecs(goal: string): ProfessionalModeQueueSpe
         'אם אתה מגלה פער, דווח עליו בצורה ישירה וברורה.',
       ].join('\n\n'),
       promptPreview: `מצב מקצועי · בדיקה · ${trimmedGoal}`,
+    },
+  ];
+}
+
+function sanitizeFileSlug(value: string): string {
+  const collapsed = value
+    .replace(/\s+/g, '-')
+    .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return collapsed.slice(0, 80) || 'annotation-report';
+}
+
+async function prepareAnnotationsModeReportPath(
+  profileId: string,
+  goal: string,
+  queueKey: string,
+  actionRestriction: CodexSessionActionRestriction | null
+): Promise<string> {
+  const timestamp = new Date().toISOString().replace(/[:]/g, '-').replace(/\./g, '-');
+  const hash = createHash('sha1').update(`${profileId}:${queueKey}:${goal}:${timestamp}`).digest('hex').slice(0, 8);
+  const slug = sanitizeFileSlug(goal);
+  let reportDir = path.join(CODEX_APP_CONFIG.storageRoot, 'annotation-reports', profileId, queueKey);
+
+  if (actionRestriction?.enabled) {
+    if (actionRestriction.targetKind === 'file') {
+      throw Object.assign(new Error('מצב ביאורים לא יכול לכתוב דוח כאשר מצב הגבלת פעולה מוגדר על קובץ יחיד. בחר תיקייה או כבה את ההגבלה.'), {
+        statusCode: 400,
+      });
+    }
+    reportDir = path.join(actionRestriction.targetPath, '.code-ai-annotations');
+  }
+
+  await fs.mkdir(reportDir, { recursive: true });
+  return path.join(reportDir, `${timestamp}-${slug}-${hash}.md`);
+}
+
+async function buildAnnotationsModeQueueSpecs(
+  profileId: string,
+  goal: string,
+  queueKey: string,
+  actionRestriction: CodexSessionActionRestriction | null
+): Promise<AnnotationsModeQueueSpec[]> {
+  const trimmedGoal = goal.trim();
+  const reportPath = await prepareAnnotationsModeReportPath(profileId, trimmedGoal, queueKey, actionRestriction);
+  const prompt = [
+    `בדוק כעת מקצה לקצה את "${trimmedGoal}".`,
+    'עליך להריץ בדיקה מקצועית לשינוי שכבר בוצע, ואז לכתוב דוח Markdown מלא בעברית לקובץ היעד שניתן כאן.',
+    'השתמש בסקיל הבא כדי לנסח את הדוח במבנה הנכון: /home/developer/.codex/skills/hebrew-code-change-report/SKILL.md',
+    `קובץ הדוח שיש לכתוב או לעדכן: ${reportPath}`,
+    'הדוח חייב לכלול לפחות: תקציר מנהלים, פירוט מפתחים, מה בוצע בפועל, מה אומת, מה לא אומת או נחסם, ונתיבי קבצים רלוונטיים.',
+    'אל תסתפק בתשובה בצ׳אט בלבד; כתוב בפועל את קובץ ה-Markdown ולאחר מכן דווח איפה נשמר הדוח.',
+  ].join('\n\n');
+
+  return [
+    {
+      prompt: trimmedGoal,
+      promptPreview: trimmedGoal,
+    },
+    {
+      prompt,
+      promptPreview: `מצב ביאורים · דוח · ${trimmedGoal}`,
     },
   ];
 }
@@ -2584,6 +2652,7 @@ router.post('/session-context-selection', requireCodexAccess, async (req, res) =
       reminderIds: req.body?.reminderIds,
       agentSessionDraftId: req.body?.agentSessionDraftId,
       professionalMode: req.body?.professionalMode,
+      annotationsMode: req.body?.annotationsMode,
       actionRestriction: req.body?.actionRestriction,
     });
     res.json({ selection });
@@ -3332,6 +3401,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
         reminderIds: [],
         agentSessionDraftId: null,
         professionalMode: false,
+        annotationsMode: false,
         actionRestriction: null,
       };
     const contextCwd = cwd || (
@@ -3354,6 +3424,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       .join('\n\n');
 
     if (sessionContextSelection.agentSessionDraftId) {
+      if (sessionContextSelection.annotationsMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב ביאורים עם מצב סוכנים באותו שלב.' });
+        return;
+      }
       if (sessionContextSelection.actionRestriction?.enabled) {
         res.status(400).json({ error: 'לא ניתן לשלב מצב הגבלת פעולה עם מצב סוכנים באותו שלב.' });
         return;
@@ -3398,6 +3472,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     }
 
     if (sessionContextSelection.professionalMode) {
+      if (sessionContextSelection.annotationsMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מקצועי עם מצב ביאורים באותה שליחה.' });
+        return;
+      }
       if (recurrence) {
         res.status(400).json({ error: 'מצב מקצועי אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
         return;
@@ -3407,6 +3485,53 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
 
       for (const [index, spec] of professionalSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          scheduledAt,
+          attachments: index === 0 ? attachments : [],
+        });
+        queuedItems.push(nextItem);
+      }
+
+      if (sessionContextKey) {
+        await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      }
+
+      res.status(202).json({ items: queuedItems });
+      return;
+    }
+
+    if (sessionContextSelection.annotationsMode) {
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב ביאורים אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      const annotationSpecs = await buildAnnotationsModeQueueSpecs(
+        visibleProfileId,
+        basePrompt,
+        queueKey,
+        sessionContextSelection.actionRestriction
+      );
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of annotationSpecs.entries()) {
         const stepPrompt = index === 0
           ? [spec.prompt, additionsPromptSuffix]
             .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
