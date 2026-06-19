@@ -54,6 +54,8 @@ const BROWSER_MODE_BUNDLED_PYTHON_ROOT = path.join(CODEX_APP_CONFIG.appRoot, 'se
 const BROWSER_MODE_SERVER_SCRIPT = path.join(BROWSER_MODE_BUNDLED_PYTHON_ROOT, 'browser_mode_mcp_server.py');
 const BROWSER_MODE_RUNTIME_SCRIPT = path.join(BROWSER_MODE_BUNDLED_PYTHON_ROOT, 'browser_mode_runtime.py');
 const BROWSER_MODE_EXTRACTOR_SCRIPT = path.join(BROWSER_MODE_BUNDLED_PYTHON_ROOT, 'browser_mode_extractor.py');
+const BROWSER_MODE_LOCAL_VENV_PYTHON = path.join(CODEX_APP_CONFIG.appRoot, '.venv', 'bin', 'python');
+const BROWSER_MODE_LOCAL_BROWSERS_ROOT = path.join(CODEX_APP_CONFIG.appRoot, '.playwright-browsers');
 const DEFAULT_BROWSER_SEED_PROFILE_DIR = process.env.CODE_AI_BROWSER_SEED_PROFILE_DIR?.trim() || '/tmp/code-ai-browser-profile';
 const XVFB_RUN_PATH = process.env.XVFB_RUN_PATH || '/usr/bin/xvfb-run';
 const XVFB_SERVER_ARGS = '-screen 0 1440x1200x24 -ac +extension RANDR';
@@ -227,7 +229,7 @@ function canRunPython(candidate: string): boolean {
 
 async function resolveBrowserPythonExecutable(): Promise<string> {
   const envCandidate = process.env.CODE_AI_BROWSER_PYTHON?.trim();
-  const localVenvCandidate = path.join(CODEX_APP_CONFIG.appRoot, '.venv', 'bin', 'python');
+  const localVenvCandidate = BROWSER_MODE_LOCAL_VENV_PYTHON;
   const virtualEnvCandidate = process.env.VIRTUAL_ENV?.trim()
     ? path.join(process.env.VIRTUAL_ENV.trim(), 'bin', 'python')
     : '';
@@ -259,6 +261,7 @@ async function resolveBrowserPythonExecutable(): Promise<string> {
 async function detectPlaywrightExecutable(codexHome: string, headless: boolean): Promise<ResolvedBrowserExecutable | null> {
   const homeDir = path.dirname(codexHome);
   const browsersRoots = [
+    BROWSER_MODE_LOCAL_BROWSERS_ROOT,
     path.join(homeDir, '.cache', 'ms-playwright'),
     path.join('/home/developer', '.cache', 'ms-playwright'),
     path.join('/home/developer2', '.cache', 'ms-playwright'),
@@ -470,6 +473,18 @@ async function ensureBundledBrowserModeRuntimeAvailable() {
   });
 }
 
+async function validateCodexBrowserModeEnvironment(
+  profile: BrowserModeProfile,
+  mode: CodexSessionBrowserMode,
+) {
+  await ensureBundledBrowserModeRuntimeAvailable();
+  await resolveBrowserPythonExecutable();
+  await detectPlaywrightExecutable(profile.codexHome, mode.headless !== false);
+  if (mode.headless === false) {
+    await ensureVisualBrowserDependenciesAvailable();
+  }
+}
+
 async function ensureVisualBrowserDependenciesAvailable() {
   await fs.access(XVFB_RUN_PATH, fsConstants.X_OK);
 }
@@ -550,6 +565,18 @@ export async function setSessionBrowserMode(
   return toClientMode(nextRecord);
 }
 
+export async function validateSessionBrowserMode(
+  profile: BrowserModeProfile,
+  mode: Partial<CodexSessionBrowserMode> | null | undefined,
+): Promise<CodexSessionBrowserMode> {
+  const normalized = normalizeBrowserMode(mode);
+  if (normalized.enabled !== true) {
+    return normalized;
+  }
+  await validateCodexBrowserModeEnvironment(profile, normalized);
+  return normalized;
+}
+
 export async function rebindSessionBrowserMode(profileId: string, fromSessionKey: string, toSessionKey: string): Promise<void> {
   await ensureStateLoaded();
   if (!fromSessionKey || !toSessionKey || fromSessionKey === toSessionKey) {
@@ -602,9 +629,9 @@ export async function prepareCodexBrowserModeForRun(
     return null;
   }
 
-  const existing = await getSessionBrowserModeRecord(stateProfileId, sessionKey);
   await ensureBundledBrowserModeRuntimeAvailable();
   const pythonExecutable = await resolveBrowserPythonExecutable();
+  const existing = await getSessionBrowserModeRecord(stateProfileId, sessionKey);
 
   const nextRecord = buildRecord(stateProfileId, sessionKey, normalized, existing);
   const resolvedExecutable = await detectPlaywrightExecutable(profile.codexHome, nextRecord.headless);

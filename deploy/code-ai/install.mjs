@@ -9,6 +9,10 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(SCRIPT_DIR, '../..');
 const IS_WINDOWS = process.platform === 'win32';
 const HOME_DIR = process.env.USERPROFILE || process.env.HOME || APP_ROOT;
+const BROWSER_MODE_VENV_DIR = path.join(APP_ROOT, '.venv');
+const BROWSER_MODE_PYTHON = path.join(BROWSER_MODE_VENV_DIR, IS_WINDOWS ? 'Scripts/python.exe' : 'bin/python');
+const BROWSER_MODE_REQUIREMENTS = path.join(APP_ROOT, 'server', 'browser-mode', 'python', 'requirements.txt');
+const BROWSER_MODE_PLAYWRIGHT_ROOT = path.join(APP_ROOT, '.playwright-browsers');
 
 function getDefaultCodexBin() {
   return IS_WINDOWS ? 'codex.cmd' : 'codex';
@@ -71,6 +75,7 @@ Options:
   --codex-bin PATH           Codex CLI binary/path
   --skip-npm-install         Skip npm install
   --skip-build               Skip npm run build
+  --skip-browser-setup       Skip browser-mode Python/bootstrap setup
   --skip-pm2                 Skip PM2 start/restart
   --help, -h                 Show this help
 `);
@@ -98,6 +103,7 @@ function parseArgs(argv) {
     codexBin: process.env.CODEX_BIN || getDefaultCodexBin(),
     skipNpmInstall: false,
     skipBuild: false,
+    skipBrowserSetup: false,
     skipPm2: false,
   };
 
@@ -176,6 +182,9 @@ function parseArgs(argv) {
       case '--skip-build':
         options.skipBuild = true;
         break;
+      case '--skip-browser-setup':
+        options.skipBrowserSetup = true;
+        break;
       case '--skip-pm2':
         options.skipPm2 = true;
         break;
@@ -221,6 +230,44 @@ function commandExists(command, versionArgs = ['--version']) {
   });
 
   return !result.error && result.status === 0;
+}
+
+function getPythonBootstrapCommand() {
+  const candidates = [
+    process.env.PYTHON_BIN,
+    process.env.PYTHON,
+    'python3',
+    'python',
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const result = spawnSync(candidate, ['--version'], {
+      stdio: 'ignore',
+      shell: false,
+    });
+    if (!result.error && result.status === 0) {
+      return candidate;
+    }
+  }
+
+  throw new Error('Python 3 was not found. Install Python 3 or pass PYTHON_BIN=/absolute/path/to/python3 before running the installer.');
+}
+
+function ensureBrowserModeRuntime() {
+  const bootstrapPython = getPythonBootstrapCommand();
+
+  if (!existsSync(BROWSER_MODE_PYTHON)) {
+    run(bootstrapPython, ['-m', 'venv', BROWSER_MODE_VENV_DIR], { cwd: APP_ROOT });
+  }
+
+  run(BROWSER_MODE_PYTHON, ['-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel'], { cwd: APP_ROOT });
+  run(BROWSER_MODE_PYTHON, ['-m', 'pip', 'install', '-r', BROWSER_MODE_REQUIREMENTS], { cwd: APP_ROOT });
+  run(BROWSER_MODE_PYTHON, ['-m', 'playwright', 'install', 'chromium'], {
+    cwd: APP_ROOT,
+    env: {
+      PLAYWRIGHT_BROWSERS_PATH: BROWSER_MODE_PLAYWRIGHT_ROOT,
+    },
+  });
 }
 
 function parseProfilesJson(rawValue) {
@@ -346,6 +393,10 @@ async function main() {
     run(npmCommand, ['run', 'build'], { cwd: APP_ROOT });
   }
 
+  if (!options.skipBrowserSetup) {
+    ensureBrowserModeRuntime();
+  }
+
   if (!options.skipPm2) {
     let hasExistingPm2App = false;
     try {
@@ -389,6 +440,7 @@ Next:
 1. Point your reverse proxy/domain to http://127.0.0.1:${options.port}
 2. Use deploy/code-ai/nginx-site.conf.template as the base snippet if you are on Linux/Nginx
 3. Open the app and verify the profile list and folder picker
+4. Browser mode runtime was ${options.skipBrowserSetup ? 'skipped' : 'prepared'} in ${BROWSER_MODE_VENV_DIR}
 `);
 }
 

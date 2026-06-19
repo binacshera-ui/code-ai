@@ -113,6 +113,7 @@ import {
   getSessionBrowserModeRecord,
   rebindSessionBrowserMode,
   setSessionBrowserMode,
+  validateSessionBrowserMode,
 } from './codexBrowserMode.js';
 import {
   copySessionReminders,
@@ -2722,7 +2723,18 @@ router.post('/session-browser-mode', requireCodexAccess, async (req, res) => {
       return;
     }
 
-    const browserMode = await setSessionBrowserMode(profileId, sessionKey, req.body?.browserMode || null);
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    if ((req.body?.browserMode?.enabled === true) && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+
+    const browserModeInput = await validateSessionBrowserMode(configuredProfile, req.body?.browserMode || null);
+    const browserMode = await setSessionBrowserMode(profileId, sessionKey, browserModeInput);
     res.json({ browserMode });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to update session browser mode' });
