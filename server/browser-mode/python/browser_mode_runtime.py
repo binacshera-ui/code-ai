@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import os
+import queue
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +44,8 @@ DEFAULT_ELEMENT_LIMIT = 5
 DEFAULT_FIND_LIMIT = 20
 DEFAULT_MAX_CAPTURED_EVENTS = 500
 DEFAULT_MAX_PAGE_CHARS = 50_000
+DEFAULT_BRIDGE_PORT_BASE = 39000
+DEFAULT_BRIDGE_PORT_SPAN = 2000
 INTERACTION_SELECTOR = ", ".join(
     [
         "a[href]",
@@ -354,6 +361,15 @@ class BrowserSession:
     artifacts: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class BridgeDispatchRequest:
+    name: str
+    payload: dict[str, Any]
+    done: threading.Event = field(default_factory=threading.Event)
+    error: Exception | None = None
+    result: dict[str, Any] | None = None
+
+
 def maybe_truncate_value(value: object, max_chars: int) -> tuple[object, int, bool]:
     serialized = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2, default=str)
     if len(serialized) <= max_chars:
@@ -367,6 +383,21 @@ def maybe_truncate_value(value: object, max_chars: int) -> tuple[object, int, bo
 def to_title_or_none(value: str) -> str | None:
     normalized = value.strip()
     return normalized if normalized else None
+
+
+def normalize_runtime_url(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if re.match(r"^[a-zA-Z][a-zA-Z\d+\-.]*:", normalized):
+        return normalized
+    if normalized.startswith("//"):
+        return f"https:{normalized}"
+    if re.match(r"^(localhost|127\.0\.0\.1|0\.0\.0\.0)([:/]|$)", normalized):
+        return f"http://{normalized}"
+    return f"https://{normalized}"
 
 
 def _mime_type_for_path(path: Path) -> str:
@@ -384,12 +415,21 @@ class BrowserRuntime:
     def __init__(self, settings) -> None:
         self._settings = settings
         self._session: BrowserSession | None = None
+        self._owner_thread_id = threading.get_ident()
         self._profile_dir = Path(settings.web_browser_profile_dir)
         self._screenshot_dir = Path(settings.web_browser_screenshot_dir)
+        self._bridge_file = self._profile_dir.parent / "browser-http-bridge.json"
+        self._bridge_port: int | None = None
+        self._bridge_requests: queue.Queue[BridgeDispatchRequest] = queue.Queue()
+        self._bridge_server: ThreadingHTTPServer | None = None
+        self._bridge_thread: threading.Thread | None = None
+        self._dispatch_lock = threading.RLock()
         self._profile_dir.mkdir(parents=True, exist_ok=True)
         self._screenshot_dir.mkdir(parents=True, exist_ok=True)
+        self._start_bridge_server()
 
     def close(self) -> None:
+        self._stop_bridge_server()
         if self._session is None:
             return
         try:
@@ -407,7 +447,61 @@ class BrowserRuntime:
             "headless": self._settings.web_browser_headless,
             "profile_dir": str(self._profile_dir),
             "screenshot_dir": str(self._screenshot_dir),
+            "bridge_url": self._bridge_url(),
         }
+
+    def dispatch_action(self, name: str, arguments: dict | None = None) -> dict:
+        payload = dict(arguments or {})
+        if threading.get_ident() != self._owner_thread_id:
+            request = BridgeDispatchRequest(name=name, payload=payload)
+            self._bridge_requests.put(request)
+            if not request.done.wait(timeout=120):
+                raise BrowserRuntimeError(
+                    "BROWSER_MODE_RUNTIME_TIMEOUT",
+                    False,
+                    504,
+                    f"Timed out waiting for browser action: {name}",
+                    "Retry the browser action. If the runtime is hung, restart the browser-mode session.",
+                )
+            if request.error is not None:
+                raise request.error
+            return request.result or {}
+
+        return self._dispatch_action_internal(name, payload)
+
+    def _dispatch_action_internal(self, name: str, payload: dict[str, Any]) -> dict:
+        with self._dispatch_lock:
+            if name == "browser_health":
+                return self.health_check()
+            if name == "screenshot":
+                return self.save_screenshot(payload)
+            handler = getattr(self, name, None)
+            if handler is None:
+                raise BrowserRuntimeError(
+                    "WEB_TOOL_VALIDATION_FAILED",
+                    False,
+                    400,
+                    f"Unsupported browser tool: {name}",
+                    "Use a registered browser tool name.",
+                )
+            return handler(payload)
+
+    def process_bridge_requests(self, max_requests: int = 8) -> int:
+        processed = 0
+        while processed < max_requests:
+          try:
+              request = self._bridge_requests.get_nowait()
+          except queue.Empty:
+              break
+
+          try:
+              request.result = self._dispatch_action_internal(request.name, request.payload)
+          except Exception as exc:
+              request.error = exc
+          finally:
+              request.done.set()
+          processed += 1
+        return processed
 
     def tabs_create(self, input_data: dict | None = None) -> dict:
         del input_data
@@ -474,7 +568,8 @@ class BrowserRuntime:
             page = tab.page
             timeout_ms = input_data.get("timeout_ms") or self._settings.web_browser_navigation_timeout_ms
             wait_until = input_data.get("wait_until") or input_data.get("waitUntil") or "domcontentloaded"
-            target = input_data.get("url")
+            raw_target = input_data.get("url")
+            target = raw_target if raw_target in {"back", "forward"} else normalize_runtime_url(raw_target)
             if target and target not in {"back", "forward"}:
                 page.goto(target, timeout=timeout_ms, wait_until=wait_until)
                 self._maybe_capture_gif_frame(tab, label="navigate")
@@ -1628,3 +1723,122 @@ class BrowserRuntime:
             str(error),
             "Retry the operation. If the site keeps failing, route to a human browser session.",
         )
+
+    def _bridge_url(self) -> str | None:
+        if self._bridge_port is None:
+            return None
+        return f"http://127.0.0.1:{self._bridge_port}"
+
+    def _resolve_bridge_port(self) -> int:
+        digest = hashlib.sha1(str(self._profile_dir).encode("utf-8")).digest()
+        base_offset = int.from_bytes(digest[:2], "big") % DEFAULT_BRIDGE_PORT_SPAN
+        candidate = DEFAULT_BRIDGE_PORT_BASE + base_offset
+        return candidate
+
+    def _start_bridge_server(self) -> None:
+        if self._bridge_server is not None:
+            return
+
+        runtime = self
+
+        class BridgeHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path != "/health":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self._write_json({"ok": True, "result": runtime.dispatch_action("browser_health", {})}, 200)
+
+            def do_POST(self):
+                if self.path != "/call":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                try:
+                    content_length = int(self.headers.get("content-length", "0"))
+                except ValueError:
+                    content_length = 0
+                raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+                try:
+                    payload = json.loads(raw.decode("utf-8") or "{}")
+                    name = payload.get("name")
+                    if not isinstance(name, str) or not name.strip():
+                        raise BrowserRuntimeError(
+                            "WEB_TOOL_VALIDATION_FAILED",
+                            False,
+                            400,
+                            "Tool name is required.",
+                            "Provide a valid browser tool name.",
+                        )
+                    result = runtime.dispatch_action(name.strip(), payload.get("arguments") or {})
+                    self._write_json({"ok": True, "result": result}, 200)
+                except BrowserRuntimeError as exc:
+                    self._write_json({
+                        "ok": False,
+                        "error": {
+                            "error_code": exc.error_code,
+                            "message": str(exc),
+                            "is_retryable": exc.is_retryable,
+                            "status_code": exc.status_code,
+                            "suggested_remediation": exc.suggested_remediation,
+                        },
+                    }, exc.status_code)
+                except Exception as exc:
+                    self._write_json({
+                        "ok": False,
+                        "error": {
+                            "error_code": "BROWSER_MODE_RUNTIME_FAILURE",
+                            "message": str(exc),
+                            "is_retryable": False,
+                            "status_code": 500,
+                            "suggested_remediation": "Inspect the local browser-mode runtime logs.",
+                        },
+                    }, 500)
+
+            def log_message(self, format, *args):
+                del format, args
+
+            def _write_json(self, payload: dict[str, Any], status_code: int):
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(status_code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        last_error: Exception | None = None
+        start_port = self._resolve_bridge_port()
+        for offset in range(25):
+            port = start_port + offset
+            try:
+                server = ThreadingHTTPServer(("127.0.0.1", port), BridgeHandler)
+                server.daemon_threads = True
+                thread = threading.Thread(target=server.serve_forever, name=f"browser-runtime-bridge-{port}", daemon=True)
+                thread.start()
+                self._bridge_port = port
+                self._bridge_server = server
+                self._bridge_thread = thread
+                self._bridge_file.write_text(json.dumps({
+                    "pid": os.getpid(),
+                    "port": port,
+                    "url": f"http://127.0.0.1:{port}",
+                    "profile_dir": str(self._profile_dir),
+                    "started_at": datetime.now(UTC).isoformat(),
+                }, ensure_ascii=False), "utf-8")
+                return
+            except OSError as exc:
+                last_error = exc
+                continue
+
+        raise RuntimeError(f"Failed to start browser HTTP bridge: {last_error}")
+
+    def _stop_bridge_server(self) -> None:
+        if self._bridge_server is not None:
+            try:
+                self._bridge_server.shutdown()
+                self._bridge_server.server_close()
+            finally:
+                self._bridge_server = None
+                self._bridge_thread = None
+                self._bridge_port = None
+        self._bridge_file.unlink(missing_ok=True)

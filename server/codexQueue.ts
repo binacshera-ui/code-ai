@@ -56,6 +56,12 @@ export type CodexQueueScheduleMode = 'once' | 'recurring';
 export type CodexQueueRecurringFrequency = 'daily' | 'weekly';
 export type CodexQueueLastRunStatus = 'completed' | 'failed';
 
+export interface CodexQueueGoalMode {
+  chainId: string;
+  stepIndex: number;
+  totalSteps: number;
+}
+
 export interface CodexQueueItem {
   id: string;
   profileId: string;
@@ -73,6 +79,7 @@ export interface CodexQueueItem {
   sessionInstruction?: string | null;
   actionRestriction: CodexSessionActionRestriction | null;
   browserMode: CodexSessionBrowserMode | null;
+  goalMode: CodexQueueGoalMode | null;
   forkContext?: CodexForkContext | null;
   attachments: CodexUploadedAttachment[];
   status: CodexQueueItemStatus;
@@ -115,6 +122,7 @@ interface EnqueueCodexQueueInput {
   sessionInstruction?: string | null;
   actionRestriction?: CodexSessionActionRestriction | null;
   browserMode?: CodexSessionBrowserMode | null;
+  goalMode?: CodexQueueGoalMode | null;
   forkContext?: unknown;
   scheduledAt?: string | null;
   attachments?: CodexUploadedAttachment[];
@@ -223,7 +231,21 @@ function cloneQueueItem(item: CodexQueueItem): CodexQueueItem {
       ? {
         enabled: item.browserMode.enabled === true,
         headless: item.browserMode.headless !== false,
-        profileSeed: item.browserMode.profileSeed === 'empty' ? 'empty' : 'seeded',
+        profileSeed: item.browserMode.profileSeed === 'empty'
+          ? 'empty'
+          : item.browserMode.profileSeed === 'custom'
+            ? 'custom'
+            : 'seeded',
+        customProfileDir: item.browserMode.profileSeed === 'custom'
+          ? item.browserMode.customProfileDir || null
+          : null,
+      }
+      : null,
+    goalMode: item.goalMode
+      ? {
+        chainId: item.goalMode.chainId,
+        stepIndex: item.goalMode.stepIndex,
+        totalSteps: item.goalMode.totalSteps,
       }
       : null,
   };
@@ -259,8 +281,129 @@ function normalizeBrowserMode(value: unknown): CodexSessionBrowserMode | null {
   return {
     enabled: (value as any).enabled === true,
     headless: (value as any).headless !== false,
-    profileSeed: (value as any).profileSeed === 'empty' ? 'empty' : 'seeded',
+    profileSeed: (value as any).profileSeed === 'empty'
+      ? 'empty'
+      : (value as any).profileSeed === 'custom'
+        ? 'custom'
+        : 'seeded',
+    customProfileDir: (value as any).profileSeed === 'custom'
+      && typeof (value as any).customProfileDir === 'string'
+      && (value as any).customProfileDir.trim()
+      ? (value as any).customProfileDir.trim()
+      : null,
   };
+}
+
+function normalizeGoalMode(value: unknown): CodexQueueGoalMode | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const chainId = typeof (value as any).chainId === 'string'
+    ? (value as any).chainId.trim()
+    : '';
+  const stepIndex = Number.isInteger((value as any).stepIndex)
+    ? Number((value as any).stepIndex)
+    : 0;
+  const totalSteps = Number.isInteger((value as any).totalSteps)
+    ? Number((value as any).totalSteps)
+    : 0;
+
+  if (!chainId || stepIndex <= 0 || totalSteps <= 0) {
+    return null;
+  }
+
+  return {
+    chainId,
+    stepIndex,
+    totalSteps,
+  };
+}
+
+function isGoalModeFinished(finalMessage: string | null | undefined): boolean {
+  if (typeof finalMessage !== 'string' || !finalMessage.trim()) {
+    return false;
+  }
+
+  const candidates: string[] = [];
+  for (const match of finalMessage.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+    if (typeof match[1] === 'string' && match[1].trim()) {
+      candidates.push(match[1].trim());
+    }
+  }
+
+  let depth = 0;
+  let startIndex = -1;
+  for (let index = 0; index < finalMessage.length; index += 1) {
+    const character = finalMessage[index];
+    if (character === '{') {
+      if (depth === 0) {
+        startIndex = index;
+      }
+      depth += 1;
+      continue;
+    }
+
+    if (character !== '}' || depth === 0) {
+      continue;
+    }
+
+    depth -= 1;
+    if (depth === 0 && startIndex >= 0) {
+      const candidate = finalMessage.slice(startIndex, index + 1).trim();
+      if (candidate) {
+        candidates.push(candidate);
+      }
+      startIndex = -1;
+    }
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as Record<string, unknown>;
+      const finishValue = parsed.finish;
+      if (finishValue === true) {
+        return true;
+      }
+      if (typeof finishValue === 'string') {
+        const normalized = finishValue.trim().toLowerCase();
+        if (normalized === 'true' || normalized === 'yes' || normalized === 'done' || normalized === 'completed') {
+          return true;
+        }
+      }
+    } catch {
+      // Ignore invalid JSON snippets and continue scanning.
+    }
+  }
+
+  return false;
+}
+
+function cancelRemainingGoalModeItems(completedItem: CodexQueueItem) {
+  if (!completedItem.goalMode) {
+    return;
+  }
+
+  const cancelledAt = nowIso();
+  for (const candidate of state.items) {
+    if (
+      candidate.id === completedItem.id
+      || !candidate.goalMode
+      || candidate.goalMode.chainId !== completedItem.goalMode.chainId
+    ) {
+      continue;
+    }
+
+    if (candidate.status !== 'queued' && candidate.status !== 'scheduled') {
+      continue;
+    }
+
+    candidate.status = 'cancelled';
+    candidate.updatedAt = cancelledAt;
+    candidate.completedAt = cancelledAt;
+    candidate.error = 'Goal mode stopped automatically after a previous step reported {"finish": "yes"}.';
+    candidate.finalMessage = null;
+  }
 }
 
 function trimPreview(text: string, limit = 140): string {
@@ -671,6 +814,7 @@ async function loadState() {
           : null,
         actionRestriction: normalizeActionRestriction(item.actionRestriction),
         browserMode: normalizeBrowserMode(item.browserMode),
+        goalMode: normalizeGoalMode(item.goalMode),
         forkContext: normalizeForkContext(item.forkContext),
         scheduleMode: item.scheduleMode === 'recurring' ? 'recurring' : 'once',
         recurringFrequency: isRecurringFrequency(item.recurringFrequency) ? item.recurringFrequency : null,
@@ -1173,6 +1317,9 @@ async function processQueueItem(item: CodexQueueItem) {
     if (shouldDeleteDraftFork) {
       await deleteForkDraftSession(item.queueKey);
     }
+    if (item.goalMode && isGoalModeFinished(result.finalMessage)) {
+      cancelRemainingGoalModeItems(item);
+    }
     await persistState();
   } catch (error: any) {
     if (isAgentRunCancelledError(error)) {
@@ -1355,6 +1502,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
       : null,
     actionRestriction: normalizeActionRestriction(input.actionRestriction),
     browserMode: normalizeBrowserMode(input.browserMode),
+    goalMode: normalizeGoalMode(input.goalMode),
     forkContext: normalizeForkContext(input.forkContext),
     attachments: (input.attachments || []).map((attachment) => ({ ...attachment })),
     status: new Date(scheduledAt).getTime() > Date.now() ? 'scheduled' : 'queued',

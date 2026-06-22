@@ -116,6 +116,12 @@ import {
   validateSessionBrowserMode,
 } from './codexBrowserMode.js';
 import {
+  closeSessionBrowserViewer,
+  openSessionBrowserViewer,
+  performSessionBrowserViewerAction,
+  resolveSessionBrowserViewerFramePath,
+} from './codexBrowserViewer.js';
+import {
   copySessionReminders,
   createSessionReminder,
   deleteSessionReminder,
@@ -349,6 +355,31 @@ function readRequestedMode(value: unknown): AppMode | undefined {
 
 function findConfiguredProfile(profileId: string | undefined) {
   return CODEX_APP_CONFIG.profiles.find((candidate) => candidate.id === profileId) || null;
+}
+
+function normalizeBrowserViewerNavigationUrl(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(normalized)) {
+    return normalized;
+  }
+
+  if (normalized.startsWith('//')) {
+    return `https:${normalized}`;
+  }
+
+  if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0)([:/]|$)/.test(normalized)) {
+    return `http://${normalized}`;
+  }
+
+  return `https://${normalized}`;
 }
 
 function resolveVisibleSourceProfile(profileId: string | undefined) {
@@ -930,6 +961,7 @@ async function copySessionContextSelectionToSession(
     && !selection.agentSessionDraftId
     && !selection.professionalMode
     && !selection.annotationsMode
+    && !selection.goalMode
     && !selection.actionRestriction
   ) {
     return;
@@ -1007,6 +1039,14 @@ interface AnnotationsModeQueueSpec {
   reportPath?: string;
 }
 
+interface GoalModeQueueSpec {
+  prompt: string;
+  promptPreview: string;
+  chainId: string;
+  stepIndex: number;
+  totalSteps: number;
+}
+
 function buildProfessionalModeQueueSpecs(goal: string): ProfessionalModeQueueSpec[] {
   const trimmedGoal = goal.trim();
   return [
@@ -1034,6 +1074,34 @@ function buildProfessionalModeQueueSpecs(goal: string): ProfessionalModeQueueSpe
       promptPreview: `מצב מקצועי · בדיקה · ${trimmedGoal}`,
     },
   ];
+}
+
+function buildGoalModeQueueSpecs(goal: string): GoalModeQueueSpec[] {
+  const trimmedGoal = goal.trim();
+  const chainId = randomUUID();
+  const totalSteps = 10;
+
+  return Array.from({ length: totalSteps }, (_, index) => {
+    const stepNumber = index + 1;
+    const automaticFollowup = [
+      `הודעת מטרה אוטומטית ${stepNumber} מתוך ${totalSteps} עבור "${trimmedGoal}".`,
+      `הבקשה המקורית שעליך להמשיך לבצע היא:\n${trimmedGoal}`,
+      'ביקשתי ממך ביצוע מלא. אם עדיין לא הגעת לתוצאה מלאה ומאומתת, עליך להמשיך לעבוד בפועל ולא לעצור.',
+      'אם ההודעה האוטומטית הזו חוזרת שוב, זה אומר שעדיין לא זוהתה השלמה רשמית, ולכן עליך להמשיך לעבוד עד שתוכל להגיד בוודאות של 100% שהעבודה הושלמה או עד שתיתקל בחסם אמיתי.',
+      'אם ורק אם סיימת את העבודה ב-100% ודאית, התגובה שלך חייבת להכיל רק שתי שורות, בדיוק בסדר הבא, בלי שום טקסט נוסף ובלי markdown fences:',
+      'סיימתי',
+      '{"finish": "yes"}',
+      'המפתח JSON חייב להיות בדיוק finish באנגלית, והערך חייב להיות בדיוק "yes".',
+    ].join('\n\n');
+
+    return {
+      prompt: automaticFollowup,
+      promptPreview: `מצב מטרה · ${stepNumber}/${totalSteps} · ${trimmedGoal}`,
+      chainId,
+      stepIndex: stepNumber,
+      totalSteps,
+    };
+  });
 }
 
 function sanitizeFileSlug(value: string): string {
@@ -2680,6 +2748,7 @@ router.post('/session-context-selection', requireCodexAccess, async (req, res) =
       agentSessionDraftId: req.body?.agentSessionDraftId,
       professionalMode: req.body?.professionalMode,
       annotationsMode: req.body?.annotationsMode,
+      goalMode: req.body?.goalMode,
       actionRestriction: req.body?.actionRestriction,
     });
     res.json({ selection });
@@ -2738,6 +2807,258 @@ router.post('/session-browser-mode', requireCodexAccess, async (req, res) => {
     res.json({ browserMode });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to update session browser mode' });
+  }
+});
+
+router.get('/session-browser-viewer', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+    const initialUrl = normalizeBrowserViewerNavigationUrl(req.query.url);
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const browserMode = await getSessionBrowserMode(profileId, sessionKey);
+    if (browserMode.enabled !== true) {
+      res.status(409).json({ error: 'Browser mode must be enabled before opening the remote viewer' });
+      return;
+    }
+
+    const viewer = await openSessionBrowserViewer(configuredProfile, sessionKey, initialUrl);
+    res.json({ viewer });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to open session browser viewer' });
+  }
+});
+
+router.post('/session-browser-viewer/action', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    const actionType = typeof req.body?.action === 'string' && req.body.action.trim()
+      ? req.body.action.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey || !actionType) {
+      res.status(400).json({ error: 'Profile id, session key and action are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const numericTabId = Number.isFinite(Number(req.body?.tabId)) ? Number(req.body?.tabId) : null;
+
+    let viewer;
+    switch (actionType) {
+      case 'back':
+      case 'forward':
+      case 'refresh':
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: actionType,
+          tabId: numericTabId,
+        });
+        break;
+      case 'click': {
+        const x = Number(req.body?.x);
+        const y = Number(req.body?.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          res.status(400).json({ error: 'Click actions require numeric x and y coordinates' });
+          return;
+        }
+        const button = req.body?.button === 'right' ? 'right' : 'left';
+        const clickCount = [1, 2, 3].includes(Number(req.body?.clickCount))
+          ? Number(req.body?.clickCount) as 1 | 2 | 3
+          : 1;
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'click',
+          button,
+          clickCount,
+          tabId: numericTabId,
+          x,
+          y,
+        });
+        break;
+      }
+      case 'drag': {
+        const startX = Number(req.body?.startX);
+        const startY = Number(req.body?.startY);
+        const endX = Number(req.body?.endX);
+        const endY = Number(req.body?.endY);
+        if (![startX, startY, endX, endY].every((value) => Number.isFinite(value))) {
+          res.status(400).json({ error: 'Drag actions require numeric startX, startY, endX and endY coordinates' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'drag',
+          endX,
+          endY,
+          startX,
+          startY,
+          tabId: numericTabId,
+        });
+        break;
+      }
+      case 'key': {
+        const key = typeof req.body?.key === 'string' && req.body.key.trim()
+          ? req.body.key.trim()
+          : '';
+        if (!key) {
+          res.status(400).json({ error: 'Key actions require a key value' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'key',
+          tabId: numericTabId,
+          key,
+        });
+        break;
+      }
+      case 'navigate': {
+        const url = normalizeBrowserViewerNavigationUrl(req.body?.url) || '';
+        if (!url) {
+          res.status(400).json({ error: 'Navigate actions require a URL' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'navigate',
+          tabId: numericTabId,
+          url,
+        });
+        break;
+      }
+      case 'newTab':
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'newTab',
+          url: normalizeBrowserViewerNavigationUrl(req.body?.url),
+        });
+        break;
+      case 'scroll': {
+        const direction = typeof req.body?.direction === 'string' && req.body.direction.trim()
+          ? req.body.direction.trim()
+          : 'down';
+        if (!['up', 'down', 'top', 'bottom'].includes(direction)) {
+          res.status(400).json({ error: 'Scroll direction must be up, down, top or bottom' });
+          return;
+        }
+        const amount = Number.isFinite(Number(req.body?.amount)) ? Number(req.body?.amount) : null;
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'scroll',
+          amount,
+          direction: direction as 'up' | 'down' | 'top' | 'bottom',
+          tabId: numericTabId,
+        });
+        break;
+      }
+      case 'switchTab': {
+        if (!numericTabId) {
+          res.status(400).json({ error: 'switchTab requires a tabId' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'switchTab',
+          tabId: numericTabId,
+        });
+        break;
+      }
+      case 'type': {
+        const text = typeof req.body?.text === 'string' ? req.body.text : '';
+        if (!text) {
+          res.status(400).json({ error: 'Type actions require text' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'type',
+          tabId: numericTabId,
+          text,
+        });
+        break;
+      }
+      default:
+        res.status(400).json({ error: 'Unsupported browser viewer action' });
+        return;
+    }
+
+    res.json({ viewer });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to run session browser viewer action' });
+  }
+});
+
+router.delete('/session-browser-viewer', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    await closeSessionBrowserViewer(profileId, sessionKey);
+    res.status(204).end();
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to close session browser viewer' });
+  }
+});
+
+router.get('/session-browser-viewer/frame', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+    const imageId = typeof req.query.imageId === 'string' && req.query.imageId.trim()
+      ? req.query.imageId.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey || !imageId) {
+      res.status(400).json({ error: 'Profile id, session key and image id are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const framePath = await resolveSessionBrowserViewerFramePath(configuredProfile, sessionKey, imageId);
+    if (!framePath) {
+      res.status(404).json({ error: 'The requested frame was not found' });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(framePath);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to stream browser viewer frame' });
   }
 });
 
@@ -3482,6 +3803,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
         agentSessionDraftId: null,
         professionalMode: false,
         annotationsMode: false,
+        goalMode: false,
         actionRestriction: null,
       };
     const sessionBrowserModeRecord = sessionContextKey
@@ -3492,6 +3814,9 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
         enabled: sessionBrowserModeRecord.enabled === true,
         headless: sessionBrowserModeRecord.headless !== false,
         profileSeed: sessionBrowserModeRecord.profileSeed,
+        customProfileDir: sessionBrowserModeRecord.profileSeed === 'custom'
+          ? sessionBrowserModeRecord.customProfileDir || null
+          : null,
       }
       : null;
     if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
@@ -3520,6 +3845,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     if (sessionContextSelection.agentSessionDraftId) {
       if (sessionContextSelection.annotationsMode) {
         res.status(400).json({ error: 'לא ניתן לשלב מצב ביאורים עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מטרה עם מצב סוכנים באותו שלב.' });
         return;
       }
       if (sessionContextSelection.actionRestriction?.enabled) {
@@ -3574,6 +3903,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
         res.status(400).json({ error: 'לא ניתן לשלב מצב מקצועי עם מצב ביאורים באותה שליחה.' });
         return;
       }
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מקצועי עם מצב מטרה באותה שליחה.' });
+        return;
+      }
       if (recurrence) {
         res.status(400).json({ error: 'מצב מקצועי אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
         return;
@@ -3617,6 +3950,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     }
 
     if (sessionContextSelection.annotationsMode) {
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב ביאורים עם מצב מטרה באותה שליחה.' });
+        return;
+      }
       if (recurrence) {
         res.status(400).json({ error: 'מצב ביאורים אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
         return;
@@ -3652,6 +3989,54 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
+        });
+        queuedItems.push(nextItem);
+      }
+
+      if (sessionContextKey) {
+        await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      }
+
+      res.status(202).json({ items: queuedItems });
+      return;
+    }
+
+    if (sessionContextSelection.goalMode) {
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב מטרה אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      const goalSpecs = buildGoalModeQueueSpecs(basePrompt);
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of goalSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          scheduledAt,
+          attachments: index === 0 ? attachments : [],
+          goalMode: {
+            chainId: spec.chainId,
+            stepIndex: spec.stepIndex,
+            totalSteps: spec.totalSteps,
+          },
         });
         queuedItems.push(nextItem);
       }
@@ -3849,6 +4234,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         enabled: sessionBrowserModeRecord.enabled === true,
         headless: sessionBrowserModeRecord.headless !== false,
         profileSeed: sessionBrowserModeRecord.profileSeed,
+        customProfileDir: sessionBrowserModeRecord.profileSeed === 'custom'
+          ? sessionBrowserModeRecord.customProfileDir || null
+          : null,
       }
       : null;
     if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
@@ -3881,6 +4269,14 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       : promptWithForkContext;
 
     if (sessionContextSelection.agentSessionDraftId) {
+      if (sessionContextSelection.annotationsMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב ביאורים עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מטרה עם מצב סוכנים באותו שלב.' });
+        return;
+      }
       if (sessionContextSelection.actionRestriction?.enabled) {
         res.status(400).json({ error: 'לא ניתן לשלב מצב הגבלת פעולה עם מצב סוכנים באותו שלב.' });
         return;
@@ -3967,6 +4363,181 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       });
       await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
       res.status(202).json({ job: item, agentSession: updatedRecord });
+      return;
+    }
+
+    if (sessionContextSelection.professionalMode) {
+      if (sessionContextSelection.annotationsMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מקצועי עם מצב ביאורים באותה שליחה.' });
+        return;
+      }
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מקצועי עם מצב מטרה באותה שליחה.' });
+        return;
+      }
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב מקצועי אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      if (supportEnvelope) {
+        await recordSupportTurnRequest({
+          profile: configuredProfile,
+          sessionKey: effectiveQueueKey,
+          source: 'ui',
+          envelope: supportEnvelope,
+        });
+      }
+
+      const professionalSpecs = buildProfessionalModeQueueSpecs(providerPrompt);
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of professionalSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey: effectiveQueueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          model: executionConfig.model,
+          reasoningEffort: executionConfig.reasoningEffort,
+          permissionModeId: executionConfig.permissionModeId,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          attachments: index === 0 ? attachments : [],
+        });
+        queuedItems.push(nextItem);
+      }
+
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      res.status(202).json({ items: queuedItems });
+      return;
+    }
+
+    if (sessionContextSelection.annotationsMode) {
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב ביאורים עם מצב מטרה באותה שליחה.' });
+        return;
+      }
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב ביאורים אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      if (supportEnvelope) {
+        await recordSupportTurnRequest({
+          profile: configuredProfile,
+          sessionKey: effectiveQueueKey,
+          source: 'ui',
+          envelope: supportEnvelope,
+        });
+      }
+
+      const annotationSpecs = await buildAnnotationsModeQueueSpecs(
+        visibleProfileId,
+        providerPrompt,
+        effectiveQueueKey,
+        sessionContextSelection.actionRestriction
+      );
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of annotationSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey: effectiveQueueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          model: executionConfig.model,
+          reasoningEffort: executionConfig.reasoningEffort,
+          permissionModeId: executionConfig.permissionModeId,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          attachments: index === 0 ? attachments : [],
+        });
+        queuedItems.push(nextItem);
+      }
+
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      res.status(202).json({ items: queuedItems });
+      return;
+    }
+
+    if (sessionContextSelection.goalMode) {
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב מטרה אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      if (supportEnvelope) {
+        await recordSupportTurnRequest({
+          profile: configuredProfile,
+          sessionKey: effectiveQueueKey,
+          source: 'ui',
+          envelope: supportEnvelope,
+        });
+      }
+
+      const goalSpecs = buildGoalModeQueueSpecs(providerPrompt);
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of goalSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey: effectiveQueueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          model: executionConfig.model,
+          reasoningEffort: executionConfig.reasoningEffort,
+          permissionModeId: executionConfig.permissionModeId,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          attachments: index === 0 ? attachments : [],
+          goalMode: {
+            chainId: spec.chainId,
+            stepIndex: spec.stepIndex,
+            totalSteps: spec.totalSteps,
+          },
+        });
+        queuedItems.push(nextItem);
+      }
+
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      res.status(202).json({ items: queuedItems });
       return;
     }
 

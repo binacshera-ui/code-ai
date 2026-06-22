@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import select
 import sys
 from types import SimpleNamespace
 
@@ -387,21 +388,7 @@ def build_runtime(args):
 
 
 def call_runtime(runtime, name, arguments):
-    payload = dict(arguments or {})
-    if name == "browser_health":
-        return runtime.health_check()
-    if name == "screenshot":
-        return runtime.save_screenshot(payload)
-    handler = getattr(runtime, name, None)
-    if handler is None:
-        raise BrowserRuntimeError(
-            "WEB_TOOL_VALIDATION_FAILED",
-            False,
-            400,
-            f"Unsupported browser tool: {name}",
-            "Use a registered browser tool name.",
-        )
-    return handler(payload)
+    return runtime.dispatch_action(name, dict(arguments or {}))
 
 
 def main():
@@ -492,7 +479,23 @@ def main():
             send_error(request_id, -32601, f"Method not found: {method}")
 
     try:
-        for line in sys.stdin:
+        stdin_stream = sys.stdin
+        while True:
+            runtime.process_bridge_requests()
+
+            try:
+                ready, _, _ = select.select([stdin_stream], [], [], 0.05)
+            except (OSError, ValueError):
+                break
+
+            runtime.process_bridge_requests()
+
+            if not ready:
+                continue
+
+            line = stdin_stream.readline()
+            if line == "":
+                break
             if not line.strip():
                 continue
             try:

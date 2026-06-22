@@ -13,8 +13,11 @@ import {
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent,
   type TouchEvent,
+  type WheelEvent as ReactWheelEvent,
 } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -62,6 +65,7 @@ import {
   ShieldCheck,
   SquarePen,
   Tag,
+  Target,
   Sun,
   TrainFront,
   User,
@@ -73,6 +77,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { CodexCodeBlock } from '@/components/codex/CodexCodeBlock';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import {
   SUDOKU_CATALOG,
@@ -616,6 +621,7 @@ interface CodexSessionContextSelection {
   agentSessionDraftId: string | null;
   professionalMode: boolean;
   annotationsMode: boolean;
+  goalMode: boolean;
   actionRestriction: CodexSessionActionRestriction | null;
 }
 
@@ -628,7 +634,8 @@ interface CodexSessionActionRestriction {
 interface CodexSessionBrowserMode {
   enabled: boolean;
   headless: boolean;
-  profileSeed: 'seeded' | 'empty';
+  profileSeed: 'genesis' | 'empty' | 'custom';
+  customProfileDir: string;
 }
 
 interface CodexSessionTasksResponse {
@@ -645,6 +652,110 @@ interface CodexSessionContextSelectionResponse {
 
 interface CodexSessionBrowserModeResponse {
   browserMode: CodexSessionBrowserMode;
+}
+
+interface CodexSessionBrowserViewerTab {
+  isCurrent: boolean;
+  tabId: number;
+  title: string | null;
+  url: string | null;
+}
+
+interface CodexSessionBrowserViewerFrame {
+  capturedAt: string;
+  imageId: string;
+  imageUrl: string;
+  tabId: number;
+}
+
+interface CodexSessionBrowserViewerState {
+  currentTabId: number | null;
+  currentTitle: string | null;
+  currentUrl: string | null;
+  frame: CodexSessionBrowserViewerFrame | null;
+  headless: boolean;
+  profileDir: string;
+  sessionKey: string;
+  tabs: CodexSessionBrowserViewerTab[];
+}
+
+interface CodexSessionBrowserViewerResponse {
+  viewer: CodexSessionBrowserViewerState;
+}
+
+const BROWSER_VIEWER_NON_TEXT_KEY_MAP: Record<string, string> = {
+  ArrowDown: 'ArrowDown',
+  ArrowLeft: 'ArrowLeft',
+  ArrowRight: 'ArrowRight',
+  ArrowUp: 'ArrowUp',
+  Backspace: 'Backspace',
+  Delete: 'Delete',
+  End: 'End',
+  Enter: 'Enter',
+  Escape: 'Escape',
+  Home: 'Home',
+  Insert: 'Insert',
+  PageDown: 'PageDown',
+  PageUp: 'PageUp',
+  Tab: 'Tab',
+};
+
+function mapBrowserViewerShortcut(event: Pick<ReactKeyboardEvent<HTMLElement>, 'altKey' | 'ctrlKey' | 'key' | 'metaKey' | 'shiftKey'>): string | null {
+  const rawKey = event.key;
+  if (!rawKey) {
+    return null;
+  }
+
+  if (!event.ctrlKey && !event.metaKey && !event.altKey) {
+    if (rawKey === 'Tab' && event.shiftKey) {
+      return 'Shift+Tab';
+    }
+    return BROWSER_VIEWER_NON_TEXT_KEY_MAP[rawKey] || null;
+  }
+
+  const normalizedKey = BROWSER_VIEWER_NON_TEXT_KEY_MAP[rawKey]
+    || (rawKey.length === 1 ? rawKey.toUpperCase() : rawKey);
+
+  if (!normalizedKey) {
+    return null;
+  }
+
+  const parts: string[] = [];
+  if (event.ctrlKey) {
+    parts.push('Control');
+  }
+  if (event.metaKey) {
+    parts.push('Meta');
+  }
+  if (event.altKey) {
+    parts.push('Alt');
+  }
+  if (event.shiftKey && normalizedKey !== 'Tab') {
+    parts.push('Shift');
+  }
+  parts.push(normalizedKey);
+  return parts.join('+');
+}
+
+function normalizeBrowserViewerUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (trimmed.startsWith('//')) {
+    return `https:${trimmed}`;
+  }
+
+  if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0)([:/]|$)/.test(trimmed)) {
+    return `http://${trimmed}`;
+  }
+
+  return `https://${trimmed}`;
 }
 
 interface CodexSessionReminder {
@@ -789,6 +900,7 @@ function createEmptySessionContextSelection(
     agentSessionDraftId: null,
     professionalMode: false,
     annotationsMode: false,
+    goalMode: false,
     actionRestriction,
   };
 }
@@ -797,8 +909,55 @@ function createEmptySessionBrowserMode(): CodexSessionBrowserMode {
   return {
     enabled: false,
     headless: true,
-    profileSeed: 'seeded',
+    profileSeed: 'genesis',
+    customProfileDir: '',
   };
+}
+
+function normalizeSessionBrowserModeValue(value: Partial<CodexSessionBrowserMode> | null | undefined): CodexSessionBrowserMode {
+  const fallback = createEmptySessionBrowserMode();
+  if (!value) {
+    return fallback;
+  }
+
+  const profileSeed = value.profileSeed === 'empty'
+    ? 'empty'
+    : value.profileSeed === 'custom'
+      ? 'custom'
+      : 'genesis';
+
+  return {
+    enabled: value.enabled === true,
+    headless: value.headless !== false,
+    profileSeed,
+    customProfileDir: profileSeed === 'custom' && typeof value.customProfileDir === 'string'
+      ? value.customProfileDir.trim()
+      : '',
+  };
+}
+
+function getBrowserModeProfileSeedLabel(mode: CodexSessionBrowserMode): string {
+  if (mode.profileSeed === 'custom') {
+    return 'Custom profile';
+  }
+
+  if (mode.profileSeed === 'empty') {
+    return 'Empty profile';
+  }
+
+  return 'Genesis profile';
+}
+
+function getBrowserModeProfileSeedCompactLabel(mode: CodexSessionBrowserMode): string {
+  if (mode.profileSeed === 'custom') {
+    return 'Custom';
+  }
+
+  if (mode.profileSeed === 'empty') {
+    return 'Empty';
+  }
+
+  return 'Genesis';
 }
 
 function getPathBasename(value: string): string {
@@ -2320,7 +2479,19 @@ async function fetchSessionContextSelection(profileId: string, sessionKey: strin
   const data = await fetchJson<CodexSessionContextSelectionResponse>(
     `/api/codex/session-context-selection?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
   );
-  return data.selection || createEmptySessionContextSelection();
+  const selection = data.selection;
+  return selection
+    ? {
+      anchorIds: Array.isArray(selection.anchorIds) ? selection.anchorIds : [],
+      skillIds: Array.isArray(selection.skillIds) ? selection.skillIds : [],
+      reminderIds: Array.isArray(selection.reminderIds) ? selection.reminderIds : [],
+      agentSessionDraftId: selection.agentSessionDraftId || null,
+      professionalMode: selection.professionalMode === true,
+      annotationsMode: selection.annotationsMode === true,
+      goalMode: selection.goalMode === true,
+      actionRestriction: normalizeSessionActionRestriction(selection.actionRestriction),
+    }
+    : createEmptySessionContextSelection();
 }
 
 async function saveSessionContextSelection(
@@ -2342,6 +2513,7 @@ async function saveSessionContextSelection(
       agentSessionDraftId: selection.agentSessionDraftId,
       professionalMode: selection.professionalMode,
       annotationsMode: selection.annotationsMode,
+      goalMode: selection.goalMode,
       actionRestriction: selection.actionRestriction,
     }),
   });
@@ -2352,7 +2524,7 @@ async function fetchSessionBrowserMode(profileId: string, sessionKey: string): P
   const data = await fetchJson<CodexSessionBrowserModeResponse>(
     `/api/codex/session-browser-mode?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
   );
-  return data.browserMode || createEmptySessionBrowserMode();
+  return normalizeSessionBrowserModeValue(data.browserMode);
 }
 
 async function saveSessionBrowserMode(
@@ -2371,7 +2543,63 @@ async function saveSessionBrowserMode(
       browserMode,
     }),
   });
-  return data.browserMode || createEmptySessionBrowserMode();
+  return normalizeSessionBrowserModeValue(data.browserMode);
+}
+
+async function fetchSessionBrowserViewer(
+  profileId: string,
+  sessionKey: string,
+  initialUrl?: string | null,
+): Promise<CodexSessionBrowserViewerState> {
+  const query = new URLSearchParams({
+    profileId,
+    sessionKey,
+  });
+  if (initialUrl?.trim()) {
+    query.set('url', initialUrl.trim());
+  }
+  const data = await fetchJson<CodexSessionBrowserViewerResponse>(
+    `/api/codex/session-browser-viewer?${query.toString()}`
+  );
+  return data.viewer;
+}
+
+async function performSessionBrowserViewerAction(
+  profileId: string,
+  sessionKey: string,
+  payload: Record<string, unknown>,
+): Promise<CodexSessionBrowserViewerState> {
+  const data = await fetchJson<CodexSessionBrowserViewerResponse>('/api/codex/session-browser-viewer/action', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      sessionKey,
+      ...payload,
+    }),
+  });
+  return data.viewer;
+}
+
+async function closeSessionBrowserViewer(profileId: string, sessionKey: string): Promise<void> {
+  const query = new URLSearchParams({
+    profileId,
+    sessionKey,
+  });
+  const response = await fetch(`/api/codex/session-browser-viewer?${query.toString()}`, {
+    method: 'DELETE',
+  });
+
+  if (response.status === 204) {
+    return;
+  }
+
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error((data as { error?: string } | null)?.error || 'Failed to close browser viewer');
+  }
 }
 
 async function fetchAgentSessions(profileId: string, cwd?: string | null): Promise<CodexAgentSessionRecord[]> {
@@ -9678,12 +9906,14 @@ function ModePickerDialog({
   currentProvider,
   isProfessionalModeSelected,
   isAnnotationsModeSelected,
+  isGoalModeSelected,
   selectedAgentSessionDraft,
   selectedActionRestriction,
   selectedBrowserMode,
   onClose,
   onToggleProfessionalMode,
   onToggleAnnotationsMode,
+  onToggleGoalMode,
   onOpenAgentSessions,
   onOpenActionRestriction,
   onOpenBrowserMode,
@@ -9692,12 +9922,14 @@ function ModePickerDialog({
   currentProvider: CodexProfile['provider'] | null;
   isProfessionalModeSelected: boolean;
   isAnnotationsModeSelected: boolean;
+  isGoalModeSelected: boolean;
   selectedAgentSessionDraft: CodexAgentSessionRecord | null;
   selectedActionRestriction: CodexSessionActionRestriction | null;
   selectedBrowserMode: CodexSessionBrowserMode;
   onClose: () => void;
   onToggleProfessionalMode: () => void;
   onToggleAnnotationsMode: () => void;
+  onToggleGoalMode: () => void;
   onOpenAgentSessions: () => void;
   onOpenActionRestriction: () => void;
   onOpenBrowserMode: () => void;
@@ -9714,7 +9946,7 @@ function ModePickerDialog({
         onClick={onClose}
         aria-label="Close modes dialog"
       />
-      <div className="relative z-10 flex w-full max-w-sm flex-col overflow-hidden rounded-[1.7rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+      <div className="relative z-10 flex w-full max-w-sm max-h-[88dvh] flex-col overflow-hidden rounded-[1.7rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
         <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
           <div className="flex items-start gap-3">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-indigo-600">
@@ -9739,7 +9971,8 @@ function ModePickerDialog({
           </button>
         </div>
 
-        <div className="space-y-3 px-5 py-5">
+        <div className="min-h-0 overflow-y-auto overscroll-contain px-5 py-5">
+          <div className="space-y-3">
           <button
             type="button"
             onClick={onOpenBrowserMode}
@@ -9769,7 +10002,7 @@ function ModePickerDialog({
               </div>
               <div className="mt-2 text-[11px] leading-5 text-slate-400">
                 {selectedBrowserMode.enabled
-                  ? `${selectedBrowserMode.headless ? 'Headless' : 'Visual'} · ${selectedBrowserMode.profileSeed === 'seeded' ? 'Seeded profile' : 'Empty profile'}`
+                  ? `${selectedBrowserMode.headless ? 'Headless' : 'Visual'} · ${getBrowserModeProfileSeedLabel(selectedBrowserMode)}`
                   : currentProvider === 'codex'
                     ? 'כבה או הפעל דפדפן אמיתי לסשן הזה.'
                     : 'זמין רק כאשר הפרופיל הפעיל הוא Codex.'}
@@ -9847,6 +10080,37 @@ function ModePickerDialog({
 
           <button
             type="button"
+            onClick={onToggleGoalMode}
+            className={cn(
+              'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
+              isGoalModeSelected
+                ? 'border-fuchsia-200 bg-fuchsia-50/80'
+                : 'border-slate-100 bg-slate-50/80 hover:border-fuchsia-200 hover:bg-fuchsia-50/50'
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-800">מצב מטרה</div>
+                {isGoalModeSelected && (
+                  <span className="rounded-full bg-fuchsia-600 px-2 py-0.5 text-[10px] font-medium text-white">
+                    פעיל
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">
+                יוצר 10 משימות המשך אוטומטיות עד שמזוהה תגובת סיום עם JSON מקצועי של finish="yes".
+              </div>
+            </div>
+            <div className={cn(
+              'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+              isGoalModeSelected ? 'bg-fuchsia-100 text-fuchsia-700' : 'bg-white text-fuchsia-500'
+            )}>
+              <Target className="h-4 w-4" />
+            </div>
+          </button>
+
+          <button
+            type="button"
             onClick={onOpenAgentSessions}
             className={cn(
               'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
@@ -9911,6 +10175,7 @@ function ModePickerDialog({
               <ShieldCheck className="h-4 w-4" />
             </div>
           </button>
+          </div>
         </div>
       </div>
     </div>
@@ -10074,6 +10339,7 @@ function BrowserModeDialog({
   isSaving,
   onClose,
   onChange,
+  onOpenViewer,
   onSave,
   onDisable,
 }: {
@@ -10083,6 +10349,7 @@ function BrowserModeDialog({
   isSaving: boolean;
   onClose: () => void;
   onChange: (value: CodexSessionBrowserMode) => void;
+  onOpenViewer: () => void;
   onSave: () => void;
   onDisable: () => void;
 }) {
@@ -10091,6 +10358,7 @@ function BrowserModeDialog({
   }
 
   const codexOnly = provider === 'codex';
+  const customProfilePathMissing = draft.profileSeed === 'custom' && !draft.customProfileDir.trim();
 
   return (
     <div className="fixed inset-0 z-[78] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
@@ -10166,19 +10434,24 @@ function BrowserModeDialog({
           <div className="mt-4 rounded-[1.5rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
             <div className="text-sm font-semibold text-slate-800">מקור הפרופיל</div>
             <div className="mt-1 text-xs leading-6 text-slate-500">
-              אפשר להתחיל מפרופיל seed persisted או מפרופיל ריק ומבודד לחלוטין.
+              אפשר להתחיל מ־Genesis persisted profile, מפרופיל ריק, או מהעתק של פרופיל Chrome/Chromium אמיתי שכבר מחובר.
             </div>
             <div className="mt-3 grid gap-2">
               {[
                 {
-                  id: 'seeded' as const,
-                  label: 'Seeded persisted profile',
-                  description: 'משכפל את פרופיל ה-seed שהוגדר למצב הדפדפן לתוך פרופיל פרטי של הסשן.',
+                  id: 'genesis' as const,
+                  label: 'Genesis persisted profile',
+                  description: 'משכפל את /tmp/genesis-browser-profile לתוך פרופיל פרטי של הסשן.',
                 },
                 {
                   id: 'empty' as const,
                   label: 'Empty isolated profile',
                   description: 'מתחיל דפדפן נקי בלי cookies/history קיימים.',
+                },
+                {
+                  id: 'custom' as const,
+                  label: 'Custom Chrome profile',
+                  description: 'מעתיק user-data-dir קיים של Chrome/Chromium שכבר מחובר לחשבון.',
                 },
               ].map((option) => (
                 <button
@@ -10199,6 +10472,28 @@ function BrowserModeDialog({
                 </button>
               ))}
             </div>
+            {draft.profileSeed === 'custom' && (
+              <div className="mt-3 rounded-[1.2rem] border border-violet-100 bg-violet-50/50 px-4 py-4">
+                <label className="block text-xs font-semibold uppercase tracking-[0.16em] text-violet-700">
+                  Custom profile path
+                </label>
+                <input
+                  type="text"
+                  dir="ltr"
+                  disabled={!codexOnly}
+                  value={draft.customProfileDir}
+                  onChange={(event) => onChange({
+                    ...draft,
+                    customProfileDir: event.currentTarget.value,
+                  })}
+                  placeholder="/home/you/.config/google-chrome"
+                  className="mt-2 w-full rounded-[1rem] border border-violet-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:ring-2 focus:ring-violet-100 disabled:opacity-50"
+                />
+                <div className="mt-2 text-xs leading-6 text-slate-500">
+                  יש להזין נתיב על השרת אל תיקיית user-data-dir אמיתית. השרת ישכפל אותה לתוך פרופיל הסשן, כך שלא נצטרך לבצע login דרך הדפדפן האוטומטי.
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="mt-4 rounded-[1.5rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
@@ -10252,6 +10547,14 @@ function BrowserModeDialog({
             <div className="flex items-center gap-2">
               <button
                 type="button"
+                onClick={onOpenViewer}
+                disabled={isSaving || !codexOnly || !draft.enabled || customProfilePathMissing}
+                className="rounded-full border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-700 transition hover:bg-violet-100 disabled:opacity-40"
+              >
+                פתח Viewer
+              </button>
+              <button
+                type="button"
                 onClick={onClose}
                 className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
               >
@@ -10260,12 +10563,466 @@ function BrowserModeDialog({
               <button
                 type="button"
                 onClick={onSave}
-                disabled={isSaving || !codexOnly}
+                disabled={isSaving || !codexOnly || customProfilePathMissing}
                 className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
               >
                 {isSaving ? 'שומר...' : 'שמור'}
               </button>
             </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BrowserViewerDialog({
+  isOpen,
+  viewer,
+  isLoading,
+  error,
+  textDraft,
+  urlDraft,
+  onClose,
+  onFrameClick,
+  onFrameDrag,
+  onFrameRightClick,
+  onFrameWheel,
+  onNavigate,
+  onNewTab,
+  onRefresh,
+  onScroll,
+  onSelectTab,
+  onSendKey,
+  onTextDraftChange,
+  onTypeText,
+  onTypeTextValue,
+  onUrlDraftChange,
+  onBack,
+  onForward,
+}: {
+  isOpen: boolean;
+  viewer: CodexSessionBrowserViewerState | null;
+  isLoading: boolean;
+  error: string | null;
+  textDraft: string;
+  urlDraft: string;
+  onClose: () => void;
+  onFrameClick: (x: number, y: number) => void;
+  onFrameDrag: (startX: number, startY: number, endX: number, endY: number) => void;
+  onFrameRightClick: (x: number, y: number) => void;
+  onFrameWheel: (direction: 'up' | 'down', amount: number) => void;
+  onNavigate: () => void;
+  onNewTab: () => void;
+  onRefresh: () => void;
+  onScroll: (direction: 'up' | 'down', amount?: number) => void;
+  onSelectTab: (tabId: number) => void;
+  onSendKey: (key: string) => void;
+  onTextDraftChange: (value: string) => void;
+  onTypeText: () => void;
+  onTypeTextValue: (value: string) => void;
+  onUrlDraftChange: (value: string) => void;
+  onBack: () => void;
+  onForward: () => void;
+}) {
+  const keyboardCaptureRef = useRef<HTMLTextAreaElement | null>(null);
+  const wheelDeltaRef = useRef(0);
+  const wheelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+  const dragPointerIdRef = useRef<number | null>(null);
+  const suppressNextClickRef = useRef(false);
+  const [isKeyboardLinked, setIsKeyboardLinked] = useState(false);
+
+  const focusKeyboardCapture = useEffectEvent(() => {
+    const input = keyboardCaptureRef.current;
+    if (!input) {
+      return;
+    }
+    input.focus({ preventScroll: true });
+    setIsKeyboardLinked(true);
+  });
+
+  const flushWheel = useEffectEvent(() => {
+    const delta = wheelDeltaRef.current;
+    wheelDeltaRef.current = 0;
+    if (!delta) {
+      return;
+    }
+    const direction = delta > 0 ? 'down' : 'up';
+    const amount = Math.max(240, Math.min(2400, Math.round(Math.abs(delta) * 1.35)));
+    onFrameWheel(direction, amount);
+  });
+
+  useEffect(() => {
+    if (!isOpen) {
+      setIsKeyboardLinked(false);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      focusKeyboardCapture();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      if (wheelTimerRef.current) {
+        clearTimeout(wheelTimerRef.current);
+        wheelTimerRef.current = null;
+      }
+      wheelDeltaRef.current = 0;
+      dragStartRef.current = null;
+      dragPointerIdRef.current = null;
+      suppressNextClickRef.current = false;
+    };
+  }, [isOpen]);
+
+  if (!isOpen) {
+    return null;
+  }
+
+  function toRemoteCoordinates(target: HTMLImageElement, clientX: number, clientY: number) {
+    const rect = target.getBoundingClientRect();
+    const scaleX = target.naturalWidth / rect.width;
+    const scaleY = target.naturalHeight / rect.height;
+    return {
+      x: Math.max(0, (clientX - rect.left) * scaleX),
+      y: Math.max(0, (clientY - rect.top) * scaleY),
+    };
+  }
+
+  function clearDragState(target?: HTMLImageElement | null, pointerId?: number | null) {
+    if (target && typeof pointerId === 'number' && target.hasPointerCapture(pointerId)) {
+      target.releasePointerCapture(pointerId);
+    }
+    dragStartRef.current = null;
+    dragPointerIdRef.current = null;
+  }
+
+  function handleKeyboardInput(event: ChangeEvent<HTMLTextAreaElement>) {
+    const text = event.currentTarget.value;
+    event.currentTarget.value = '';
+    if (!text) {
+      return;
+    }
+    onTypeTextValue(text);
+  }
+
+  function handleKeyboardPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const text = event.clipboardData.getData('text/plain');
+    if (!text) {
+      return;
+    }
+    event.preventDefault();
+    event.currentTarget.value = '';
+    onTypeTextValue(text);
+  }
+
+  function handleKeyboardKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    const mapped = mapBrowserViewerShortcut(event);
+    if (!mapped) {
+      return;
+    }
+    event.preventDefault();
+    onSendKey(mapped);
+  }
+
+  function handleUrlInputKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key !== 'Enter') {
+      return;
+    }
+    event.preventDefault();
+    if (!urlDraft.trim() || isLoading) {
+      return;
+    }
+    onNavigate();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[82] flex items-end justify-center bg-slate-950/30 p-3 backdrop-blur-sm sm:items-center sm:p-5">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+        aria-label="Close remote browser viewer"
+      />
+      <div className="relative z-10 flex h-[92dvh] w-full max-w-6xl flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_120px_-40px_rgba(15,23,42,0.45)]">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
+          <div className="min-w-0">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Remote Browser
+            </div>
+            <div className="mt-1 text-lg font-semibold text-slate-800">שליטה ידנית בפרופיל הדפדפן של הסשן</div>
+            <div className="mt-1 text-sm leading-6 text-slate-500">
+              לחץ בתוך צילום המסך כדי למקד שדות, ואז השתמש בשדה ההקלדה או במקשים המהירים.
+            </div>
+            <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] font-medium text-slate-600">
+              <span className={cn('h-2.5 w-2.5 rounded-full', isKeyboardLinked ? 'bg-emerald-500' : 'bg-amber-400')} />
+              {isKeyboardLinked ? 'המקלדת מחוברת ל־viewer' : 'לחץ בתוך המסך כדי לחבר מקלדת'}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-slate-50 p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-4 border-b border-slate-100 px-5 py-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onBack}
+              disabled={isLoading}
+              className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={onForward}
+              disabled={isLoading}
+              className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={isLoading}
+              className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
+            >
+              <RefreshCw className={cn('h-4 w-4', isLoading && 'animate-spin')} />
+            </button>
+            <button
+              type="button"
+              onClick={onNewTab}
+              disabled={isLoading}
+              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
+            >
+              טאב חדש
+            </button>
+            <div className="flex min-w-[240px] flex-1 items-center gap-2">
+              <Input
+                dir="ltr"
+                value={urlDraft}
+                onChange={(event) => onUrlDraftChange(event.target.value)}
+                onKeyDown={handleUrlInputKeyDown}
+                placeholder="https://..."
+                className="h-11 rounded-full border-slate-200"
+              />
+              <button
+                type="button"
+                onClick={onNavigate}
+                disabled={isLoading || !urlDraft.trim()}
+                className="rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
+              >
+                נווט
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {(viewer?.tabs || []).map((tab) => (
+              <button
+                key={tab.tabId}
+                type="button"
+                onClick={() => onSelectTab(tab.tabId)}
+                disabled={isLoading}
+                className={cn(
+                  'max-w-full rounded-full border px-3 py-2 text-xs font-medium transition',
+                  tab.isCurrent
+                    ? 'border-violet-200 bg-violet-50 text-violet-700'
+                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                )}
+              >
+                {tab.title || tab.url || `Tab ${tab.tabId}`}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid min-h-0 flex-1 gap-4 overflow-hidden px-5 py-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <div
+            className={cn(
+              'relative min-h-[320px] overflow-auto rounded-[1.5rem] border bg-slate-950/95 p-3',
+              isKeyboardLinked ? 'border-emerald-300 shadow-[0_0_0_1px_rgba(16,185,129,0.2)]' : 'border-slate-200'
+            )}
+            onWheel={(event: ReactWheelEvent<HTMLDivElement>) => {
+              event.preventDefault();
+              focusKeyboardCapture();
+              wheelDeltaRef.current += event.deltaY;
+              if (wheelTimerRef.current) {
+                return;
+              }
+              wheelTimerRef.current = window.setTimeout(() => {
+                wheelTimerRef.current = null;
+                flushWheel();
+              }, 70);
+            }}
+          >
+            {viewer?.frame ? (
+              <>
+                <img
+                  src={`${viewer.frame.imageUrl}&ts=${encodeURIComponent(viewer.frame.capturedAt)}`}
+                  alt="Remote browser frame"
+                  className="mx-auto max-w-full rounded-[1rem] border border-slate-800 shadow-[0_20px_80px_-32px_rgba(15,23,42,0.65)]"
+                  style={{ cursor: isLoading ? 'progress' : 'crosshair' }}
+                  draggable={false}
+                  onDragStart={(event) => event.preventDefault()}
+                  onClick={(event: ReactMouseEvent<HTMLImageElement>) => {
+                    focusKeyboardCapture();
+                    if (suppressNextClickRef.current) {
+                      suppressNextClickRef.current = false;
+                      return;
+                    }
+                    const { x, y } = toRemoteCoordinates(event.currentTarget, event.clientX, event.clientY);
+                    onFrameClick(x, y);
+                  }}
+                  onContextMenu={(event: ReactMouseEvent<HTMLImageElement>) => {
+                    event.preventDefault();
+                    focusKeyboardCapture();
+                    const { x, y } = toRemoteCoordinates(event.currentTarget, event.clientX, event.clientY);
+                    onFrameRightClick(x, y);
+                  }}
+                  onPointerDown={(event: PointerEvent<HTMLImageElement>) => {
+                    focusKeyboardCapture();
+                    if (event.button !== 0 || !event.shiftKey) {
+                      return;
+                    }
+                    const start = toRemoteCoordinates(event.currentTarget, event.clientX, event.clientY);
+                    dragStartRef.current = start;
+                    dragPointerIdRef.current = event.pointerId;
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                  }}
+                  onPointerUp={(event: PointerEvent<HTMLImageElement>) => {
+                    const start = dragStartRef.current;
+                    if (!start || dragPointerIdRef.current !== event.pointerId) {
+                      return;
+                    }
+                    const end = toRemoteCoordinates(event.currentTarget, event.clientX, event.clientY);
+                    clearDragState(event.currentTarget, event.pointerId);
+                    if (Math.hypot(end.x - start.x, end.y - start.y) < 8) {
+                      return;
+                    }
+                    suppressNextClickRef.current = true;
+                    onFrameDrag(start.x, start.y, end.x, end.y);
+                  }}
+                  onPointerCancel={(event: PointerEvent<HTMLImageElement>) => {
+                    clearDragState(event.currentTarget, event.pointerId);
+                  }}
+                />
+                <textarea
+                  ref={keyboardCaptureRef}
+                  aria-label="Remote browser keyboard capture"
+                  autoCapitalize="off"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  className="pointer-events-none absolute left-0 top-0 h-px w-px opacity-0"
+                  onBlur={() => setIsKeyboardLinked(false)}
+                  onFocus={() => setIsKeyboardLinked(true)}
+                  onChange={handleKeyboardInput}
+                  onKeyDown={handleKeyboardKeyDown}
+                  onPaste={handleKeyboardPaste}
+                  spellCheck={false}
+                />
+              </>
+            ) : (
+              <div className="flex h-full min-h-[320px] items-center justify-center rounded-[1rem] border border-dashed border-slate-700 text-sm text-slate-300">
+                {isLoading ? 'טוען סשן דפדפן...' : 'עדיין אין צילום מסך פעיל.'}
+              </div>
+            )}
+            {isLoading ? (
+              <div className="pointer-events-none absolute inset-3 flex items-center justify-center rounded-[1rem] bg-slate-950/35">
+                <div className="rounded-full bg-white/95 px-4 py-2 text-sm font-medium text-slate-700 shadow-sm">
+                  מעדכן דפדפן...
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="min-h-0 overflow-y-auto">
+            <div className="rounded-[1.5rem] border border-slate-100 bg-slate-50/70 px-4 py-4">
+              <div className="text-sm font-semibold text-slate-800">מצב נוכחי</div>
+              <div className="mt-3 space-y-2 text-xs leading-6 text-slate-500">
+                <div><span className="font-semibold text-slate-700">URL:</span> {viewer?.currentUrl || '—'}</div>
+                <div><span className="font-semibold text-slate-700">Title:</span> {viewer?.currentTitle || '—'}</div>
+                <div><span className="font-semibold text-slate-700">Profile:</span> {viewer?.profileDir || '—'}</div>
+                <div><span className="font-semibold text-slate-700">Mode:</span> {viewer?.headless ? 'Headless' : 'Visual'}</div>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-[1.5rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
+              <div className="text-sm font-semibold text-slate-800">הקלדה למוקד הפעיל</div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">
+                אפשר להקליד ישירות מהמקלדת אחרי קליק במסך. השדה כאן נשאר נוח להדבקות או טקסט ארוך.
+              </div>
+              <div className="mt-3 flex gap-2">
+                <Input
+                  value={textDraft}
+                  onChange={(event) => onTextDraftChange(event.target.value)}
+                  placeholder="הקלד טקסט לשליחה לדפדפן"
+                  className="h-11 rounded-[1rem] border-slate-200"
+                />
+                <button
+                  type="button"
+                  onClick={onTypeText}
+                  disabled={isLoading || !textDraft}
+                  className="rounded-[1rem] bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
+                >
+                  שלח
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-[1.5rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
+              <div className="text-sm font-semibold text-slate-800">מקשים מהירים</div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {['Tab', 'Shift+Tab', 'Enter', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown'].map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => onSendKey(key)}
+                    disabled={isLoading}
+                    className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
+                  >
+                    {key}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-[1.5rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
+              <div className="text-sm font-semibold text-slate-800">גלילה</div>
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => onScroll('up', 900)}
+                  disabled={isLoading}
+                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
+                >
+                  למעלה
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onScroll('down', 900)}
+                  disabled={isLoading}
+                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
+                >
+                  למטה
+                </button>
+              </div>
+              <div className="mt-2 text-[11px] leading-5 text-slate-500">
+                גלגלת עכבר על המסך תשלח גלילה ישירות לעמוד. לחיצה ימנית שולחת right-click, ו־Shift+drag שולח גרירה.
+              </div>
+            </div>
+
+            {error ? (
+              <div className="mt-4 rounded-[1.25rem] border border-rose-100 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-700">
+                {error}
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
@@ -11184,6 +11941,7 @@ export function CodexMobileApp() {
   const [isSessionBrowserModeLoading, setIsSessionBrowserModeLoading] = useState(false);
   const [isSessionContextSelectionSaving, setIsSessionContextSelectionSaving] = useState(false);
   const [isSessionBrowserModeSaving, setIsSessionBrowserModeSaving] = useState(false);
+  const [isBrowserViewerLoading, setIsBrowserViewerLoading] = useState(false);
   const [isProjectAnchorsLoading, setIsProjectAnchorsLoading] = useState(false);
   const [isUnifiedSkillsLoading, setIsUnifiedSkillsLoading] = useState(false);
   const [isSessionRemindersLoading, setIsSessionRemindersLoading] = useState(false);
@@ -11207,6 +11965,12 @@ export function CodexMobileApp() {
   const [anchorDraftTargetEntry, setAnchorDraftTargetEntry] = useState<CodexFileTreeEntry | null>(null);
   const [actionRestrictionDraft, setActionRestrictionDraft] = useState<CodexSessionActionRestriction | null>(null);
   const [browserModeDraft, setBrowserModeDraft] = useState<CodexSessionBrowserMode>(createEmptySessionBrowserMode());
+  const [browserViewerState, setBrowserViewerState] = useState<CodexSessionBrowserViewerState | null>(null);
+  const [browserViewerError, setBrowserViewerError] = useState<string | null>(null);
+  const [browserViewerTextDraft, setBrowserViewerTextDraft] = useState('');
+  const [browserViewerUrlDraft, setBrowserViewerUrlDraft] = useState('');
+  const browserViewerActionTailRef = useRef<Promise<void>>(Promise.resolve());
+  const browserViewerPendingActionsRef = useRef(0);
   const [anchorDraftName, setAnchorDraftName] = useState('');
   const [anchorDraftDescription, setAnchorDraftDescription] = useState('');
   const [agentSessionDraftTitle, setAgentSessionDraftTitle] = useState('');
@@ -11245,6 +12009,7 @@ export function CodexMobileApp() {
   const [isDraftConversation, setIsDraftConversation] = useState(true);
   const [activeToolEntry, setActiveToolEntry] = useState<CodexTimelineEntry | null>(null);
   const [isSessionChangeDialogOpen, setIsSessionChangeDialogOpen] = useState(false);
+  const [isBrowserViewerOpen, setIsBrowserViewerOpen] = useState(false);
   const [activeSessionChangeRecord, setActiveSessionChangeRecord] = useState<SessionChangeRecordResponse | null>(null);
   const [activeSessionChangeEntryId, setActiveSessionChangeEntryId] = useState<string | null>(null);
   const [activeSessionChangeFileId, setActiveSessionChangeFileId] = useState<string | null>(null);
@@ -11450,6 +12215,13 @@ export function CodexMobileApp() {
     setQueuePanelStage('closed');
     setExpandedToolGroups({});
   }, [currentQueueKey, selectedSessionId]);
+  useEffect(() => {
+    setIsBrowserViewerOpen(false);
+    setBrowserViewerState(null);
+    setBrowserViewerError(null);
+    setBrowserViewerTextDraft('');
+    setBrowserViewerUrlDraft('');
+  }, [currentQueueKey, profileId]);
   useEffect(() => {
     if (collapsedQueueItems.length === 0) {
       setQueuePanelStage('closed');
@@ -14343,6 +15115,7 @@ export function CodexMobileApp() {
       agentSessionDraftId: overrides.agentSessionDraftId ?? sessionContextSelection.agentSessionDraftId,
       professionalMode: overrides.professionalMode ?? sessionContextSelection.professionalMode,
       annotationsMode: overrides.annotationsMode ?? sessionContextSelection.annotationsMode,
+      goalMode: overrides.goalMode ?? sessionContextSelection.goalMode,
       actionRestriction: overrides.actionRestriction !== undefined
         ? normalizeSessionActionRestriction(overrides.actionRestriction)
         : normalizeSessionActionRestriction(sessionContextSelection.actionRestriction),
@@ -14606,6 +15379,10 @@ export function CodexMobileApp() {
   }
 
   async function saveBrowserModeDraft() {
+    if (browserModeDraft.profileSeed === 'custom' && !browserModeDraft.customProfileDir.trim()) {
+      setError('יש להזין נתיב פרופיל Chrome/Chromium מותאם אישית לפני השמירה.');
+      return;
+    }
     await persistSessionBrowserMode(browserModeDraft);
     setIsBrowserModeDialogOpen(false);
     setIsModePickerDialogOpen(false);
@@ -14619,6 +15396,108 @@ export function CodexMobileApp() {
     await persistSessionBrowserMode(nextMode);
     setIsBrowserModeDialogOpen(false);
     setIsModePickerDialogOpen(false);
+  }
+
+  async function loadBrowserViewer(initialUrl?: string | null) {
+    if (!profileId || !currentQueueKey) {
+      return;
+    }
+
+    browserViewerActionTailRef.current = Promise.resolve();
+    browserViewerPendingActionsRef.current = 0;
+    setIsBrowserViewerLoading(true);
+    setBrowserViewerError(null);
+    try {
+      const viewer = await fetchSessionBrowserViewer(profileId, currentQueueKey, initialUrl);
+      setBrowserViewerState(viewer);
+      setBrowserViewerUrlDraft(viewer.currentUrl || initialUrl || '');
+      setIsBrowserViewerOpen(true);
+    } catch (viewerError: any) {
+      setBrowserViewerError(viewerError.message || 'Failed to open remote browser viewer');
+      setIsBrowserViewerOpen(true);
+    } finally {
+      setIsBrowserViewerLoading(false);
+    }
+  }
+
+  async function runBrowserViewerAction(payload: Record<string, unknown>) {
+    if (!profileId || !currentQueueKey) {
+      return;
+    }
+
+    setIsBrowserViewerLoading(true);
+    browserViewerPendingActionsRef.current += 1;
+
+    const request = async () => {
+      setBrowserViewerError(null);
+      try {
+        const viewer = await performSessionBrowserViewerAction(profileId, currentQueueKey, payload);
+        setBrowserViewerState(viewer);
+        setBrowserViewerUrlDraft(viewer.currentUrl || '');
+      } catch (viewerError: any) {
+        setBrowserViewerError(viewerError.message || 'Failed to control the remote browser');
+        throw viewerError;
+      } finally {
+        browserViewerPendingActionsRef.current = Math.max(0, browserViewerPendingActionsRef.current - 1);
+        if (browserViewerPendingActionsRef.current === 0) {
+          setIsBrowserViewerLoading(false);
+        }
+      }
+    };
+
+    const next = browserViewerActionTailRef.current
+      .catch(() => undefined)
+      .then(request);
+    browserViewerActionTailRef.current = next.then(() => undefined, () => undefined);
+    return next;
+  }
+
+  async function openBrowserViewerDialog() {
+    if (!browserModeDraft.enabled) {
+      setError('יש להפעיל ולשמור Browser Mode לפני פתיחת ה-viewer.');
+      return;
+    }
+
+    if (browserModeDraft.profileSeed === 'custom' && !browserModeDraft.customProfileDir.trim()) {
+      setError('יש להזין נתיב פרופיל Chrome/Chromium מותאם אישית לפני פתיחת ה-viewer.');
+      return;
+    }
+
+    const modeChanged = (
+      browserModeDraft.enabled !== sessionBrowserMode.enabled
+      || browserModeDraft.headless !== sessionBrowserMode.headless
+      || browserModeDraft.profileSeed !== sessionBrowserMode.profileSeed
+      || browserModeDraft.customProfileDir !== sessionBrowserMode.customProfileDir
+    );
+
+    if (modeChanged) {
+      await persistSessionBrowserMode({
+        ...browserModeDraft,
+        enabled: true,
+      });
+    }
+
+    setIsBrowserModeDialogOpen(false);
+    await loadBrowserViewer(browserViewerUrlDraft || null);
+  }
+
+  async function closeBrowserViewerDialog() {
+    if (profileId && currentQueueKey) {
+      try {
+        await closeSessionBrowserViewer(profileId, currentQueueKey);
+      } catch {
+        // Keep the UI responsive even if the runtime has already exited.
+      }
+    }
+
+    setIsBrowserViewerOpen(false);
+    setBrowserViewerState(null);
+    setBrowserViewerError(null);
+    setBrowserViewerTextDraft('');
+    setBrowserViewerUrlDraft('');
+    browserViewerActionTailRef.current = Promise.resolve();
+    browserViewerPendingActionsRef.current = 0;
+    setIsBrowserViewerLoading(false);
   }
 
   function openActionRestrictionDialog() {
@@ -14707,6 +15586,7 @@ export function CodexMobileApp() {
         : null,
       professionalMode: !sessionContextSelection.professionalMode,
       annotationsMode: false,
+      goalMode: false,
     }));
     setIsAdditionsMenuOpen(false);
     setIsModePickerDialogOpen(false);
@@ -14719,6 +15599,20 @@ export function CodexMobileApp() {
         : null,
       professionalMode: false,
       annotationsMode: !sessionContextSelection.annotationsMode,
+      goalMode: false,
+    }));
+    setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(false);
+  }
+
+  function toggleGoalMode() {
+    void persistSessionContextSelection(buildNextSessionContextSelection({
+      agentSessionDraftId: sessionContextSelection.goalMode
+        ? sessionContextSelection.agentSessionDraftId
+        : null,
+      professionalMode: false,
+      annotationsMode: false,
+      goalMode: !sessionContextSelection.goalMode,
     }));
     setIsAdditionsMenuOpen(false);
     setIsModePickerDialogOpen(false);
@@ -14876,6 +15770,7 @@ export function CodexMobileApp() {
       agentSessionDraftId,
       professionalMode: false,
       annotationsMode: false,
+      goalMode: false,
     }));
   }
 
@@ -15008,6 +15903,7 @@ export function CodexMobileApp() {
           agentSessionDraftId: null,
           professionalMode: false,
           annotationsMode: false,
+          goalMode: false,
         }));
       }
 
@@ -15339,6 +16235,7 @@ export function CodexMobileApp() {
   );
   const isProfessionalModeSelected = sessionContextSelection.professionalMode === true;
   const isAnnotationsModeSelected = sessionContextSelection.annotationsMode === true;
+  const isGoalModeSelected = sessionContextSelection.goalMode === true;
   const selectedActionRestriction = useMemo(
     () => normalizeSessionActionRestriction(sessionContextSelection.actionRestriction),
     [sessionContextSelection.actionRestriction]
@@ -16253,7 +17150,7 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isSessionContextSelectionSaving) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
                 {isProfessionalModeSelected && (
                   <button
@@ -16275,6 +17172,16 @@ export function CodexMobileApp() {
                     <span>מצב ביאורים · 2 שלבים</span>
                   </button>
                 )}
+                {isGoalModeSelected && (
+                  <button
+                    type="button"
+                    onClick={toggleGoalMode}
+                    className="inline-flex items-center gap-1 rounded-full border border-fuchsia-200 bg-fuchsia-50 px-3 py-1.5 text-[11px] font-medium text-fuchsia-700 transition hover:bg-fuchsia-100"
+                  >
+                    <Target className="h-3.5 w-3.5" />
+                    <span>מצב מטרה · עד 10 שלבים</span>
+                  </button>
+                )}
                 {sessionBrowserMode.enabled && (
                   <button
                     type="button"
@@ -16283,7 +17190,7 @@ export function CodexMobileApp() {
                   >
                     <Command className="h-3.5 w-3.5" />
                     <span className="truncate">
-                      דפדפן אמיתי · {sessionBrowserMode.headless ? 'Headless' : 'Visual'} · {sessionBrowserMode.profileSeed === 'seeded' ? 'Seeded' : 'Empty'}
+                      דפדפן אמיתי · {sessionBrowserMode.headless ? 'Headless' : 'Visual'} · {getBrowserModeProfileSeedCompactLabel(sessionBrowserMode)}
                     </span>
                   </button>
                 )}
@@ -17226,7 +18133,7 @@ export function CodexMobileApp() {
                           onClick={openModePickerDialog}
                           className={cn(
                             'flex w-full items-center justify-between gap-3 rounded-[0.9rem] border px-3 py-2 text-right transition',
-                            isProfessionalModeSelected || selectedAgentSessionDraft
+                            isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || selectedAgentSessionDraft
                               ? 'border-indigo-200 bg-indigo-50/70'
                               : 'border-slate-100 bg-slate-50/80 hover:border-indigo-200 hover:bg-indigo-50/50'
                           )}
@@ -17236,12 +18143,16 @@ export function CodexMobileApp() {
                             <div className="text-[9px] text-slate-400">
                               {selectedAgentSessionDraft
                                 ? `סוכנים: ${selectedAgentSessionDraft.title}`
+                                : isGoalModeSelected
+                                  ? 'מטרה · עד 10 שלבי המשך אוטומטיים'
                                 : isProfessionalModeSelected
                                   ? 'מקצועי · תכנון, ביצוע ובדיקה'
-                                  : 'מצב מקצועי או מצב סוכנים'}
+                                : isAnnotationsModeSelected
+                                  ? 'ביאורים · ביצוע ודוח Markdown'
+                                  : 'מקצועי, מטרה, ביאורים או סוכנים'}
                             </div>
                           </div>
-                          <LayoutGrid className={cn('h-4 w-4 shrink-0', isProfessionalModeSelected || selectedAgentSessionDraft ? 'text-indigo-600' : 'text-indigo-500')} />
+                          <LayoutGrid className={cn('h-4 w-4 shrink-0', isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || selectedAgentSessionDraft ? 'text-indigo-600' : 'text-indigo-500')} />
                         </button>
                       </div>
                     </div>
@@ -17545,12 +18456,14 @@ export function CodexMobileApp() {
         currentProvider={currentProfile?.provider || null}
         isProfessionalModeSelected={isProfessionalModeSelected}
         isAnnotationsModeSelected={isAnnotationsModeSelected}
+        isGoalModeSelected={isGoalModeSelected}
         selectedAgentSessionDraft={selectedAgentSessionDraft}
         selectedActionRestriction={selectedActionRestriction}
         selectedBrowserMode={sessionBrowserMode}
         onClose={() => setIsModePickerDialogOpen(false)}
         onToggleProfessionalMode={toggleProfessionalMode}
         onToggleAnnotationsMode={toggleAnnotationsMode}
+        onToggleGoalMode={toggleGoalMode}
         onOpenAgentSessions={openAgentSessionDialog}
         onOpenActionRestriction={openActionRestrictionDialog}
         onOpenBrowserMode={openBrowserModeDialog}
@@ -17566,8 +18479,102 @@ export function CodexMobileApp() {
           setBrowserModeDraft(sessionBrowserMode);
         }}
         onChange={setBrowserModeDraft}
+        onOpenViewer={() => void openBrowserViewerDialog()}
         onSave={() => void saveBrowserModeDraft()}
         onDisable={() => void disableBrowserMode()}
+      />
+
+      <BrowserViewerDialog
+        isOpen={isBrowserViewerOpen}
+        viewer={browserViewerState}
+        isLoading={isBrowserViewerLoading}
+        error={browserViewerError}
+        textDraft={browserViewerTextDraft}
+        urlDraft={browserViewerUrlDraft}
+        onClose={() => void closeBrowserViewerDialog()}
+        onFrameClick={(x, y) => void runBrowserViewerAction({
+          action: 'click',
+          tabId: browserViewerState?.currentTabId,
+          x,
+          y,
+        })}
+        onFrameDrag={(startX, startY, endX, endY) => void runBrowserViewerAction({
+          action: 'drag',
+          endX,
+          endY,
+          startX,
+          startY,
+          tabId: browserViewerState?.currentTabId,
+        })}
+        onFrameRightClick={(x, y) => void runBrowserViewerAction({
+          action: 'click',
+          button: 'right',
+          tabId: browserViewerState?.currentTabId,
+          x,
+          y,
+        })}
+        onFrameWheel={(direction, amount) => void runBrowserViewerAction({
+          action: 'scroll',
+          amount,
+          direction,
+          tabId: browserViewerState?.currentTabId,
+        })}
+        onNavigate={() => void runBrowserViewerAction({
+          action: 'navigate',
+          tabId: browserViewerState?.currentTabId,
+          url: normalizeBrowserViewerUrl(browserViewerUrlDraft),
+        })}
+        onNewTab={() => void runBrowserViewerAction({
+          action: 'newTab',
+          url: normalizeBrowserViewerUrl(browserViewerUrlDraft) || undefined,
+        })}
+        onRefresh={() => void runBrowserViewerAction({
+          action: 'refresh',
+          tabId: browserViewerState?.currentTabId,
+        })}
+        onScroll={(direction, amount) => void runBrowserViewerAction({
+          action: 'scroll',
+          amount: amount || 900,
+          direction,
+          tabId: browserViewerState?.currentTabId,
+        })}
+        onSelectTab={(tabId) => void runBrowserViewerAction({
+          action: 'switchTab',
+          tabId,
+        })}
+        onSendKey={(key) => void runBrowserViewerAction({
+          action: 'key',
+          key,
+          tabId: browserViewerState?.currentTabId,
+        })}
+        onTextDraftChange={setBrowserViewerTextDraft}
+        onTypeText={() => {
+          const nextText = browserViewerTextDraft;
+          if (!nextText) {
+            return;
+          }
+          void runBrowserViewerAction({
+            action: 'type',
+            tabId: browserViewerState?.currentTabId,
+            text: nextText,
+          }).then(() => {
+            setBrowserViewerTextDraft('');
+          });
+        }}
+        onTypeTextValue={(value) => void runBrowserViewerAction({
+          action: 'type',
+          tabId: browserViewerState?.currentTabId,
+          text: value,
+        })}
+        onUrlDraftChange={setBrowserViewerUrlDraft}
+        onBack={() => void runBrowserViewerAction({
+          action: 'back',
+          tabId: browserViewerState?.currentTabId,
+        })}
+        onForward={() => void runBrowserViewerAction({
+          action: 'forward',
+          tabId: browserViewerState?.currentTabId,
+        })}
       />
 
       <ActionRestrictionDialog

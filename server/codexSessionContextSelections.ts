@@ -9,6 +9,7 @@ export interface CodexSessionContextSelection {
   agentSessionDraftId: string | null;
   professionalMode: boolean;
   annotationsMode: boolean;
+  goalMode: boolean;
   actionRestriction: CodexSessionActionRestriction | null;
 }
 
@@ -62,6 +63,7 @@ function cloneSelection(selection: CodexSessionContextSelection): CodexSessionCo
     agentSessionDraftId: selection.agentSessionDraftId || null,
     professionalMode: selection.professionalMode === true,
     annotationsMode: selection.annotationsMode === true,
+    goalMode: selection.goalMode === true,
     actionRestriction: selection.actionRestriction
       ? {
         enabled: selection.actionRestriction.enabled === true,
@@ -123,6 +125,7 @@ async function ensureStateLoaded() {
 	                    : null,
 	                  professionalMode: selection?.professionalMode === true,
 	                  annotationsMode: selection?.annotationsMode === true,
+	                  goalMode: selection?.goalMode === true,
 	                  actionRestriction: normalizeActionRestriction(selection?.actionRestriction),
 	                },
 	              ];
@@ -171,6 +174,7 @@ export async function getSessionContextSelection(
       agentSessionDraftId: null,
       professionalMode: false,
       annotationsMode: false,
+      goalMode: false,
       actionRestriction: null,
     };
 }
@@ -191,6 +195,7 @@ export async function setSessionContextSelection(
       : null,
     professionalMode: selection?.professionalMode === true,
     annotationsMode: selection?.annotationsMode === true,
+    goalMode: selection?.goalMode === true,
     actionRestriction: normalizeActionRestriction(selection?.actionRestriction),
   };
 
@@ -201,6 +206,7 @@ export async function setSessionContextSelection(
     && !normalized.agentSessionDraftId
     && !normalized.professionalMode
     && !normalized.annotationsMode
+    && !normalized.goalMode
     && !normalized.actionRestriction
   ) {
     delete state.selectionsByKey[key];
@@ -212,6 +218,7 @@ export async function setSessionContextSelection(
       agentSessionDraftId: null,
       professionalMode: false,
       annotationsMode: false,
+      goalMode: false,
       actionRestriction: null,
     };
   }
@@ -264,6 +271,7 @@ export async function deleteSessionContextSelection(
       agentSessionDraftId: null,
       professionalMode: false,
       annotationsMode: false,
+      goalMode: false,
       actionRestriction: {
         enabled: current.actionRestriction.enabled === true,
         targetPath: current.actionRestriction.targetPath,
