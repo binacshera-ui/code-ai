@@ -581,6 +581,7 @@ interface CodexDeleteTurnResponse {
 interface CodexSessionInstructionResponse {
   instruction: string | null;
   enabled: boolean;
+  legacyLikelyTruncated?: boolean;
 }
 
 interface CodexProjectAnchor {
@@ -11922,6 +11923,7 @@ export function CodexMobileApp() {
   const [forkDraftContext, setForkDraftContext] = useState<ForkDraftContext | null>(null);
   const [sessionInstruction, setSessionInstruction] = useState<string | null>(null);
   const [isSessionInstructionEnabled, setIsSessionInstructionEnabled] = useState(true);
+  const [isSessionInstructionLegacyTruncated, setIsSessionInstructionLegacyTruncated] = useState(false);
   const [sessionContextSelection, setSessionContextSelection] = useState<CodexSessionContextSelection>(
     createEmptySessionContextSelection()
   );
@@ -14961,6 +14963,7 @@ export function CodexMobileApp() {
       setSessionInstruction(null);
       setInstructionDraft('');
       setIsSessionInstructionEnabled(true);
+      setIsSessionInstructionLegacyTruncated(false);
       return;
     }
 
@@ -14968,6 +14971,7 @@ export function CodexMobileApp() {
     setSessionInstruction(null);
     setInstructionDraft('');
     setIsSessionInstructionEnabled(true);
+    setIsSessionInstructionLegacyTruncated(false);
     setIsInstructionLoading(true);
     try {
       const instructionState = await fetchSessionInstruction(nextProfileId, nextSessionKey);
@@ -14977,6 +14981,7 @@ export function CodexMobileApp() {
       setSessionInstruction(instructionState.instruction);
       setInstructionDraft(instructionState.instruction || '');
       setIsSessionInstructionEnabled(instructionState.enabled);
+      setIsSessionInstructionLegacyTruncated(Boolean(instructionState.legacyLikelyTruncated));
     } catch (instructionError: any) {
       setError(instructionError.message || 'Failed to load session instruction');
     } finally {
@@ -15002,6 +15007,7 @@ export function CodexMobileApp() {
       setSessionInstruction(instructionState.instruction);
       setInstructionDraft(instructionState.instruction || '');
       setIsSessionInstructionEnabled(instructionState.enabled);
+      setIsSessionInstructionLegacyTruncated(Boolean(instructionState.legacyLikelyTruncated));
       setIsInstructionDialogOpen(false);
     } catch (instructionError: any) {
       setError(instructionError.message || 'Failed to save session instruction');
@@ -18227,6 +18233,12 @@ export function CodexMobileApp() {
                   <div className="mt-1 text-sm leading-6 text-slate-500">
                     הטקסט כאן יתווסף אוטומטית לכל הודעה חדשה שתישלח מהשיחה הפעילה.
                   </div>
+                  {isSessionInstructionLegacyTruncated && (
+                    <div className="mt-2 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-6 text-amber-900">
+                      ההוראה הנוכחית נשמרה בגרסה ישנה שבה הייתה מגבלת אורך, ולכן היא כבר חתוכה בדיסק.
+                      כדי לתקן את זה צריך להדביק אותה מחדש ולשמור שוב.
+                    </div>
+                  )}
                   <div className="mt-3 flex items-center gap-3">
                     <button
                       type="button"

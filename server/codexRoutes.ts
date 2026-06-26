@@ -2700,6 +2700,7 @@ router.post('/session-instruction', requireCodexAccess, async (req, res) => {
     res.json({
       instruction: savedInstruction?.instruction || null,
       enabled: savedInstruction?.enabled ?? true,
+      legacyLikelyTruncated: savedInstruction?.instruction ? false : false,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to update session instruction' });

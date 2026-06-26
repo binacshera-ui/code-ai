@@ -11,6 +11,10 @@ export interface SessionInstructionRecord {
   enabled: boolean;
 }
 
+function isLikelyLegacyTruncatedInstruction(value: string): boolean {
+  return value.length === 1200 && !value.includes('\n');
+}
+
 const INSTRUCTIONS_FILE = path.join(CODEX_APP_CONFIG.storageRoot, 'session-instructions.json');
 
 let stateLoadedPromise: Promise<void> | null = null;
@@ -125,7 +129,7 @@ export async function getSessionInstruction(profileId: string, sessionKey: strin
 export async function getSessionInstructionRecord(
   profileId: string,
   sessionKey: string
-): Promise<{ instruction: string | null; enabled: boolean }> {
+): Promise<{ instruction: string | null; enabled: boolean; legacyLikelyTruncated: boolean }> {
   await ensureStateLoaded();
   const record = normalizeSessionInstructionRecord(
     state.instructionsByKey[buildInstructionKey(profileId, sessionKey)]
@@ -134,6 +138,7 @@ export async function getSessionInstructionRecord(
   return {
     instruction: record?.instruction || null,
     enabled: record?.enabled ?? true,
+    legacyLikelyTruncated: record?.instruction ? isLikelyLegacyTruncatedInstruction(record.instruction) : false,
   };
 }
 
