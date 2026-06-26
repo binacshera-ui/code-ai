@@ -577,7 +577,7 @@ function buildSupportSessionInstruction(
 ): string | undefined {
   const sections = [
     supportEnvelope?.compiledPrompt?.trim() || '',
-    typeof baseInstruction === 'string' ? baseInstruction.trim() : '',
+    typeof baseInstruction === 'string' && baseInstruction.trim() ? baseInstruction : '',
   ].filter(Boolean);
 
   if (sections.length === 0) {
@@ -4265,7 +4265,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       : providerPromptWithAdditions;
     const effectiveSessionInstruction = buildSupportSessionInstruction(sessionInstruction, supportEnvelope);
     const effectivePrompt = effectiveSessionInstruction?.trim()
-      ? `${promptWithForkContext}\n\nהוראה קבועה לסשן זה. יש ליישם אותה גם אם המשתמש לא חזר עליה בהודעה הנוכחית:\n${effectiveSessionInstruction.trim()}`
+      ? `${promptWithForkContext}\n\nהוראה קבועה לסשן זה. יש ליישם אותה גם אם המשתמש לא חזר עליה בהודעה הנוכחית:\n${effectiveSessionInstruction}`
       : promptWithForkContext;
 
     if (sessionContextSelection.agentSessionDraftId) {

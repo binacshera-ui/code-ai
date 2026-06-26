@@ -24,7 +24,11 @@ function buildInstructionKey(profileId: string, sessionKey: string): string {
 }
 
 function normalizeInstruction(value: string): string {
-  return value.replace(/\s+/g, ' ').trim().slice(0, 1200);
+  return value.replace(/\r\n?/g, '\n');
+}
+
+function hasMeaningfulInstruction(value: string): boolean {
+  return value.trim().length > 0;
 }
 
 function normalizeSessionInstructionRecord(
@@ -32,7 +36,7 @@ function normalizeSessionInstructionRecord(
 ): SessionInstructionRecord | null {
   if (typeof value === 'string') {
     const normalizedInstruction = normalizeInstruction(value);
-    if (!normalizedInstruction) {
+    if (!hasMeaningfulInstruction(normalizedInstruction)) {
       return null;
     }
 
@@ -50,7 +54,7 @@ function normalizeSessionInstructionRecord(
     ? (value as any).instruction
     : '';
   const normalizedInstruction = normalizeInstruction(rawInstruction);
-  if (!normalizedInstruction) {
+  if (!hasMeaningfulInstruction(normalizedInstruction)) {
     return null;
   }
 
@@ -143,7 +147,7 @@ export async function setSessionInstruction(
   const key = buildInstructionKey(profileId, sessionKey);
   const normalized = typeof instruction === 'string' ? normalizeInstruction(instruction) : '';
 
-  if (!normalized) {
+  if (!hasMeaningfulInstruction(normalized)) {
     delete state.instructionsByKey[key];
     await persistState();
     return null;

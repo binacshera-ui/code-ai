@@ -810,7 +810,7 @@ async function loadState() {
           ? item.contextPrefix.trim()
           : null,
         sessionInstruction: typeof item.sessionInstruction === 'string' && item.sessionInstruction.trim()
-          ? item.sessionInstruction.trim()
+          ? item.sessionInstruction
           : null,
         actionRestriction: normalizeActionRestriction(item.actionRestriction),
         browserMode: normalizeBrowserMode(item.browserMode),
@@ -1498,7 +1498,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
       ? input.contextPrefix.trim()
       : null,
     sessionInstruction: typeof input.sessionInstruction === 'string' && input.sessionInstruction.trim()
-      ? input.sessionInstruction.trim()
+      ? input.sessionInstruction
       : null,
     actionRestriction: normalizeActionRestriction(input.actionRestriction),
     browserMode: normalizeBrowserMode(input.browserMode),
