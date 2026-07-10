@@ -119,6 +119,28 @@ export interface CodexAgentSessionMeta {
   plan: CodexAgentSessionPlanPreview | null;
 }
 
+export type CodexNativeSubagentStatus = 'active' | 'completed' | 'stopped' | 'failed';
+
+export interface CodexNativeSubagentSummary {
+  id: string;
+  parentSessionId: string;
+  nickname: string | null;
+  role: string | null;
+  agentPath: string | null;
+  depth: number;
+  status: CodexNativeSubagentStatus;
+  updatedAt: string;
+  title: string;
+  preview: string;
+}
+
+export interface CodexNativeSubagentGroup {
+  total: number;
+  active: number;
+  completed: number;
+  agents: CodexNativeSubagentSummary[];
+}
+
 export interface CodexSessionSummary {
   id: string;
   title: string;
@@ -140,6 +162,7 @@ export interface CodexSessionSummary {
   isCompactClone?: boolean;
   compactSourceSessionId?: string | null;
   agentSession?: CodexAgentSessionMeta | null;
+  nativeSubagents?: CodexNativeSubagentGroup | null;
 }
 
 export interface CodexSessionDetail extends CodexSessionSummary {
@@ -163,6 +186,13 @@ interface SessionScanRecord {
   modelProvider: string | null;
   source: string;
   forkedFromId: string | null;
+  nativeSubagent: {
+    parentSessionId: string;
+    depth: number;
+    agentPath: string | null;
+    nickname: string | null;
+    role: string | null;
+  } | null;
 }
 
 interface SessionIndexEntry {
@@ -218,6 +248,7 @@ interface SessionSummaryHints {
   cwdOverride?: string | null;
   isCompactClone?: boolean;
   compactSourceSessionId?: string | null;
+  terminalStatus: CodexNativeSubagentStatus;
 }
 
 interface CodexRunResult {
@@ -334,6 +365,15 @@ export interface CodexModelCatalog {
   selectedReasoningEffort: string | null;
   responseSpeed: CodexResponseSpeedSnapshot | null;
   permissions: CodexPermissionSnapshot | null;
+  multiAgent?: CodexMultiAgentSnapshot | null;
+}
+
+export interface CodexMultiAgentSnapshot {
+  enabled: boolean;
+  configurable: boolean;
+  maxThreads: number;
+  maxDepth: number;
+  note: string;
 }
 
 export interface CodexRateLimitWindow {
@@ -388,7 +428,17 @@ interface RawSessionMetaPayload {
   cwd?: string;
   originator?: string;
   cli_version?: string;
-  source?: string;
+  source?: string | {
+    subagent?: {
+      thread_spawn?: {
+        parent_thread_id?: unknown;
+        depth?: unknown;
+        agent_path?: unknown;
+        agent_nickname?: unknown;
+        agent_role?: unknown;
+      };
+    };
+  };
   model_provider?: string;
   base_instructions?: unknown;
 }
@@ -767,6 +817,110 @@ async function writeRootTomlString(
     nextRaw = `${nextLine}\n${nextRaw}`.trimEnd() + '\n';
   }
 
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, nextRaw, 'utf-8');
+  alignPathOwnershipToProfile(profile, filePath);
+}
+
+function readTomlSectionValue(rawToml: string, section: string, key: string): string | null {
+  const sectionName = section.trim().toLowerCase();
+  const keyName = key.trim().toLowerCase();
+  let activeSection = '';
+
+  for (const line of rawToml.split(/\r?\n/)) {
+    const sectionMatch = line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/);
+    if (sectionMatch) {
+      activeSection = sectionMatch[1].trim().toLowerCase();
+      continue;
+    }
+
+    if (activeSection !== sectionName) {
+      continue;
+    }
+
+    const assignment = line.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*([^#]*?)(?:\s+#.*)?$/);
+    if (!assignment || assignment[1].trim().toLowerCase() !== keyName) {
+      continue;
+    }
+
+    const rawValue = assignment[2].trim();
+    if (!rawValue) {
+      return null;
+    }
+
+    const quoted = rawValue.match(/^["']([\s\S]*)["']$/);
+    return (quoted?.[1] || rawValue).trim() || null;
+  }
+
+  return null;
+}
+
+async function writeTomlSectionBoolean(
+  profile: CodexProfile,
+  filePath: string,
+  section: string,
+  key: string,
+  value: boolean
+): Promise<void> {
+  let raw = '';
+
+  try {
+    raw = await fs.readFile(filePath, 'utf-8');
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const lines = raw ? raw.replace(/\r\n/g, '\n').split('\n') : [];
+  if (lines.at(-1) === '') {
+    lines.pop();
+  }
+
+  const normalizedSection = section.trim().toLowerCase();
+  const normalizedKey = key.trim().toLowerCase();
+  let sectionStart = -1;
+  let sectionEnd = lines.length;
+  let keyLine = -1;
+  let activeSection = '';
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const sectionMatch = lines[index].match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/);
+    if (sectionMatch) {
+      const nextSection = sectionMatch[1].trim().toLowerCase();
+      if (activeSection === normalizedSection && sectionEnd === lines.length) {
+        sectionEnd = index;
+      }
+      activeSection = nextSection;
+      if (nextSection === normalizedSection && sectionStart === -1) {
+        sectionStart = index;
+      }
+      continue;
+    }
+
+    if (activeSection !== normalizedSection) {
+      continue;
+    }
+
+    const assignment = lines[index].match(/^\s*([A-Za-z0-9_-]+)\s*=/);
+    if (assignment?.[1]?.trim().toLowerCase() === normalizedKey) {
+      keyLine = index;
+    }
+  }
+
+  const nextLine = `${key} = ${value ? 'true' : 'false'}`;
+  if (keyLine >= 0) {
+    lines[keyLine] = nextLine;
+  } else if (sectionStart >= 0) {
+    lines.splice(sectionEnd, 0, nextLine);
+  } else {
+    if (lines.length > 0 && lines.at(-1)?.trim()) {
+      lines.push('');
+    }
+    lines.push(`[${section}]`, nextLine);
+  }
+
+  const nextRaw = `${lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`;
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, nextRaw, 'utf-8');
   alignPathOwnershipToProfile(profile, filePath);
@@ -1168,7 +1322,7 @@ async function scanSessionFiles(profile: CodexProfile): Promise<SessionScanRecor
           forked_from_id?: string;
           timestamp?: string;
           cwd?: string;
-          source?: string;
+          source?: RawSessionMetaPayload['source'];
           model_provider?: string;
         };
       }>(firstLine);
@@ -1180,6 +1334,30 @@ async function scanSessionFiles(profile: CodexProfile): Promise<SessionScanRecor
 
       seen.add(sessionId);
       const stats = await fs.stat(filePath);
+      const rawSource = metaRow?.payload?.source;
+      const threadSpawn = rawSource && typeof rawSource === 'object'
+        ? rawSource.subagent?.thread_spawn
+        : null;
+      const parentSessionId = typeof threadSpawn?.parent_thread_id === 'string'
+        ? threadSpawn.parent_thread_id.trim()
+        : '';
+      const nativeSubagent = parentSessionId
+        ? {
+          parentSessionId,
+          depth: typeof threadSpawn?.depth === 'number' && Number.isFinite(threadSpawn.depth)
+            ? Math.max(1, Math.trunc(threadSpawn.depth))
+            : 1,
+          agentPath: typeof threadSpawn?.agent_path === 'string' && threadSpawn.agent_path.trim()
+            ? threadSpawn.agent_path.trim()
+            : null,
+          nickname: typeof threadSpawn?.agent_nickname === 'string' && threadSpawn.agent_nickname.trim()
+            ? threadSpawn.agent_nickname.trim()
+            : null,
+          role: typeof threadSpawn?.agent_role === 'string' && threadSpawn.agent_role.trim()
+            ? threadSpawn.agent_role.trim()
+            : null,
+        }
+        : null;
 
       rows.push({
         id: sessionId,
@@ -1188,8 +1366,13 @@ async function scanSessionFiles(profile: CodexProfile): Promise<SessionScanRecor
         createdAt: metaRow?.payload?.timestamp || null,
         cwd: metaRow?.payload?.cwd || null,
         modelProvider: metaRow?.payload?.model_provider || null,
-        source: metaRow?.payload?.source || 'unknown',
+        source: typeof rawSource === 'string'
+          ? rawSource
+          : nativeSubagent
+            ? 'subagent'
+            : 'unknown',
         forkedFromId: metaRow?.payload?.forked_from_id || null,
+        nativeSubagent,
       });
     }
   }
@@ -1371,6 +1554,7 @@ async function extractSessionSummaryHints(
   let cwdOverride: string | null = null;
   let isCompactClone = false;
   let compactSourceSessionId: string | null = null;
+  let terminalStatus: CodexNativeSubagentStatus = 'active';
 
   const headLines = await readFileHead(sessionPath);
   for (const line of headLines) {
@@ -1413,6 +1597,38 @@ async function extractSessionSummaryHints(
   }
 
   const tailLines = await readFileTail(sessionPath);
+  for (const line of tailLines) {
+    const row = safeJsonParse<any>(line);
+    if (!row || typeof row !== 'object') {
+      continue;
+    }
+
+    if (row.type === 'event_msg') {
+      const eventType = row.payload?.type;
+      if (eventType === 'task_complete') {
+        terminalStatus = 'completed';
+      } else if (eventType === 'turn_aborted') {
+        terminalStatus = 'stopped';
+      } else if (eventType === 'task_failed' || eventType === 'error') {
+        terminalStatus = 'failed';
+      } else if (eventType === 'task_started' || eventType === 'sub_agent_activity') {
+        terminalStatus = 'active';
+      }
+      continue;
+    }
+
+    if (row.type === 'response_item') {
+      const responseType = typeof row.payload?.type === 'string' ? row.payload.type : '';
+      if (
+        responseType === 'reasoning'
+        || responseType.endsWith('_call')
+        || responseType.endsWith('_call_output')
+      ) {
+        terminalStatus = 'active';
+      }
+    }
+  }
+
   for (const line of [...tailLines].reverse()) {
     const row = safeJsonParse<any>(line);
     if (!row || row.type !== 'event_msg') {
@@ -1448,6 +1664,7 @@ async function extractSessionSummaryHints(
     cwdOverride,
     isCompactClone,
     compactSourceSessionId,
+    terminalStatus,
   };
 }
 
@@ -2556,7 +2773,23 @@ export async function listCodexSessions(
 
   const normalizedQuery = query.trim().toLowerCase();
   const summaries: CodexSessionSummary[] = [];
+  const summaryMatchHaystacks = new Map<string, string>();
+  const nativeSubagentsByParent = new Map<string, CodexNativeSubagentSummary[]>();
   const realSessionIds = new Set(sessionFiles.map((session) => session.id));
+  const directNativeParentById = new Map(
+    sessionFiles
+      .filter((session): session is SessionScanRecord & { nativeSubagent: NonNullable<SessionScanRecord['nativeSubagent']> } => Boolean(session.nativeSubagent))
+      .map((session) => [session.id, session.nativeSubagent.parentSessionId])
+  );
+  const resolveNativeRootParent = (sessionId: string, directParentId: string) => {
+    const visited = new Set([sessionId]);
+    let parentId = directParentId;
+    while (directNativeParentById.has(parentId) && !visited.has(parentId)) {
+      visited.add(parentId);
+      parentId = directNativeParentById.get(parentId)!;
+    }
+    return parentId;
+  };
 
   for (const sessionFile of sessionFiles) {
     const hints = await extractSessionSummaryHints(
@@ -2574,10 +2807,30 @@ export async function listCodexSessions(
     const preview = hints.preview;
     const matchHaystack = `${title}\n${preview}\n${sessionFile.id}\n${resolvedCwd || ''}\n${forkMetadata?.sourceTitle || ''}`.toLowerCase();
 
-    if (normalizedQuery && !matchHaystack.includes(normalizedQuery)) {
+    if (sessionFile.nativeSubagent) {
+      const rootParentSessionId = resolveNativeRootParent(
+        sessionFile.id,
+        sessionFile.nativeSubagent.parentSessionId
+      );
+      const nativeSummary: CodexNativeSubagentSummary = {
+        id: sessionFile.id,
+        parentSessionId: rootParentSessionId,
+        nickname: sessionFile.nativeSubagent.nickname,
+        role: sessionFile.nativeSubagent.role,
+        agentPath: sessionFile.nativeSubagent.agentPath,
+        depth: sessionFile.nativeSubagent.depth,
+        status: hints.terminalStatus,
+        updatedAt: sessionFile.updatedAt,
+        title,
+        preview,
+      };
+      const siblings = nativeSubagentsByParent.get(nativeSummary.parentSessionId) || [];
+      siblings.push(nativeSummary);
+      nativeSubagentsByParent.set(nativeSummary.parentSessionId, siblings);
       continue;
     }
 
+    summaryMatchHaystacks.set(sessionFile.id, matchHaystack);
     summaries.push({
       id: sessionFile.id,
       title,
@@ -2597,7 +2850,43 @@ export async function listCodexSessions(
       forkEntryId: forkMetadata?.forkEntryId || null,
       isCompactClone: hints.isCompactClone,
       compactSourceSessionId: hints.compactSourceSessionId,
+      nativeSubagents: null,
     });
+  }
+
+  for (const summary of summaries) {
+    const nativeAgents = (nativeSubagentsByParent.get(summary.id) || [])
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+    if (nativeAgents.length === 0) {
+      continue;
+    }
+
+    summary.updatedAt = nativeAgents.reduce(
+      (latest, agent) => (agent.updatedAt > latest ? agent.updatedAt : latest),
+      summary.updatedAt
+    );
+    summary.nativeSubagents = {
+      total: nativeAgents.length,
+      active: nativeAgents.filter((agent) => agent.status === 'active').length,
+      completed: nativeAgents.filter((agent) => agent.status === 'completed').length,
+      agents: nativeAgents,
+    };
+    const nativeSearchText = nativeAgents
+      .map((agent) => [agent.nickname, agent.role, agent.agentPath, agent.title, agent.preview].filter(Boolean).join('\n'))
+      .join('\n')
+      .toLowerCase();
+    summaryMatchHaystacks.set(
+      summary.id,
+      `${summaryMatchHaystacks.get(summary.id) || ''}\n${nativeSearchText}`
+    );
+  }
+
+  if (normalizedQuery) {
+    for (let index = summaries.length - 1; index >= 0; index -= 1) {
+      if (!(summaryMatchHaystacks.get(summaries[index].id) || '').includes(normalizedQuery)) {
+        summaries.splice(index, 1);
+      }
+    }
   }
 
   const realForkKeys = new Set(
@@ -3162,6 +3451,53 @@ async function readCodexExecutionDefaults(profile: CodexProfile): Promise<CodexC
   }
 }
 
+export async function getCodexMultiAgentSnapshot(profileId?: string): Promise<CodexMultiAgentSnapshot> {
+  const profile = resolveProfile(profileId);
+  const configPath = path.join(profile.codexHome, 'config.toml');
+  let raw = '';
+
+  try {
+    raw = await fs.readFile(configPath, 'utf-8');
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const configuredValue = readTomlSectionValue(raw, 'features', 'multi_agent')?.toLowerCase() || null;
+  const enabled = configuredValue === 'false'
+    ? false
+    : true;
+  const configuredMaxThreads = Number.parseInt(readTomlSectionValue(raw, 'agents', 'max_threads') || '', 10);
+  const configuredMaxDepth = Number.parseInt(readTomlSectionValue(raw, 'agents', 'max_depth') || '', 10);
+  const maxThreads = Number.isFinite(configuredMaxThreads) && configuredMaxThreads > 0
+    ? configuredMaxThreads
+    : 6;
+  const maxDepth = Number.isFinite(configuredMaxDepth) && configuredMaxDepth >= 0
+    ? configuredMaxDepth
+    : 1;
+
+  return {
+    enabled,
+    configurable: true,
+    maxThreads,
+    maxDepth,
+    note: enabled
+      ? `Codex רשאי להפעיל עד ${maxThreads} סוכנים במקביל ובעומק ${maxDepth}. השינוי חל מהסבב הבא.`
+      : 'כלי הסוכנים הילידיים של Codex כבויים בפרופיל הזה. השינוי חל מהסבב הבא.',
+  };
+}
+
+export async function updateCodexMultiAgentMode(
+  profileId: string | undefined,
+  enabled: boolean
+): Promise<CodexMultiAgentSnapshot> {
+  const profile = resolveProfile(profileId);
+  const configPath = path.join(profile.codexHome, 'config.toml');
+  await writeTomlSectionBoolean(profile, configPath, 'features', 'multi_agent', enabled);
+  return getCodexMultiAgentSnapshot(profile.id);
+}
+
 async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAvailableModel[]> {
   const cached = modelCatalogCache.get(profile.id);
   if (cached && cached.expiresAt > Date.now()) {
@@ -3373,9 +3709,10 @@ export async function updateCodexExecutionDefaults(
 
 export async function getCodexModelCatalog(profileId?: string): Promise<CodexModelCatalog> {
   const profile = resolveProfile(profileId);
-  const [models, defaults] = await Promise.all([
+  const [models, defaults, multiAgent] = await Promise.all([
     loadCodexAvailableModels(profile),
     readCodexExecutionDefaults(profile),
+    getCodexMultiAgentSnapshot(profile.id),
   ]);
 
   const selectedModel = defaults.model && models.some((model) => model.slug === defaults.model)
@@ -3402,6 +3739,7 @@ export async function getCodexModelCatalog(profileId?: string): Promise<CodexMod
     selectedReasoningEffort,
     responseSpeed: buildCodexResponseSpeedSnapshot(selectedModelOption, defaults),
     permissions: null,
+    multiAgent,
   };
 }
 

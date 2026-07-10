@@ -178,6 +178,23 @@ interface CodexSessionSummary {
   isCompactClone?: boolean;
   compactSourceSessionId?: string | null;
   agentSession?: CodexAgentSessionMeta | null;
+  nativeSubagents?: {
+    total: number;
+    active: number;
+    completed: number;
+    agents: Array<{
+      id: string;
+      parentSessionId: string;
+      nickname: string | null;
+      role: string | null;
+      agentPath: string | null;
+      depth: number;
+      status: 'active' | 'completed' | 'stopped' | 'failed';
+      updatedAt: string;
+      title: string;
+      preview: string;
+    }>;
+  } | null;
 }
 
 interface CodexSessionTaskAssignment {
@@ -403,6 +420,15 @@ interface CodexModelCatalogResponse {
   selectedReasoningEffort: string | null;
   permissions: CodexPermissionSnapshotResponse | null;
   responseSpeed: CodexResponseSpeedSnapshotResponse | null;
+  multiAgent?: CodexMultiAgentSnapshotResponse | null;
+}
+
+interface CodexMultiAgentSnapshotResponse {
+  enabled: boolean;
+  configurable: boolean;
+  maxThreads: number;
+  maxDepth: number;
+  note: string;
 }
 
 interface CodexPermissionModeOptionResponse {
@@ -2293,19 +2319,20 @@ function toDraftSessionId(value: string): string {
 }
 
 function parseSlashCommand(rawPrompt: string): { name: string; args: string } | null {
-  const trimmed = rawPrompt.trim();
-  if (!trimmed.startsWith('/')) {
+  const normalized = rawPrompt.replace(/^\s+/, '');
+  if (!normalized.startsWith('/')) {
     return null;
   }
 
-  const [nameToken, ...restTokens] = trimmed.split(/\s+/);
-  if (!nameToken) {
+  const match = normalized.match(/^(\S+)([\s\S]*)$/);
+  const nameToken = match?.[1] || '';
+  if (!nameToken.startsWith('/')) {
     return null;
   }
 
   return {
     name: nameToken.toLowerCase(),
-    args: restTokens.join(' ').trim(),
+    args: (match?.[2] || '').replace(/^\s+/, '').replace(/\s+$/, ''),
   };
 }
 
@@ -2393,6 +2420,23 @@ async function saveCodexModelSelection(
   });
 }
 
+async function saveCodexMultiAgentMode(
+  profileId: string,
+  enabled: boolean
+): Promise<CodexMultiAgentSnapshotResponse> {
+  const data = await fetchJson<{ multiAgent: CodexMultiAgentSnapshotResponse }>('/api/codex/multi-agent', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      enabled,
+    }),
+  });
+  return data.multiAgent;
+}
+
 async function fetchCodexRateLimits(profileId: string, sessionId?: string | null): Promise<CodexRateLimitSnapshotResponse | null> {
   const query = new URLSearchParams({ profile: profileId });
   if (sessionId?.trim()) {
@@ -2467,6 +2511,7 @@ async function fetchSessionInstruction(
   return {
     instruction: data.instruction || null,
     enabled: typeof data.enabled === 'boolean' ? data.enabled : true,
+    legacyLikelyTruncated: Boolean(data.legacyLikelyTruncated),
   };
 }
 
@@ -2491,6 +2536,7 @@ async function saveSessionInstruction(
   return {
     instruction: data.instruction || null,
     enabled: typeof data.enabled === 'boolean' ? data.enabled : true,
+    legacyLikelyTruncated: Boolean(data.legacyLikelyTruncated),
   };
 }
 
@@ -4690,11 +4736,15 @@ function SessionCard({
   canCopy,
   taskSummary,
   subtaskSummary,
+  isNativeAgentsExpanded,
+  selectedNativeAgentId,
   isDeletingPermanent,
   onSelect,
   onToggleMarkedForCopy,
   onManageTopic,
   onManageTasks,
+  onToggleNativeAgents,
+  onSelectNativeAgent,
   onToggleHidden,
   onDeletePermanent,
   isPreviewOpen,
@@ -4710,11 +4760,15 @@ function SessionCard({
   canCopy: boolean;
   taskSummary?: { assignedCount: number; completedCount: number } | null;
   subtaskSummary?: { totalCount: number; completedCount: number } | null;
+  isNativeAgentsExpanded: boolean;
+  selectedNativeAgentId: string | null;
   isDeletingPermanent?: boolean;
   onSelect: () => void;
   onToggleMarkedForCopy: () => void;
   onManageTopic: () => void;
   onManageTasks: () => void;
+  onToggleNativeAgents: () => void;
+  onSelectNativeAgent: (sessionId: string) => void;
   onToggleHidden: (hidden: boolean) => void;
   onDeletePermanent?: () => void;
   isPreviewOpen: boolean;
@@ -4810,6 +4864,25 @@ function SessionCard({
                 </span>
               </div>
             )}
+            {session.nativeSubagents && session.nativeSubagents.total > 0 && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onToggleNativeAgents();
+                }}
+                className="mt-1 mr-1 inline-flex max-w-full items-center gap-1 rounded-full border border-sky-100 bg-sky-50 px-2 py-0.5 text-[11px] text-sky-700 transition hover:border-sky-200 hover:bg-sky-100/80"
+                title="הצג את הסוכנים שהופעלו מתוך השיחה"
+              >
+                <ChevronDown className={cn('h-3 w-3 transition-transform', isNativeAgentsExpanded && 'rotate-180')} />
+                <span className="truncate">סוכנים {session.nativeSubagents.total}</span>
+                {session.nativeSubagents.active > 0 && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-label={`${session.nativeSubagents.active} סוכנים פעילים`} />
+                )}
+                <Bot className="h-3 w-3" />
+              </button>
+            )}
             <div className="mt-1 text-[11px] text-slate-400">
               {formatTimestamp(session.updatedAt)}
             </div>
@@ -4899,6 +4972,68 @@ function SessionCard({
           </div>
         </div>
       </button>
+
+      {isNativeAgentsExpanded && session.nativeSubagents && session.nativeSubagents.total > 0 && (
+        <div className="mx-3 mb-2 space-y-1.5 rounded-2xl border border-sky-100/80 bg-sky-50/45 p-2" dir="rtl">
+          <div className="flex items-center justify-between gap-2 px-1 text-[10px] font-semibold text-sky-700">
+            <span>
+              {session.nativeSubagents.active > 0
+                ? `${session.nativeSubagents.active} פעילים כעת`
+                : session.nativeSubagents.completed === session.nativeSubagents.total
+                  ? 'כל הסוכנים סיימו'
+                  : 'אין סוכנים פעילים'}
+            </span>
+            <span>סוכני Codex</span>
+          </div>
+          {session.nativeSubagents.agents.map((agent) => {
+            const statusLabel = agent.status === 'active'
+              ? 'פעיל'
+              : agent.status === 'completed'
+                ? 'הושלם'
+                : agent.status === 'failed'
+                  ? 'נכשל'
+                  : 'נעצר';
+            const statusClass = agent.status === 'active'
+              ? 'border-emerald-100 bg-emerald-50 text-emerald-700'
+              : agent.status === 'completed'
+                ? 'border-sky-100 bg-white text-sky-600'
+                : agent.status === 'failed'
+                  ? 'border-rose-100 bg-rose-50 text-rose-600'
+                  : 'border-amber-100 bg-amber-50 text-amber-700';
+            const displayName = agent.nickname || agent.role || agent.agentPath?.split('/').filter(Boolean).at(-1) || 'סוכן';
+
+            return (
+              <button
+                key={agent.id}
+                type="button"
+                onClick={() => onSelectNativeAgent(agent.id)}
+                className={cn(
+                  'flex w-full items-start gap-2 rounded-xl border px-2.5 py-2 text-right transition',
+                  selectedNativeAgentId === agent.id
+                    ? 'border-sky-200 bg-white shadow-sm'
+                    : 'border-white/80 bg-white/70 hover:border-sky-100 hover:bg-white'
+                )}
+              >
+                <Bot className={cn('mt-0.5 h-3.5 w-3.5 shrink-0', agent.status === 'active' ? 'text-emerald-500' : 'text-sky-400')} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className={cn('shrink-0 rounded-full border px-1.5 py-0.5 text-[9px]', statusClass)}>{statusLabel}</span>
+                    <span className="truncate text-[11px] font-semibold text-slate-700">{displayName}</span>
+                  </div>
+                  {agent.agentPath && (
+                    <div className="mt-0.5 truncate text-left text-[9px] text-slate-400" dir="ltr" title={agent.agentPath}>
+                      {agent.agentPath}
+                    </div>
+                  )}
+                  <div className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-500">
+                    {agent.preview || agent.title}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {isPreviewOpen && (
         <div className="pointer-events-none absolute inset-x-2 top-full z-20 mt-2 rounded-2xl border border-slate-100 bg-white/95 p-4 text-right shadow-[0_18px_45px_-24px_rgba(15,23,42,0.25)] backdrop-blur">
@@ -5027,6 +5162,7 @@ function SidebarPanel({
   const providerProfiles = profiles.filter((profile) => profile.provider === selectedProvider);
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>(() => readBooleanMapFromStorage(collapsedFoldersStorageKey));
   const [collapsedTopics, setCollapsedTopics] = useState<Record<string, boolean>>(() => readBooleanMapFromStorage(collapsedTopicsStorageKey));
+  const [expandedNativeAgentParents, setExpandedNativeAgentParents] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setCollapsedFolders(readBooleanMapFromStorage(collapsedFoldersStorageKey));
@@ -5035,6 +5171,10 @@ function SidebarPanel({
   useEffect(() => {
     setCollapsedTopics(readBooleanMapFromStorage(collapsedTopicsStorageKey));
   }, [collapsedTopicsStorageKey]);
+
+  useEffect(() => {
+    setExpandedNativeAgentParents({});
+  }, [profileId]);
 
   useEffect(() => {
     writeBooleanMapToStorage(collapsedFoldersStorageKey, collapsedFolders);
@@ -5255,11 +5395,18 @@ function SidebarPanel({
                                 canCopy={isSessionCopySelectable(session)}
                                 taskSummary={sessionTaskSummaries[session.id] || null}
                                 subtaskSummary={sessionSubtaskSummaries[session.id] || null}
+                                isNativeAgentsExpanded={Boolean(expandedNativeAgentParents[session.id])}
+                                selectedNativeAgentId={selectedSessionId}
                                 isDeletingPermanent={deletingSessionId === session.id}
                                 onSelect={() => onSelectSession(session.id)}
                                 onToggleMarkedForCopy={() => onToggleSessionMarkedForCopy(session.id)}
                                 onManageTopic={() => onManageTopic(session)}
                                 onManageTasks={() => onManageSessionTasks(session)}
+                                onToggleNativeAgents={() => setExpandedNativeAgentParents((current) => ({
+                                  ...current,
+                                  [session.id]: !current[session.id],
+                                }))}
+                                onSelectNativeAgent={onSelectSession}
                                 onToggleHidden={(hidden) => onToggleSessionHidden(session.id, hidden)}
                                 onDeletePermanent={showArchived ? () => onDeleteSessionPermanently(session) : undefined}
                                 isPreviewOpen={previewSessionId === session.id}
@@ -11907,7 +12054,7 @@ export function CodexMobileApp() {
   const [isActionRestrictionDialogOpen, setIsActionRestrictionDialogOpen] = useState(false);
   const [isActionRestrictionPickerMode, setIsActionRestrictionPickerMode] = useState(false);
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
-  const [activeModelPanelSection, setActiveModelPanelSection] = useState<'permissions' | 'speed' | 'models' | 'reasoning'>('permissions');
+  const [activeModelPanelSection, setActiveModelPanelSection] = useState<'permissions' | 'agents' | 'speed' | 'models' | 'reasoning'>('permissions');
   const [isReasoningPickerOpen, setIsReasoningPickerOpen] = useState(false);
   const [isRateLimitOpen, setIsRateLimitOpen] = useState(false);
   const [isModelCatalogLoading, setIsModelCatalogLoading] = useState(false);
@@ -11977,6 +12124,7 @@ export function CodexMobileApp() {
   const [isAgentPlanSaving, setIsAgentPlanSaving] = useState(false);
   const [isResponseSpeedSaving, setIsResponseSpeedSaving] = useState(false);
   const [isModelSelectionSaving, setIsModelSelectionSaving] = useState(false);
+  const [isMultiAgentSaving, setIsMultiAgentSaving] = useState(false);
   const [projectAnchorsError, setProjectAnchorsError] = useState<string | null>(null);
   const [unifiedSkillsError, setUnifiedSkillsError] = useState<string | null>(null);
   const [sessionRemindersError, setSessionRemindersError] = useState<string | null>(null);
@@ -12022,6 +12170,7 @@ export function CodexMobileApp() {
   const [availableModels, setAvailableModels] = useState<CodexModelOption[]>([]);
   const [modelPermissionSnapshot, setModelPermissionSnapshot] = useState<CodexPermissionSnapshotResponse | null>(null);
   const [modelResponseSpeedSnapshot, setModelResponseSpeedSnapshot] = useState<CodexResponseSpeedSnapshotResponse | null>(null);
+  const [modelMultiAgentSnapshot, setModelMultiAgentSnapshot] = useState<CodexMultiAgentSnapshotResponse | null>(null);
   const [rateLimitSnapshot, setRateLimitSnapshot] = useState<CodexRateLimitSnapshotResponse | null>(null);
   const [selectedModelSlug, setSelectedModelSlug] = useState<string | null>(null);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
@@ -12275,7 +12424,10 @@ export function CodexMobileApp() {
         return true;
       }
 
-      const haystack = `${session.title}\n${session.preview}\n${session.id}\n${session.cwd || ''}\n${session.topic?.name || ''}`.toLowerCase();
+      const nativeAgentHaystack = session.nativeSubagents?.agents
+        .map((agent) => [agent.nickname, agent.role, agent.agentPath, agent.title, agent.preview].filter(Boolean).join('\n'))
+        .join('\n') || '';
+      const haystack = `${session.title}\n${session.preview}\n${session.id}\n${session.cwd || ''}\n${session.topic?.name || ''}\n${nativeAgentHaystack}`.toLowerCase();
       return haystack.includes(query);
     });
   }, [
@@ -14178,6 +14330,8 @@ export function CodexMobileApp() {
         setRateLimitSnapshot(null);
         setAvailableModels([]);
         setModelPermissionSnapshot(null);
+        setModelResponseSpeedSnapshot(null);
+        setModelMultiAgentSnapshot(null);
         setSelectedModelSlug(null);
         setSelectedReasoningEffort(null);
         setSessionInstruction(null);
@@ -14840,6 +14994,7 @@ export function CodexMobileApp() {
       setAvailableModels([]);
       setModelPermissionSnapshot(null);
       setModelResponseSpeedSnapshot(null);
+      setModelMultiAgentSnapshot(null);
       setSelectedModelSlug(null);
       setSelectedReasoningEffort(null);
       return;
@@ -14868,6 +15023,7 @@ export function CodexMobileApp() {
       setAvailableModels(data.models);
       setModelPermissionSnapshot(data.permissions || null);
       setModelResponseSpeedSnapshot(data.responseSpeed || null);
+      setModelMultiAgentSnapshot(data.multiAgent || null);
       setSelectedModelSlug(nextModelSlug);
       setSelectedReasoningEffort(nextReasoningEffort);
     } catch (modelCatalogError: any) {
@@ -14875,6 +15031,7 @@ export function CodexMobileApp() {
         setAvailableModels([]);
         setModelPermissionSnapshot(null);
         setModelResponseSpeedSnapshot(null);
+        setModelMultiAgentSnapshot(null);
         setSelectedModelSlug(null);
         setSelectedReasoningEffort(null);
         setError(modelCatalogError.message || 'Failed to load models');
@@ -14937,6 +15094,7 @@ export function CodexMobileApp() {
       setAvailableModels(data.models);
       setModelPermissionSnapshot(data.permissions || null);
       setModelResponseSpeedSnapshot(data.responseSpeed || null);
+      setModelMultiAgentSnapshot(data.multiAgent || modelMultiAgentSnapshot);
       setSelectedModelSlug(nextModelSlug);
       setSelectedReasoningEffort(nextReasoningEffort);
     } catch (responseSpeedError: any) {
@@ -14973,6 +15131,7 @@ export function CodexMobileApp() {
       setAvailableModels(data.models);
       setModelPermissionSnapshot(data.permissions || null);
       setModelResponseSpeedSnapshot(data.responseSpeed || null);
+      setModelMultiAgentSnapshot(data.multiAgent || modelMultiAgentSnapshot);
       setSelectedModelSlug(data.selectedModel || nextModelSlug);
       setSelectedReasoningEffort(data.selectedReasoningEffort || nextReasoningEffort);
     } catch (modelSelectionError: any) {
@@ -14984,6 +15143,43 @@ export function CodexMobileApp() {
       }
     } finally {
       setIsModelSelectionSaving(false);
+    }
+  }
+
+  async function handleMultiAgentModeChange(nextEnabled: boolean) {
+    if (
+      !profileId
+      || currentProfile?.provider !== 'codex'
+      || !modelMultiAgentSnapshot?.configurable
+      || isMultiAgentSaving
+    ) {
+      return;
+    }
+
+    const targetProfileId = profileId;
+    const previousSnapshot = modelMultiAgentSnapshot;
+    setModelMultiAgentSnapshot({
+      ...previousSnapshot,
+      enabled: nextEnabled,
+      note: nextEnabled
+        ? 'מפעיל את כלי הסוכנים הילידיים של Codex...'
+        : 'מכבה את כלי הסוכנים הילידיים של Codex...',
+    });
+    setIsMultiAgentSaving(true);
+    setError(null);
+
+    try {
+      const nextSnapshot = await saveCodexMultiAgentMode(targetProfileId, nextEnabled);
+      if (activeProfileRef.current === targetProfileId) {
+        setModelMultiAgentSnapshot(nextSnapshot);
+      }
+    } catch (multiAgentError: any) {
+      if (activeProfileRef.current === targetProfileId) {
+        setModelMultiAgentSnapshot(previousSnapshot);
+        setError(multiAgentError.message || 'Failed to update Codex multi-agent mode');
+      }
+    } finally {
+      setIsMultiAgentSaving(false);
     }
   }
 
@@ -16279,10 +16475,11 @@ export function CodexMobileApp() {
   const permissionRuntimeState = modelPermissionSnapshot?.runtime || null;
   const modelPanelSectionSummary = useMemo(() => ({
     permissions: modelPermissionSnapshot?.accessLabel || 'ללא נתון',
+    agents: modelMultiAgentSnapshot ? (modelMultiAgentSnapshot.enabled ? 'פעיל' : 'כבוי') : 'לא זמין',
     speed: modelResponseSpeedSnapshot?.selectedLabel || 'ללא נתון',
     models: selectedModelOption?.displayName || 'ללא בחירה',
     reasoning: selectedReasoningOption ? getReasoningEffortLabel(selectedReasoningOption.effort) : 'ללא בחירה',
-  }), [modelPermissionSnapshot?.accessLabel, modelResponseSpeedSnapshot?.selectedLabel, selectedModelOption?.displayName, selectedReasoningOption]);
+  }), [modelMultiAgentSnapshot, modelPermissionSnapshot?.accessLabel, modelResponseSpeedSnapshot?.selectedLabel, selectedModelOption?.displayName, selectedReasoningOption]);
   const selectedAnchorSummaries = useMemo(
     () => projectAnchors.filter((anchor) => sessionContextSelection.anchorIds.includes(anchor.id)),
     [projectAnchors, sessionContextSelection.anchorIds]
@@ -16458,6 +16655,7 @@ export function CodexMobileApp() {
       setAvailableModels([]);
       setModelPermissionSnapshot(null);
       setModelResponseSpeedSnapshot(null);
+      setModelMultiAgentSnapshot(null);
       setRateLimitSnapshot(null);
       setSelectedModelSlug(null);
       setSelectedReasoningEffort(null);
@@ -17715,6 +17913,74 @@ export function CodexMobileApp() {
                           </div>
                         )}
 
+                        {modelMultiAgentSnapshot && (
+                          <div className="overflow-hidden rounded-[0.85rem] border border-slate-100 bg-white/85">
+                            <button
+                              type="button"
+                              onClick={() => setActiveModelPanelSection((current) => current === 'agents' ? 'models' : 'agents')}
+                              className="flex w-full items-center justify-between gap-2 px-2.5 py-2 text-right"
+                            >
+                              <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-slate-300 transition-transform', activeModelPanelSection === 'agents' && 'rotate-180')} />
+                              <div className="min-w-0 flex-1">
+                                <div className="text-[10px] font-semibold text-slate-600">סוכנים אוטומטיים</div>
+                                <div className="truncate text-[8px] text-slate-400">{modelPanelSectionSummary.agents}</div>
+                              </div>
+                              <span className={cn(
+                                'inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium',
+                                modelMultiAgentSnapshot.enabled
+                                  ? 'border-emerald-100 bg-emerald-50 text-emerald-700'
+                                  : 'border-slate-200 bg-slate-50 text-slate-400'
+                              )}>
+                                <Bot className="h-3 w-3" />
+                                {modelMultiAgentSnapshot.enabled ? 'פעיל' : 'כבוי'}
+                              </span>
+                            </button>
+                            {activeModelPanelSection === 'agents' && (
+                              <div className="space-y-2 border-t border-slate-100 px-2.5 py-2 text-right">
+                                <button
+                                  type="button"
+                                  role="switch"
+                                  aria-checked={modelMultiAgentSnapshot.enabled}
+                                  disabled={!modelMultiAgentSnapshot.configurable || isMultiAgentSaving}
+                                  onClick={() => void handleMultiAgentModeChange(!modelMultiAgentSnapshot.enabled)}
+                                  className="flex w-full items-center justify-between gap-3 rounded-[0.8rem] border border-slate-100 bg-slate-50/75 px-2.5 py-2.5 transition hover:bg-white disabled:cursor-wait disabled:opacity-60"
+                                >
+                                  <span
+                                    dir="ltr"
+                                    className={cn(
+                                      'relative h-5 w-9 shrink-0 rounded-full transition-colors',
+                                      modelMultiAgentSnapshot.enabled ? 'bg-emerald-500' : 'bg-slate-200'
+                                    )}
+                                  >
+                                    <span className={cn(
+                                      'absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform',
+                                      modelMultiAgentSnapshot.enabled && 'translate-x-4'
+                                    )} />
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block text-[10px] font-semibold text-slate-700">
+                                      {modelMultiAgentSnapshot.enabled ? 'אפשר הפעלת סוכני משנה' : 'מנע הפעלת סוכני משנה'}
+                                    </span>
+                                    <span className="mt-0.5 block text-[8px] leading-4 text-slate-400">
+                                      חל על כל סבב חדש בפרופיל Codex הנוכחי, בלי לשנות את Ultra או את המודל.
+                                    </span>
+                                  </span>
+                                  {isMultiAgentSaving
+                                    ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-emerald-500" />
+                                    : <Bot className="h-3.5 w-3.5 shrink-0 text-slate-400" />}
+                                </button>
+                                <div className="rounded-[0.8rem] border border-sky-100/80 bg-sky-50/65 px-2.5 py-2 text-[8px] leading-4 text-sky-700/80">
+                                  <div>{modelMultiAgentSnapshot.note}</div>
+                                  <div className="mt-1 flex items-center justify-between gap-2 text-sky-600/70">
+                                    <span>עומק מרבי: {modelMultiAgentSnapshot.maxDepth}</span>
+                                    <span>עד {modelMultiAgentSnapshot.maxThreads} סוכנים במקביל</span>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         {modelResponseSpeedSnapshot && (
                           <div className="overflow-hidden rounded-[0.85rem] border border-slate-100 bg-white/85">
                             <button
@@ -18284,7 +18550,7 @@ export function CodexMobileApp() {
             onClick={() => setIsInstructionDialogOpen(false)}
             aria-label="Close instruction dialog"
           />
-          <div className="relative z-10 flex w-full max-w-xl flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+          <div className="relative z-10 flex max-h-[calc(100dvh-2rem)] w-full max-w-xl flex-col overflow-hidden rounded-[2rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
             <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
               <div className="flex items-start gap-3">
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-50 text-amber-700">
@@ -18338,13 +18604,15 @@ export function CodexMobileApp() {
               </button>
             </div>
 
-            <div className="px-5 py-5">
+            <div className="overflow-y-auto px-5 py-5">
               <Textarea
+                dir="rtl"
                 value={instructionDraft}
                 onChange={(event) => setInstructionDraft(event.target.value)}
                 placeholder="למשל: תמיד ענה בקצרה, בדוק קודם קבצים רלוונטיים, ואל תיצור קבצים בלי צורך."
-                rows={5}
-                className="min-h-[140px] resize-none rounded-[1.5rem] border border-slate-200 bg-white px-4 py-4 text-[15px] leading-7 text-slate-800 shadow-none placeholder:text-slate-300 focus-visible:ring-0"
+                rows={8}
+                wrap="soft"
+                className="min-h-[220px] max-h-[52dvh] resize-y overflow-y-auto rounded-[1.5rem] border border-slate-200 bg-white px-4 py-4 text-right text-[15px] leading-7 whitespace-pre-wrap text-slate-800 shadow-none placeholder:text-slate-300 focus-visible:ring-0"
               />
 
               <div className="mt-4 flex items-center justify-between gap-3">

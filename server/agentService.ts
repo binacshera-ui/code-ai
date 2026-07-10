@@ -6,15 +6,18 @@ import {
   deleteCodexTurn,
   getAvailableProfiles as getAvailableCodexProfiles,
   getCodexModelCatalog,
+  getCodexMultiAgentSnapshot,
   getCodexRateLimitSnapshot,
   getCodexSessionDetail,
   listCodexSessions,
   resolveCodexProfile,
   runCodexPrompt,
   updateCodexExecutionDefaults,
+  updateCodexMultiAgentMode,
   updateCodexResponseSpeed,
   type CodexExecutionConfig,
   type CodexModelCatalog,
+  type CodexMultiAgentSnapshot,
   type CodexPermissionSnapshot,
   type CodexProfile,
   type CodexRateLimitSnapshot,
@@ -307,6 +310,31 @@ export async function updateAgentExecutionDefaults(
     ...catalog,
     permissions: await buildProviderPermissionSnapshot(profile),
   };
+}
+
+export async function getAgentMultiAgentSnapshot(
+  profileId?: string
+): Promise<CodexMultiAgentSnapshot> {
+  const profile = resolveProfile(profileId);
+  await prepareInternalProfileHome(profile);
+  if (profile.provider !== 'codex') {
+    throw new Error('Native multi-agent controls are available for Codex profiles only');
+  }
+
+  return getCodexMultiAgentSnapshot(profile.id);
+}
+
+export async function updateAgentMultiAgentMode(
+  profileId: string | undefined,
+  enabled: boolean
+): Promise<CodexMultiAgentSnapshot> {
+  const profile = resolveProfile(profileId);
+  await prepareInternalProfileHome(profile);
+  if (profile.provider !== 'codex') {
+    throw new Error('Native multi-agent controls are available for Codex profiles only');
+  }
+
+  return updateCodexMultiAgentMode(profile.id, enabled);
 }
 
 export async function getAgentRateLimitSnapshot(

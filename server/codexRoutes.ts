@@ -18,12 +18,14 @@ import {
   deleteAgentSession,
   getAgentSessionChangeRecord,
   getAgentModelCatalog,
+  getAgentMultiAgentSnapshot,
   getAgentRateLimitSnapshot,
   getAgentSessionDetail,
   getAvailableProfiles,
   listAgentSessions,
   runAgentPrompt,
   updateAgentExecutionDefaults,
+  updateAgentMultiAgentMode,
   updateAgentPermissionMode,
   updateAgentResponseSpeed,
 } from './agentService.js';
@@ -1556,6 +1558,31 @@ router.post('/model-selection', requireCodexAccess, async (req, res) => {
     res.json(catalog);
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to update model selection' });
+  }
+});
+
+router.get('/multi-agent', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const multiAgent = await getAgentMultiAgentSnapshot(profileId);
+    res.json({ multiAgent });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to load multi-agent mode' });
+  }
+});
+
+router.post('/multi-agent', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    if (typeof req.body?.enabled !== 'boolean') {
+      res.status(400).json({ error: 'Multi-agent enabled state must be a boolean' });
+      return;
+    }
+
+    const multiAgent = await updateAgentMultiAgentMode(profileId, req.body.enabled);
+    res.json({ multiAgent });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update multi-agent mode' });
   }
 });
 
