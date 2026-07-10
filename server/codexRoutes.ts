@@ -23,6 +23,7 @@ import {
   getAvailableProfiles,
   listAgentSessions,
   runAgentPrompt,
+  updateAgentExecutionDefaults,
   updateAgentPermissionMode,
   updateAgentResponseSpeed,
 } from './agentService.js';
@@ -1536,6 +1537,25 @@ router.get('/models', requireCodexAccess, async (req, res) => {
     res.json(catalog);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load Codex models' });
+  }
+});
+
+router.post('/model-selection', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const modelSlug = typeof req.body?.modelSlug === 'string' ? req.body.modelSlug.trim() : '';
+    const reasoningEffort = typeof req.body?.reasoningEffort === 'string'
+      ? req.body.reasoningEffort.trim()
+      : null;
+    if (!modelSlug) {
+      res.status(400).json({ error: 'Model is required' });
+      return;
+    }
+
+    const catalog = await updateAgentExecutionDefaults(profileId, modelSlug, reasoningEffort);
+    res.json(catalog);
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update model selection' });
   }
 });
 

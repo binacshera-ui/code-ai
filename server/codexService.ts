@@ -3334,6 +3334,43 @@ export async function updateCodexResponseSpeed(profileId: string | undefined, mo
   return getCodexModelCatalog(profile.id);
 }
 
+export async function updateCodexExecutionDefaults(
+  profileId: string | undefined,
+  modelSlug: string,
+  reasoningEffort?: string | null
+): Promise<CodexModelCatalog> {
+  const profile = resolveProfile(profileId);
+  const normalizedModelSlug = normalizeExecutionSettingValue(modelSlug);
+  const normalizedReasoningEffort = normalizeExecutionSettingValue(reasoningEffort);
+  if (!normalizedModelSlug) {
+    throw new Error('Codex model is required');
+  }
+
+  const models = await loadCodexAvailableModels(profile);
+  const selectedModel = models.find((model) => model.slug === normalizedModelSlug) || null;
+  if (!selectedModel) {
+    throw new Error(`Codex model "${normalizedModelSlug}" is not available for this profile`);
+  }
+
+  if (
+    normalizedReasoningEffort
+    && !selectedModel.supportedReasoningLevels.some((level) => level.effort === normalizedReasoningEffort)
+  ) {
+    throw new Error(
+      `Reasoning effort "${normalizedReasoningEffort}" is not supported by ${selectedModel.displayName}`
+    );
+  }
+
+  const nextReasoningEffort = normalizedReasoningEffort
+    || selectedModel.defaultReasoningLevel
+    || selectedModel.supportedReasoningLevels[0]?.effort
+    || null;
+  const configPath = path.join(profile.codexHome, 'config.toml');
+  await writeRootTomlString(profile, configPath, 'model', selectedModel.slug);
+  await writeRootTomlString(profile, configPath, 'model_reasoning_effort', nextReasoningEffort);
+  return getCodexModelCatalog(profile.id);
+}
+
 export async function getCodexModelCatalog(profileId?: string): Promise<CodexModelCatalog> {
   const profile = resolveProfile(profileId);
   const [models, defaults] = await Promise.all([

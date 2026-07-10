@@ -11,6 +11,7 @@ import {
   listCodexSessions,
   resolveCodexProfile,
   runCodexPrompt,
+  updateCodexExecutionDefaults,
   updateCodexResponseSpeed,
   type CodexExecutionConfig,
   type CodexModelCatalog,
@@ -284,6 +285,24 @@ export async function updateAgentResponseSpeed(
   }
 
   const catalog = await updateCodexResponseSpeed(profile.id, modeId);
+  return {
+    ...catalog,
+    permissions: await buildProviderPermissionSnapshot(profile),
+  };
+}
+
+export async function updateAgentExecutionDefaults(
+  profileId: string | undefined,
+  modelSlug: string,
+  reasoningEffort?: string | null
+): Promise<CodexModelCatalog> {
+  const profile = resolveProfile(profileId);
+  await prepareInternalProfileHome(profile);
+  if (profile.provider !== 'codex') {
+    throw new Error('Persistent model selection is currently available for Codex profiles only');
+  }
+
+  const catalog = await updateCodexExecutionDefaults(profile.id, modelSlug, reasoningEffort);
   return {
     ...catalog,
     permissions: await buildProviderPermissionSnapshot(profile),

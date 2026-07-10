@@ -2375,6 +2375,24 @@ async function saveCodexResponseSpeed(
   });
 }
 
+async function saveCodexModelSelection(
+  profileId: string,
+  modelSlug: string,
+  reasoningEffort: string | null
+): Promise<CodexModelCatalogResponse> {
+  return fetchJson<CodexModelCatalogResponse>('/api/codex/model-selection', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profileId,
+      modelSlug,
+      reasoningEffort,
+    }),
+  });
+}
+
 async function fetchCodexRateLimits(profileId: string, sessionId?: string | null): Promise<CodexRateLimitSnapshotResponse | null> {
   const query = new URLSearchParams({ profile: profileId });
   if (sessionId?.trim()) {
@@ -11958,6 +11976,7 @@ export function CodexMobileApp() {
   const [isAgentSessionApproving, setIsAgentSessionApproving] = useState(false);
   const [isAgentPlanSaving, setIsAgentPlanSaving] = useState(false);
   const [isResponseSpeedSaving, setIsResponseSpeedSaving] = useState(false);
+  const [isModelSelectionSaving, setIsModelSelectionSaving] = useState(false);
   const [projectAnchorsError, setProjectAnchorsError] = useState<string | null>(null);
   const [unifiedSkillsError, setUnifiedSkillsError] = useState<string | null>(null);
   const [sessionRemindersError, setSessionRemindersError] = useState<string | null>(null);
@@ -14927,6 +14946,47 @@ export function CodexMobileApp() {
     }
   }
 
+  async function handleModelSelectionChange(nextModelSlug: string, nextReasoningEffort: string | null) {
+    if (!profileId || isModelSelectionSaving) {
+      return;
+    }
+
+    const previousModelSlug = selectedModelSlug;
+    const previousReasoningEffort = selectedReasoningEffort;
+    setSelectedModelSlug(nextModelSlug);
+    setSelectedReasoningEffort(nextReasoningEffort);
+
+    if (currentProfile?.provider !== 'codex') {
+      return;
+    }
+
+    const targetProfileId = profileId;
+    setIsModelSelectionSaving(true);
+    setError(null);
+
+    try {
+      const data = await saveCodexModelSelection(targetProfileId, nextModelSlug, nextReasoningEffort);
+      if (activeProfileRef.current !== targetProfileId) {
+        return;
+      }
+
+      setAvailableModels(data.models);
+      setModelPermissionSnapshot(data.permissions || null);
+      setModelResponseSpeedSnapshot(data.responseSpeed || null);
+      setSelectedModelSlug(data.selectedModel || nextModelSlug);
+      setSelectedReasoningEffort(data.selectedReasoningEffort || nextReasoningEffort);
+    } catch (modelSelectionError: any) {
+      if (activeProfileRef.current === targetProfileId) {
+        setSelectedModelSlug(previousModelSlug);
+        setSelectedReasoningEffort(previousReasoningEffort);
+        setError(modelSelectionError.message || 'Failed to update model selection');
+        void loadModelCatalog(targetProfileId);
+      }
+    } finally {
+      setIsModelSelectionSaving(false);
+    }
+  }
+
   async function loadRateLimitSnapshot(nextProfileId = profileId, nextSessionId = selectedSessionId) {
     if (!nextProfileId) {
       setRateLimitSnapshot(null);
@@ -17763,19 +17823,23 @@ export function CodexMobileApp() {
                                   <button
                                     key={model.slug}
                                     type="button"
+                                    disabled={isModelSelectionSaving}
                                     onClick={() => {
-                                      setSelectedModelSlug(model.slug);
-                                      setSelectedReasoningEffort(
-                                        model.defaultReasoningLevel
+                                      const nextReasoningEffort = (
+                                        selectedReasoningEffort
+                                          && model.supportedReasoningLevels.some((level) => level.effort === selectedReasoningEffort)
+                                          ? selectedReasoningEffort
+                                          : model.defaultReasoningLevel
                                         || model.supportedReasoningLevels[0]?.effort
                                         || null
                                       );
+                                      void handleModelSelectionChange(model.slug, nextReasoningEffort);
                                       setActiveModelPanelSection('reasoning');
                                       setIsAdditionsMenuOpen(false);
                                       setIsReasoningPickerOpen(false);
                                     }}
                                     className={cn(
-                                      'flex w-full items-start justify-between gap-2 rounded-[0.85rem] border px-2.5 py-2 text-right transition',
+                                      'flex w-full items-start justify-between gap-2 rounded-[0.85rem] border px-2.5 py-2 text-right transition disabled:cursor-wait disabled:opacity-60',
                                       selectedModelSlug === model.slug
                                         ? 'border-violet-200/80 bg-violet-50/80 text-violet-800'
                                         : 'border-slate-100 bg-slate-50/75 text-slate-700 hover:border-slate-200/80 hover:bg-white'
@@ -17833,14 +17897,17 @@ export function CodexMobileApp() {
                                   <button
                                     key={level.effort}
                                     type="button"
+                                    disabled={isModelSelectionSaving}
                                     onClick={() => {
-                                      setSelectedReasoningEffort(level.effort);
+                                      if (selectedModelSlug) {
+                                        void handleModelSelectionChange(selectedModelSlug, level.effort);
+                                      }
                                       setIsAdditionsMenuOpen(false);
                                       setIsReasoningPickerOpen(false);
                                       setIsModelPickerOpen(false);
                                     }}
                                     className={cn(
-                                      'flex w-full items-start justify-between gap-2 rounded-[0.85rem] border px-2.5 py-2 text-right transition',
+                                      'flex w-full items-start justify-between gap-2 rounded-[0.85rem] border px-2.5 py-2 text-right transition disabled:cursor-wait disabled:opacity-60',
                                       selectedReasoningEffort === level.effort
                                         ? 'border-sky-200/80 bg-sky-50/80 text-sky-800'
                                         : 'border-slate-100 bg-slate-50/75 text-slate-700 hover:border-slate-200/80 hover:bg-white'
