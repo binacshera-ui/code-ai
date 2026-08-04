@@ -113,6 +113,7 @@ async function main() {
   const pathsToCopy = [
     'client',
     'server',
+    'skills',
     'scripts',
     '.env.example',
     'AGENT.md',

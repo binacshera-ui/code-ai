@@ -17,6 +17,7 @@
 - **Queues, recurring runs, and follow-up modes** for serious long-running work.
 - **Reusable context** with files, anchors, skills, reminders, and session-scoped restrictions.
 - **Real browser mode for Codex** with a live Chromium session and persisted profile.
+- **Codex × Gemini Design Mode** with a user canvas and deliberate `omit / full / region` visual handoffs chosen per consultation by Codex.
 - **Projects, topics, archives, and cross-user copy flows** for keeping large operator work organized.
 
 ## Product Tour
@@ -47,6 +48,7 @@
   - an annotations/reporting flow,
   - an agent-session orchestration flow,
   - a real browser session,
+  - a session-scoped Gemini design consultation flow with a drawing canvas,
   - or a restricted-edit session.
 
 ### Workspace Visibility
@@ -82,6 +84,7 @@
 - **Annotations mode** creates the main task plus a follow-up documentation/report task.
 - **Agent session mode** plans and tracks coordinated sub-agents for a larger initiative.
 - **Real browser mode** attaches a real Chromium toolplane to Codex for navigation, reading, forms, screenshots, console, network, and tab work.
+- **Design mode** exposes a dedicated skill and six MCP design tools only to the active session. Gemini returns visual specifications while Codex alone owns implementation, behavior, and code safety.
 
 ### Operate Like a Power User
 

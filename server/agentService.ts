@@ -81,6 +81,7 @@ import {
 } from './providerPermissions.js';
 import type { CodexSessionActionRestriction } from './codexSessionContextSelections.js';
 import type { CodexSessionBrowserMode } from './codexBrowserMode.js';
+import type { CodexSessionDesignMode } from './codexDesignMode.js';
 
 export type AgentProfile = CodexProfile;
 
@@ -367,6 +368,9 @@ export async function runAgentPrompt(
     browserMode?: CodexSessionBrowserMode | null;
     browserModeProfileId?: string | null;
     browserModeSessionKey?: string | null;
+    designMode?: CodexSessionDesignMode | null;
+    designModeProfileId?: string | null;
+    designModeSessionKey?: string | null;
   } = {}
 ): Promise<AgentRunResult> {
   const profile = resolveProfile(profileId);

@@ -37,7 +37,7 @@ import {
   Copy,
   Download,
   Eye,
-  File,
+  File as FileIcon,
   FileDiff,
   FileImage,
   FileText,
@@ -56,6 +56,7 @@ import {
   Moon,
   Pause,
   Paperclip,
+  Palette,
   Play,
   RefreshCw,
   Repeat,
@@ -88,6 +89,11 @@ import { IronDesertDialog } from './IronDesertDialog';
 import { RailHeistDialog } from './RailHeistDialog';
 import { TempleGemQuestDialog } from './TempleGemQuestDialog';
 import { VaultRunnerDialog } from './VaultRunnerDialog';
+import {
+  DesignModeDialog,
+  type CodexSessionDesignModeValue,
+  type DesignModeProfileOption,
+} from './DesignModeDialog';
 import {
   DEFAULT_THEME_PRESET_ID,
   THEME_PRESET_MAP,
@@ -665,6 +671,8 @@ interface CodexSessionBrowserMode {
   customProfileDir: string;
 }
 
+type CodexSessionDesignMode = CodexSessionDesignModeValue;
+
 interface CodexSessionTasksResponse {
   tasks: CodexSessionTask[];
 }
@@ -679,6 +687,10 @@ interface CodexSessionContextSelectionResponse {
 
 interface CodexSessionBrowserModeResponse {
   browserMode: CodexSessionBrowserMode;
+}
+
+interface CodexSessionDesignModeResponse {
+  designMode: CodexSessionDesignMode;
 }
 
 interface CodexSessionBrowserViewerTab {
@@ -941,6 +953,17 @@ function createEmptySessionBrowserMode(): CodexSessionBrowserMode {
   };
 }
 
+function createEmptySessionDesignMode(geminiProfileId = ''): CodexSessionDesignMode {
+  return {
+    enabled: false,
+    geminiProfileId,
+    quality: 'deep',
+    brief: '',
+    canvasAvailable: false,
+    canvasUpdatedAt: null,
+  };
+}
+
 function normalizeSessionBrowserModeValue(value: Partial<CodexSessionBrowserMode> | null | undefined): CodexSessionBrowserMode {
   const fallback = createEmptySessionBrowserMode();
   if (!value) {
@@ -960,6 +983,24 @@ function normalizeSessionBrowserModeValue(value: Partial<CodexSessionBrowserMode
     customProfileDir: profileSeed === 'custom' && typeof value.customProfileDir === 'string'
       ? value.customProfileDir.trim()
       : '',
+  };
+}
+
+function normalizeSessionDesignModeValue(
+  value: Partial<CodexSessionDesignMode> | null | undefined,
+  fallbackGeminiProfileId = '',
+): CodexSessionDesignMode {
+  const fallback = createEmptySessionDesignMode(fallbackGeminiProfileId);
+  if (!value) return fallback;
+  return {
+    enabled: value.enabled === true,
+    geminiProfileId: typeof value.geminiProfileId === 'string' && value.geminiProfileId.trim()
+      ? value.geminiProfileId.trim()
+      : fallback.geminiProfileId,
+    quality: value.quality === 'balanced' ? 'balanced' : 'deep',
+    brief: typeof value.brief === 'string' ? value.brief : '',
+    canvasAvailable: value.canvasAvailable === true,
+    canvasUpdatedAt: typeof value.canvasUpdatedAt === 'string' ? value.canvasUpdatedAt : null,
   };
 }
 
@@ -2609,6 +2650,56 @@ async function saveSessionBrowserMode(
     }),
   });
   return normalizeSessionBrowserModeValue(data.browserMode);
+}
+
+async function fetchSessionDesignMode(
+  profileId: string,
+  sessionKey: string,
+  fallbackGeminiProfileId = '',
+): Promise<CodexSessionDesignMode> {
+  const data = await fetchJson<CodexSessionDesignModeResponse>(
+    `/api/codex/session-design-mode?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
+  );
+  return normalizeSessionDesignModeValue(data.designMode, fallbackGeminiProfileId);
+}
+
+async function saveSessionDesignMode(
+  profileId: string,
+  sessionKey: string,
+  designMode: CodexSessionDesignMode,
+  canvasAttachment: CodexUploadedAttachment | null,
+  clearCanvas: boolean,
+): Promise<CodexSessionDesignMode> {
+  const data = await fetchJson<CodexSessionDesignModeResponse>('/api/codex/session-design-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      profileId,
+      sessionKey,
+      designMode: {
+        ...designMode,
+        canvasAttachment,
+        clearCanvas,
+      },
+    }),
+  });
+  return normalizeSessionDesignModeValue(data.designMode, designMode.geminiProfileId);
+}
+
+async function fetchSessionDesignCanvasObjectUrl(
+  profileId: string,
+  sessionKey: string,
+): Promise<string | null> {
+  const response = await codexFetch(
+    `/api/codex/session-design-mode/canvas?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`,
+    { cache: 'no-store' },
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || 'Failed to load design canvas');
+  }
+  return URL.createObjectURL(await response.blob());
 }
 
 async function fetchSessionBrowserViewer(
@@ -6535,7 +6626,7 @@ function FileTreeDialog({
                   'flex h-9 w-9 shrink-0 items-center justify-center rounded-full',
                   isDirectory ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'
               )}>
-                  {isDirectory ? <Folder className="h-4 w-4" /> : <File className="h-4 w-4" />}
+                  {isDirectory ? <Folder className="h-4 w-4" /> : <FileIcon className="h-4 w-4" />}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-semibold text-slate-800">{entry.name}</div>
@@ -10076,6 +10167,7 @@ function ModePickerDialog({
   selectedAgentSessionDraft,
   selectedActionRestriction,
   selectedBrowserMode,
+  selectedDesignMode,
   onClose,
   onToggleProfessionalMode,
   onToggleAnnotationsMode,
@@ -10083,6 +10175,7 @@ function ModePickerDialog({
   onOpenAgentSessions,
   onOpenActionRestriction,
   onOpenBrowserMode,
+  onOpenDesignMode,
 }: {
   isOpen: boolean;
   currentProvider: CodexProfile['provider'] | null;
@@ -10092,6 +10185,7 @@ function ModePickerDialog({
   selectedAgentSessionDraft: CodexAgentSessionRecord | null;
   selectedActionRestriction: CodexSessionActionRestriction | null;
   selectedBrowserMode: CodexSessionBrowserMode;
+  selectedDesignMode: CodexSessionDesignMode;
   onClose: () => void;
   onToggleProfessionalMode: () => void;
   onToggleAnnotationsMode: () => void;
@@ -10099,6 +10193,7 @@ function ModePickerDialog({
   onOpenAgentSessions: () => void;
   onOpenActionRestriction: () => void;
   onOpenBrowserMode: () => void;
+  onOpenDesignMode: () => void;
 }) {
   if (!isOpen) {
     return null;
@@ -10139,6 +10234,45 @@ function ModePickerDialog({
 
         <div className="min-h-0 overflow-y-auto overscroll-contain px-5 py-5">
           <div className="space-y-3">
+          <button
+            type="button"
+            onClick={onOpenDesignMode}
+            disabled={currentProvider !== 'codex'}
+            className={cn(
+              'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
+              selectedDesignMode.enabled
+                ? 'border-fuchsia-200 bg-fuchsia-50/80'
+                : 'border-slate-100 bg-slate-50/80 hover:border-fuchsia-200 hover:bg-fuchsia-50/50',
+              currentProvider !== 'codex' && 'cursor-not-allowed opacity-60 hover:border-slate-100 hover:bg-slate-50/80'
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-800">מצב עיצוב</div>
+                {selectedDesignMode.enabled && (
+                  <span className="rounded-full bg-fuchsia-600 px-2 py-0.5 text-[10px] font-medium text-white">פעיל</span>
+                )}
+                <span className="rounded-full bg-white/90 px-2 py-0.5 text-[10px] font-medium text-slate-500">Codex × Gemini</span>
+              </div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">
+                ייעוץ עיצוב מקצועי דרך Gemini, עם קנבס ציור ושימור מלא של הקוד והיכולות בידי Codex.
+              </div>
+              <div className="mt-2 text-[11px] leading-5 text-slate-400">
+                {selectedDesignMode.enabled
+                  ? `${selectedDesignMode.quality === 'deep' ? 'ייעוץ עמוק' : 'ייעוץ מאוזן'} · ${selectedDesignMode.canvasAvailable ? 'קנבס שמור' : 'ללא קנבס'}`
+                  : currentProvider === 'codex'
+                    ? 'הסקיל והכלים נטענים רק לאחר הפעלת המצב.'
+                    : 'זמין רק כאשר הפרופיל הפעיל הוא Codex.'}
+              </div>
+            </div>
+            <div className={cn(
+              'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+              selectedDesignMode.enabled ? 'bg-fuchsia-100 text-fuchsia-700' : 'bg-white text-fuchsia-500'
+            )}>
+              <Palette className="h-4 w-4" />
+            </div>
+          </button>
+
           <button
             type="button"
             onClick={onOpenBrowserMode}
@@ -12045,6 +12179,7 @@ export function CodexMobileApp() {
   const [isReminderPickerDialogOpen, setIsReminderPickerDialogOpen] = useState(false);
   const [isModePickerDialogOpen, setIsModePickerDialogOpen] = useState(false);
   const [isBrowserModeDialogOpen, setIsBrowserModeDialogOpen] = useState(false);
+  const [isDesignModeDialogOpen, setIsDesignModeDialogOpen] = useState(false);
   const [isAgentSessionDialogOpen, setIsAgentSessionDialogOpen] = useState(false);
   const [isTaskBoardOpen, setIsTaskBoardOpen] = useState(false);
   const [isSessionTaskDialogOpen, setIsSessionTaskDialogOpen] = useState(false);
@@ -12095,6 +12230,9 @@ export function CodexMobileApp() {
   const [sessionBrowserMode, setSessionBrowserMode] = useState<CodexSessionBrowserMode>(
     createEmptySessionBrowserMode()
   );
+  const [sessionDesignMode, setSessionDesignMode] = useState<CodexSessionDesignMode>(
+    createEmptySessionDesignMode()
+  );
   const [instructionDraft, setInstructionDraft] = useState('');
   const [projectAnchors, setProjectAnchors] = useState<CodexProjectAnchor[]>([]);
   const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
@@ -12106,8 +12244,10 @@ export function CodexMobileApp() {
   const [isInstructionLoading, setIsInstructionLoading] = useState(false);
   const [isSessionContextSelectionLoading, setIsSessionContextSelectionLoading] = useState(false);
   const [isSessionBrowserModeLoading, setIsSessionBrowserModeLoading] = useState(false);
+  const [isSessionDesignModeLoading, setIsSessionDesignModeLoading] = useState(false);
   const [isSessionContextSelectionSaving, setIsSessionContextSelectionSaving] = useState(false);
   const [isSessionBrowserModeSaving, setIsSessionBrowserModeSaving] = useState(false);
+  const [isSessionDesignModeSaving, setIsSessionDesignModeSaving] = useState(false);
   const [isBrowserViewerLoading, setIsBrowserViewerLoading] = useState(false);
   const [isProjectAnchorsLoading, setIsProjectAnchorsLoading] = useState(false);
   const [isUnifiedSkillsLoading, setIsUnifiedSkillsLoading] = useState(false);
@@ -12134,6 +12274,8 @@ export function CodexMobileApp() {
   const [anchorDraftTargetEntry, setAnchorDraftTargetEntry] = useState<CodexFileTreeEntry | null>(null);
   const [actionRestrictionDraft, setActionRestrictionDraft] = useState<CodexSessionActionRestriction | null>(null);
   const [browserModeDraft, setBrowserModeDraft] = useState<CodexSessionBrowserMode>(createEmptySessionBrowserMode());
+  const [designModeDraft, setDesignModeDraft] = useState<CodexSessionDesignMode>(createEmptySessionDesignMode());
+  const [designCanvasObjectUrl, setDesignCanvasObjectUrl] = useState<string | null>(null);
   const [browserViewerState, setBrowserViewerState] = useState<CodexSessionBrowserViewerState | null>(null);
   const [browserViewerError, setBrowserViewerError] = useState<string | null>(null);
   const [browserViewerTextDraft, setBrowserViewerTextDraft] = useState('');
@@ -12246,6 +12388,7 @@ export function CodexMobileApp() {
   const latestInstructionLoadTokenRef = useRef(0);
   const latestSessionContextSelectionLoadTokenRef = useRef(0);
   const latestSessionBrowserModeLoadTokenRef = useRef(0);
+  const latestSessionDesignModeLoadTokenRef = useRef(0);
   const latestProjectAnchorsLoadTokenRef = useRef(0);
   const latestUnifiedSkillsLoadTokenRef = useRef(0);
   const latestSessionRemindersLoadTokenRef = useRef(0);
@@ -12286,6 +12429,12 @@ export function CodexMobileApp() {
   const effectiveDraftCwd = draftCwd || null;
   const activeSessionCwd = selectedSession?.cwd || null;
   const currentProfile = visibleProfiles.find((profile) => profile.id === profileId) || null;
+  const designGeminiProfiles = useMemo<DesignModeProfileOption[]>(
+    () => profiles
+      .filter((profile) => profile.provider === 'gemini' && profile.mode !== 'support')
+      .map((profile) => ({ id: profile.id, label: profile.label })),
+    [profiles]
+  );
   const copyableCodexTargetProfiles = useMemo(
     () => visibleProfiles.filter((profile) => (
       profile.provider === 'codex'
@@ -12392,6 +12541,9 @@ export function CodexMobileApp() {
     setBrowserViewerTextDraft('');
     setBrowserViewerUrlDraft('');
   }, [currentQueueKey, profileId]);
+  useEffect(() => () => {
+    if (designCanvasObjectUrl) URL.revokeObjectURL(designCanvasObjectUrl);
+  }, [designCanvasObjectUrl]);
   useEffect(() => {
     if (collapsedQueueItems.length === 0) {
       setQueuePanelStage('closed');
@@ -13706,6 +13858,11 @@ export function CodexMobileApp() {
     setSessionReminders([]);
     setSessionRemindersError(null);
     setSessionContextSelection(createEmptySessionContextSelection());
+    const emptyDesignMode = createEmptySessionDesignMode(designGeminiProfiles[0]?.id || '');
+    setSessionDesignMode(emptyDesignMode);
+    setDesignModeDraft(emptyDesignMode);
+    setDesignCanvasObjectUrl(null);
+    setIsDesignModeDialogOpen(false);
     clearDraftAttachments();
     setScheduledFor('');
     setIsScheduleOpen(false);
@@ -13808,6 +13965,15 @@ export function CodexMobileApp() {
     setSessionTasks([]);
     setSessionTasksError(null);
     setSessionContextSelection(createEmptySessionContextSelection());
+    const emptyDesignMode = createEmptySessionDesignMode(
+      profiles.find((profile) => profile.id === nextProfileId && profile.provider === 'gemini')?.id
+        || profiles.find((profile) => profile.provider === 'gemini' && profile.mode !== 'support')?.id
+        || ''
+    );
+    setSessionDesignMode(emptyDesignMode);
+    setDesignModeDraft(emptyDesignMode);
+    setDesignCanvasObjectUrl(null);
+    setIsDesignModeDialogOpen(false);
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
@@ -15367,6 +15533,84 @@ export function CodexMobileApp() {
     }
   }
 
+  async function loadCurrentSessionDesignMode(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
+    const fallbackGeminiProfileId = designGeminiProfiles[0]?.id || '';
+    if (!nextProfileId || !nextSessionKey) {
+      const emptyMode = createEmptySessionDesignMode(fallbackGeminiProfileId);
+      setSessionDesignMode(emptyMode);
+      setDesignModeDraft(emptyMode);
+      setDesignCanvasObjectUrl(null);
+      return;
+    }
+
+    const requestToken = ++latestSessionDesignModeLoadTokenRef.current;
+    setIsSessionDesignModeLoading(true);
+    try {
+      const mode = await fetchSessionDesignMode(nextProfileId, nextSessionKey, fallbackGeminiProfileId);
+      let canvasUrl: string | null = null;
+      if (mode.canvasAvailable) {
+        canvasUrl = await fetchSessionDesignCanvasObjectUrl(nextProfileId, nextSessionKey);
+      }
+      if (requestToken !== latestSessionDesignModeLoadTokenRef.current) {
+        if (canvasUrl) URL.revokeObjectURL(canvasUrl);
+        return;
+      }
+      setSessionDesignMode(mode);
+      setDesignModeDraft(mode);
+      setDesignCanvasObjectUrl(canvasUrl);
+    } catch (designModeError: any) {
+      if (requestToken === latestSessionDesignModeLoadTokenRef.current) {
+        const emptyMode = createEmptySessionDesignMode(fallbackGeminiProfileId);
+        setSessionDesignMode(emptyMode);
+        setDesignModeDraft(emptyMode);
+        setDesignCanvasObjectUrl(null);
+        setError(designModeError.message || 'Failed to load design mode');
+      }
+    } finally {
+      if (requestToken === latestSessionDesignModeLoadTokenRef.current) {
+        setIsSessionDesignModeLoading(false);
+      }
+    }
+  }
+
+  async function persistSessionDesignMode(
+    nextMode: CodexSessionDesignMode,
+    canvasFile: File | null = null,
+    clearCanvas = false,
+  ): Promise<boolean> {
+    if (!profileId || !currentQueueKey) return false;
+    setIsSessionDesignModeSaving(true);
+    let uploadedCanvas: DraftAttachment | null = null;
+    try {
+      if (canvasFile) {
+        const uploads = await uploadFiles([canvasFile]);
+        uploadedCanvas = uploads[0] || null;
+        if (!uploadedCanvas) throw new Error('Design canvas upload did not return a file');
+      }
+      const savedMode = await saveSessionDesignMode(
+        profileId,
+        currentQueueKey,
+        nextMode,
+        uploadedCanvas,
+        clearCanvas,
+      );
+      const nextCanvasUrl = savedMode.canvasAvailable
+        ? await fetchSessionDesignCanvasObjectUrl(profileId, currentQueueKey)
+        : null;
+      setSessionDesignMode(savedMode);
+      setDesignModeDraft(savedMode);
+      setDesignCanvasObjectUrl(nextCanvasUrl);
+      return true;
+    } catch (designModeError: any) {
+      setError(designModeError.message || 'Failed to save design mode');
+      void loadCurrentSessionDesignMode(profileId, currentQueueKey);
+      return false;
+    } finally {
+      if (uploadedCanvas?.previewUrl) URL.revokeObjectURL(uploadedCanvas.previewUrl);
+      setIsSessionDesignModeSaving(false);
+    }
+  }
+
   function buildNextSessionContextSelection(
     overrides: Partial<CodexSessionContextSelection>
   ): CodexSessionContextSelection {
@@ -15658,6 +15902,37 @@ export function CodexMobileApp() {
     await persistSessionBrowserMode(nextMode);
     setIsBrowserModeDialogOpen(false);
     setIsModePickerDialogOpen(false);
+  }
+
+  function openDesignModeDialog() {
+    setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(false);
+    const nextDraft = {
+      ...sessionDesignMode,
+      geminiProfileId: sessionDesignMode.geminiProfileId || designGeminiProfiles[0]?.id || '',
+    };
+    setDesignModeDraft(nextDraft);
+    setIsDesignModeDialogOpen(true);
+  }
+
+  async function saveDesignModeDraft(canvasFile: File | null, clearCanvas: boolean) {
+    if (designModeDraft.enabled && !designModeDraft.geminiProfileId) {
+      setError('לא נמצא פרופיל Gemini זמין עבור מצב העיצוב.');
+      return;
+    }
+    const saved = await persistSessionDesignMode(designModeDraft, canvasFile, clearCanvas);
+    if (saved) {
+      setIsDesignModeDialogOpen(false);
+      setIsModePickerDialogOpen(false);
+    }
+  }
+
+  async function disableDesignMode() {
+    const saved = await persistSessionDesignMode({ ...designModeDraft, enabled: false });
+    if (saved) {
+      setIsDesignModeDialogOpen(false);
+      setIsModePickerDialogOpen(false);
+    }
   }
 
   async function loadBrowserViewer(initialUrl?: string | null) {
@@ -16610,6 +16885,7 @@ export function CodexMobileApp() {
     void loadCurrentSessionInstruction(profileId, currentQueueKey);
     void loadCurrentSessionContextSelection(profileId, currentQueueKey);
     void loadCurrentSessionBrowserMode(profileId, currentQueueKey);
+    void loadCurrentSessionDesignMode(profileId, currentQueueKey);
     void loadCurrentSessionReminders(profileId, currentQueueKey);
   }, [currentQueueKey, profileId]);
 
@@ -17414,7 +17690,7 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionDesignMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionDesignModeLoading) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
                 {isProfessionalModeSelected && (
                   <button
@@ -17455,6 +17731,18 @@ export function CodexMobileApp() {
                     <Command className="h-3.5 w-3.5" />
                     <span className="truncate">
                       דפדפן אמיתי · {sessionBrowserMode.headless ? 'Headless' : 'Visual'} · {getBrowserModeProfileSeedCompactLabel(sessionBrowserMode)}
+                    </span>
+                  </button>
+                )}
+                {sessionDesignMode.enabled && (
+                  <button
+                    type="button"
+                    onClick={openDesignModeDialog}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full border border-fuchsia-200 bg-fuchsia-50 px-3 py-1.5 text-[11px] font-medium text-fuchsia-700 transition hover:bg-fuchsia-100"
+                  >
+                    <Palette className="h-3.5 w-3.5" />
+                    <span className="truncate">
+                      מצב עיצוב · {sessionDesignMode.quality === 'deep' ? 'עמוק' : 'מאוזן'}{sessionDesignMode.canvasAvailable ? ' · קנבס' : ''}
                     </span>
                   </button>
                 )}
@@ -17517,6 +17805,12 @@ export function CodexMobileApp() {
                   <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-500">
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     <span>שומר הקשר...</span>
+                  </span>
+                )}
+                {isSessionDesignModeLoading && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-fuchsia-100 bg-white px-3 py-1.5 text-[11px] font-medium text-fuchsia-500">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>טוען מצב עיצוב...</span>
                   </span>
                 )}
               </div>
@@ -18426,7 +18720,7 @@ export function CodexMobileApp() {
                             <div className="text-[11px] font-semibold text-slate-700">קבצים</div>
                             <div className="text-[9px] text-slate-400">כמו ההעלאה הרגילה</div>
                           </div>
-                          <File className="h-4 w-4 shrink-0 text-slate-400" />
+                          <FileIcon className="h-4 w-4 shrink-0 text-slate-400" />
                         </button>
                         <button
                           type="button"
@@ -18807,6 +19101,7 @@ export function CodexMobileApp() {
         selectedAgentSessionDraft={selectedAgentSessionDraft}
         selectedActionRestriction={selectedActionRestriction}
         selectedBrowserMode={sessionBrowserMode}
+        selectedDesignMode={sessionDesignMode}
         onClose={() => setIsModePickerDialogOpen(false)}
         onToggleProfessionalMode={toggleProfessionalMode}
         onToggleAnnotationsMode={toggleAnnotationsMode}
@@ -18814,6 +19109,23 @@ export function CodexMobileApp() {
         onOpenAgentSessions={openAgentSessionDialog}
         onOpenActionRestriction={openActionRestrictionDialog}
         onOpenBrowserMode={openBrowserModeDialog}
+        onOpenDesignMode={openDesignModeDialog}
+      />
+
+      <DesignModeDialog
+        isOpen={isDesignModeDialogOpen}
+        provider={currentProfile?.provider || null}
+        value={designModeDraft}
+        profiles={designGeminiProfiles}
+        canvasUrl={designCanvasObjectUrl}
+        isSaving={isSessionDesignModeSaving}
+        onClose={() => {
+          setIsDesignModeDialogOpen(false);
+          setDesignModeDraft(sessionDesignMode);
+        }}
+        onChange={setDesignModeDraft}
+        onSave={saveDesignModeDraft}
+        onDisable={disableDesignMode}
       />
 
       <BrowserModeDialog

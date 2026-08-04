@@ -9,6 +9,7 @@ import { recordCodexServerCrash } from './codexCrashLogs.js';
 import { CODEX_APP_CONFIG } from './config.js';
 import { startCodexQueueWorker } from './codexQueue.js';
 import { repairAllProviderHomesOwnership } from './providerRuntimeOwnership.js';
+import { shutdownCodexDesignModeBridge } from './codexDesignMode.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -184,3 +185,11 @@ server.once('listening', () => {
       console.error('❌ Failed to start Codex queue worker:', error);
     });
 });
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    void shutdownCodexDesignModeBridge().finally(() => {
+      server.close(() => process.exit(0));
+    });
+  });
+}

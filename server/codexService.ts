@@ -21,6 +21,10 @@ import {
   prepareCodexBrowserModeForRun,
   type CodexSessionBrowserMode,
 } from './codexBrowserMode.js';
+import {
+  prepareCodexDesignModeForRun,
+  type CodexSessionDesignMode,
+} from './codexDesignMode.js';
 
 export interface CodexProfile {
   id: string;
@@ -3903,6 +3907,9 @@ export async function runCodexPrompt(
     browserMode?: CodexSessionBrowserMode | null;
     browserModeProfileId?: string | null;
     browserModeSessionKey?: string | null;
+    designMode?: CodexSessionDesignMode | null;
+    designModeProfileId?: string | null;
+    designModeSessionKey?: string | null;
   } = {}
 ): Promise<CodexRunResult> {
   const profile = resolveProfile(profileId);
@@ -3953,6 +3960,9 @@ export async function runCodexPrompt(
           browserMode: options.browserMode,
           browserModeProfileId: options.browserModeProfileId,
           browserModeSessionKey: options.browserModeSessionKey,
+          designMode: options.designMode,
+          designModeProfileId: options.designModeProfileId,
+          designModeSessionKey: options.designModeSessionKey,
         }
       );
 
@@ -3968,9 +3978,25 @@ export async function runCodexPrompt(
     const browserModeSessionKey = options.browserModeSessionKey?.trim()
       || sessionId?.trim()
       || null;
+    const designModeSessionKey = options.designModeSessionKey?.trim()
+      || sessionId?.trim()
+      || null;
+    const designModeStateProfileId = options.designModeProfileId?.trim() || profile.id;
+    const preparedDesignMode = designModeSessionKey
+      ? await prepareCodexDesignModeForRun(
+        profile,
+        designModeStateProfileId,
+        designModeSessionKey,
+        runCwd,
+        options.designMode || null,
+      )
+      : null;
+    const designAwareProfile = preparedDesignMode
+      ? { ...profile, codexHome: preparedDesignMode.envCodeXHome }
+      : profile;
     const preparedBrowserMode = browserModeSessionKey
       ? await prepareCodexBrowserModeForRun(
-        profile,
+        designAwareProfile,
         options.browserModeProfileId?.trim() || profile.id,
         browserModeSessionKey,
         options.browserMode || null
@@ -3980,7 +4006,10 @@ export async function runCodexPrompt(
     return new Promise<CodexRunResult>((resolve, reject) => {
       const child = spawn(CODEX_BIN, args, {
         cwd: runCwd,
-        env: buildCodexProcessEnv(profile, preparedBrowserMode?.envCodeXHome || null),
+        env: buildCodexProcessEnv(
+          profile,
+          preparedBrowserMode?.envCodeXHome || preparedDesignMode?.envCodeXHome || null,
+        ),
         stdio: ['pipe', 'pipe', 'pipe'],
         ...getProfileSpawnIdentity(profile),
       });
@@ -4104,6 +4133,9 @@ export async function runCodexPrompt(
                   browserMode: options.browserMode,
                   browserModeProfileId: options.browserModeProfileId,
                   browserModeSessionKey: options.browserModeSessionKey,
+                  designMode: options.designMode,
+                  designModeProfileId: options.designModeProfileId,
+                  designModeSessionKey: options.designModeSessionKey,
                 }
               );
               resolve({

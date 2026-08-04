@@ -8,7 +8,10 @@
     "preview": "vite preview",
     "start": "node dist/server.js",
     "deploy:install": "node deploy/code-ai/install.mjs",
-    "export:standalone": "node deploy/code-ai/export-standalone.mjs"
+    "export:standalone": "node deploy/code-ai/export-standalone.mjs",
+    "test:design-mode": "design_test_root=$(mktemp -d /tmp/code-ai-design-mode-test-XXXXXX) && esbuild server/codexDesignMode.test.ts --bundle --platform=node --format=esm --outfile=/tmp/code-ai-codex-design-mode.test.mjs && CODEX_APP_ROOT=$PWD CODEX_STORAGE_ROOT=$design_test_root node --test /tmp/code-ai-codex-design-mode.test.mjs",
+    "test:design-mode:visual": ".venv/bin/python scripts/design-mode-visual-e2e.py",
+    "test:design-mode:gemini": "esbuild scripts/design-mode-gemini-smoke.ts --bundle --platform=node --format=esm --outfile=/tmp/code-ai-design-mode-gemini-smoke.mjs && CODEX_APP_ROOT=$PWD node /tmp/code-ai-design-mode-gemini-smoke.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.4",

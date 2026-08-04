@@ -1791,6 +1791,164 @@ async function waitForGeminiSessionReady(
   }
 }
 
+export interface GeminiEphemeralDesignRunInput {
+  prompt: string;
+  profileId?: string;
+  cwd: string;
+  model?: string | null;
+  timeoutMs?: number;
+}
+
+export interface GeminiEphemeralDesignRunResult {
+  finalMessage: string;
+  model: string | null;
+}
+
+/**
+ * Runs Gemini as a read-only, disposable design specialist. Unlike the normal
+ * chat path, this helper never resumes a user session and removes the transient
+ * Gemini session file before returning so design consultations do not pollute
+ * the sidebar or become long-term memory.
+ */
+export async function runGeminiEphemeralDesignPrompt(
+  input: GeminiEphemeralDesignRunInput
+): Promise<GeminiEphemeralDesignRunResult> {
+  const profile = resolveProfile(input.profileId);
+  const prompt = normalizeString(input.prompt);
+  const cwd = path.resolve(input.cwd);
+  if (!prompt) {
+    throw new Error('Gemini design prompt must not be empty');
+  }
+
+  const envValues = await readProfileEnv(profile);
+  const modelCatalog = await getGeminiModelCatalog(profile.id);
+  const requestedModel = normalizeString(input.model)
+    || modelCatalog.selectedModel
+    || resolvePreferredGeminiModel(modelCatalog.models.map((model) => ({
+      slug: model.slug,
+      displayName: model.displayName,
+      description: model.description,
+      inputTokenLimit: runtimeState.modelContextWindows[model.slug] || null,
+      thinking: model.supportedReasoningLevels.length > 0,
+    })))
+    || 'gemini-2.5-pro';
+  const env = buildGeminiProcessEnv(profile, envValues, null);
+  const timeoutMs = Math.min(10 * 60_000, Math.max(30_000, input.timeoutMs || 4 * 60_000));
+  const args = [
+    '--output-format',
+    'stream-json',
+    '--skip-trust',
+    '--approval-mode',
+    'plan',
+    '--sandbox',
+    '--model',
+    requestedModel,
+    '--prompt',
+    '',
+    '--include-directories',
+    cwd,
+  ];
+
+  return new Promise<GeminiEphemeralDesignRunResult>((resolve, reject) => {
+    const child = spawn(GEMINI_BIN, args, {
+      cwd,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...getProfileSpawnIdentity(profile),
+    });
+    let stdoutBuffer = '';
+    let stderrBuffer = '';
+    let finalMessage = '';
+    let resultErrorMessage: string | null = null;
+    let createdSessionId: string | null = null;
+    let actualModel: string | null = requestedModel;
+    let settled = false;
+
+    const cleanupTransientSession = async () => {
+      if (!createdSessionId) return;
+      await waitForGeminiSessionReady(profile, createdSessionId, null, 2_500).catch(() => undefined);
+      const sessionRecord = await resolveGeminiSessionRecord(profile, createdSessionId).catch(() => null);
+      if (sessionRecord) {
+        await fs.rm(sessionRecord.path, { force: true }).catch(() => undefined);
+      }
+    };
+    const finishReject = async (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      await cleanupTransientSession();
+      reject(error);
+    };
+    const finishResolve = async () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      await cleanupTransientSession();
+      if (!finalMessage.trim()) {
+        reject(new Error(resultErrorMessage || 'Gemini completed without a design response'));
+        return;
+      }
+      resolve({ finalMessage: finalMessage.trim(), model: actualModel });
+    };
+    const consumeLine = (line: string) => {
+      const row = safeJsonParse<any>(line.trim());
+      if (!row) return;
+      if (row.type === 'init') {
+        createdSessionId = normalizeString(row.session_id) || createdSessionId;
+        actualModel = normalizeString(row.model) || actualModel;
+        return;
+      }
+      if (row.type === 'message' && row.role === 'assistant' && typeof row.content === 'string') {
+        finalMessage += row.content;
+        return;
+      }
+      if (row.type === 'result' && row.status === 'error') {
+        resultErrorMessage = normalizeString(row.error?.message) || 'Gemini returned an error';
+      }
+      if (row.type === 'result' && row.stats?.models && typeof row.stats.models === 'object') {
+        const modelEntries = Object.keys(row.stats.models);
+        actualModel = modelEntries.at(-1) || actualModel;
+      }
+    };
+
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 2_000).unref();
+      void finishReject(new Error(`Gemini design consultation timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref();
+
+    child.stdin.on('error', () => undefined);
+    child.stdin.end(prompt);
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    child.stdout.on('data', (chunk: string) => {
+      stdoutBuffer += chunk;
+      while (stdoutBuffer.includes('\n')) {
+        const newlineIndex = stdoutBuffer.indexOf('\n');
+        consumeLine(stdoutBuffer.slice(0, newlineIndex));
+        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+      }
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderrBuffer += chunk;
+    });
+    child.on('error', (error) => {
+      void finishReject(error);
+    });
+    child.on('close', (code) => {
+      if (stdoutBuffer.trim()) consumeLine(stdoutBuffer);
+      if (resultErrorMessage) {
+        void finishReject(new Error(resultErrorMessage));
+      } else if (code !== 0) {
+        void finishReject(new Error(sanitizeGeminiCliFailure(stderrBuffer, `Gemini exited with code ${code}`)));
+      } else {
+        void finishResolve();
+      }
+    });
+  });
+}
+
 export async function runGeminiPrompt(
   prompt: string,
   sessionId?: string,

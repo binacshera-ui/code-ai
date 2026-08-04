@@ -31,6 +31,12 @@ import {
   rebindSessionBrowserMode,
   type CodexSessionBrowserMode,
 } from './codexBrowserMode.js';
+import {
+  buildSessionDesignModePromptAdditions,
+  consumeSessionDesignModeAfterDispatch,
+  rebindSessionDesignMode,
+  type CodexSessionDesignMode,
+} from './codexDesignMode.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
 import { getSessionTopicMap, setSessionTopic } from './codexSessionTopics.js';
 import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
@@ -79,6 +85,7 @@ export interface CodexQueueItem {
   sessionInstruction?: string | null;
   actionRestriction: CodexSessionActionRestriction | null;
   browserMode: CodexSessionBrowserMode | null;
+  designMode: CodexSessionDesignMode | null;
   goalMode: CodexQueueGoalMode | null;
   forkContext?: CodexForkContext | null;
   attachments: CodexUploadedAttachment[];
@@ -122,6 +129,7 @@ interface EnqueueCodexQueueInput {
   sessionInstruction?: string | null;
   actionRestriction?: CodexSessionActionRestriction | null;
   browserMode?: CodexSessionBrowserMode | null;
+  designMode?: CodexSessionDesignMode | null;
   goalMode?: CodexQueueGoalMode | null;
   forkContext?: unknown;
   scheduledAt?: string | null;
@@ -241,6 +249,16 @@ function cloneQueueItem(item: CodexQueueItem): CodexQueueItem {
           : null,
       }
       : null,
+    designMode: item.designMode
+      ? {
+        enabled: item.designMode.enabled === true,
+        geminiProfileId: item.designMode.geminiProfileId,
+        quality: item.designMode.quality === 'balanced' ? 'balanced' : 'deep',
+        brief: item.designMode.brief,
+        canvasAvailable: item.designMode.canvasAvailable === true,
+        canvasUpdatedAt: item.designMode.canvasUpdatedAt || null,
+      }
+      : null,
     goalMode: item.goalMode
       ? {
         chainId: item.goalMode.chainId,
@@ -290,6 +308,26 @@ function normalizeBrowserMode(value: unknown): CodexSessionBrowserMode | null {
       && typeof (value as any).customProfileDir === 'string'
       && (value as any).customProfileDir.trim()
       ? (value as any).customProfileDir.trim()
+      : null,
+  };
+}
+
+function normalizeDesignMode(value: unknown): CodexSessionDesignMode | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const geminiProfileId = typeof (value as any).geminiProfileId === 'string'
+    ? (value as any).geminiProfileId.trim()
+    : '';
+  return {
+    enabled: (value as any).enabled === true,
+    geminiProfileId,
+    quality: (value as any).quality === 'balanced' ? 'balanced' : 'deep',
+    brief: typeof (value as any).brief === 'string' ? (value as any).brief : '',
+    canvasAvailable: (value as any).canvasAvailable === true,
+    canvasUpdatedAt: typeof (value as any).canvasUpdatedAt === 'string'
+      ? (value as any).canvasUpdatedAt
       : null,
   };
 }
@@ -814,6 +852,7 @@ async function loadState() {
           : null,
         actionRestriction: normalizeActionRestriction(item.actionRestriction),
         browserMode: normalizeBrowserMode(item.browserMode),
+        designMode: normalizeDesignMode(item.designMode),
         goalMode: normalizeGoalMode(item.goalMode),
         forkContext: normalizeForkContext(item.forkContext),
         scheduleMode: item.scheduleMode === 'recurring' ? 'recurring' : 'once',
@@ -1182,10 +1221,14 @@ async function processQueueItem(item: CodexQueueItem) {
   const browserModePrompt = item.browserMode
     ? buildSessionBrowserModePromptAdditions(item.browserMode)
     : null;
+  const designModePrompt = item.designMode
+    ? buildSessionDesignModePromptAdditions(item.designMode)
+    : null;
   const effectiveRunPrompt = [
     runPrompt,
     restrictionPrompt?.trim() || null,
     browserModePrompt?.trim() || null,
+    designModePrompt?.trim() || null,
   ]
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     .join('\n\n');
@@ -1239,18 +1282,26 @@ async function processQueueItem(item: CodexQueueItem) {
         browserMode: item.browserMode,
         browserModeProfileId: item.sourceProfileId || item.profileId,
         browserModeSessionKey: resolvedSessionId || item.queueKey,
+        designMode: item.designMode,
+        designModeProfileId: item.sourceProfileId || item.profileId,
+        designModeSessionKey: resolvedSessionId || item.queueKey,
       }
     );
 
     if (resolvedSessionId && result.sessionId !== resolvedSessionId) {
       await copySessionSidebarMetadataToRecoveredSession(item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionBrowserMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
+      await rebindSessionDesignMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
     }
 
     await rebindQueueItemsToSession(item.profileId, item.queueKey, result.sessionId);
     await rebindSessionBrowserMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
+    await rebindSessionDesignMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     if (item.browserMode && item.browserMode.enabled !== true) {
       await consumeSessionBrowserModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
+    }
+    if (item.designMode && item.designMode.enabled !== true) {
+      await consumeSessionDesignModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
     }
 
     if (isRecurringItem(item)) {
@@ -1502,6 +1553,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
       : null,
     actionRestriction: normalizeActionRestriction(input.actionRestriction),
     browserMode: normalizeBrowserMode(input.browserMode),
+    designMode: normalizeDesignMode(input.designMode),
     goalMode: normalizeGoalMode(input.goalMode),
     forkContext: normalizeForkContext(input.forkContext),
     attachments: (input.attachments || []).map((attachment) => ({ ...attachment })),

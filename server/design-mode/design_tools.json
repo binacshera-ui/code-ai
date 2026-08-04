@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "design_system",
+      "description": "Ask Gemini Design Partner for a coherent visual system: color roles, typography, spacing, radius, elevation, motion, RTL/LTR rules and reusable tokens. Use before broad redesigns or when the project lacks a stable design language.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request", "canvas_input"],
+        "properties": {
+          "request": { "type": "string", "description": "The concrete design-system outcome required." },
+          "project_summary": { "type": "string", "description": "Product, audience and current visual-language summary." },
+          "file_paths": { "type": "array", "maxItems": 24, "items": { "type": "string" }, "description": "Relevant source and token files, relative to the active workspace when possible." },
+          "reference_image_paths": { "type": "array", "maxItems": 6, "items": { "type": "string" }, "description": "Optional screenshots or visual references other than the session canvas." },
+          "constraints": { "type": "array", "maxItems": 30, "items": { "type": "string" } },
+          "current_behavior": { "type": "array", "maxItems": 40, "items": { "type": "string" }, "description": "Capabilities and semantics the implementation must preserve." },
+          "desired_feeling": { "type": "string" },
+          "target_platform": { "type": "string", "enum": ["responsive-web", "mobile-web", "desktop-web", "native-like-web"] },
+          "target_direction": { "type": "string", "enum": ["rtl", "ltr", "mixed", "auto"] },
+          "iteration_context": { "type": "string" },
+          "canvas_input": { "$ref": "#/$defs/canvasInput" }
+        },
+        "$defs": {
+          "canvasInput": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode", "reason"],
+            "properties": {
+              "mode": { "type": "string", "enum": ["omit", "full", "region"] },
+              "reason": { "type": "string", "description": "Why this consultation needs no canvas, the full canvas, or only a region." },
+              "focus": { "type": "string", "description": "What Gemini should inspect in the supplied canvas area." },
+              "region": { "$ref": "#/$defs/region" }
+            }
+          },
+          "region": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["x", "y", "width", "height"],
+            "properties": {
+              "x": { "type": "number", "minimum": 0, "maximum": 1 },
+              "y": { "type": "number", "minimum": 0, "maximum": 1 },
+              "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+              "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "design_screen",
+      "description": "Design a complete screen or page, including information hierarchy, composition, visual rhythm, states and responsive behavior. Use the full canvas only when whole-screen composition matters.",
+      "inputSchema": { "$ref": "design_tools.json#/tools/0/inputSchema" }
+    },
+    {
+      "name": "design_component",
+      "description": "Design one bounded component or UI element and all of its states without changing its behavior. Prefer a cropped canvas region over the full canvas when visual context is needed.",
+      "inputSchema": { "$ref": "design_tools.json#/tools/0/inputSchema" }
+    },
+    {
+      "name": "design_review",
+      "description": "Critique an implemented UI against the request and existing design language, rank visual defects and return precise corrections. Supply current screenshots and the relevant source files.",
+      "inputSchema": { "$ref": "design_tools.json#/tools/0/inputSchema" }
+    },
+    {
+      "name": "design_responsive",
+      "description": "Resolve responsive, mobile, touch, overflow, density and RTL/LTR layout behavior while preserving the same product capabilities at every viewport.",
+      "inputSchema": { "$ref": "design_tools.json#/tools/0/inputSchema" }
+    },
+    {
+      "name": "design_polish",
+      "description": "Perform a focused visual polish pass for hierarchy, spacing, alignment, typography, color, motion and interaction states after the main structure already works.",
+      "inputSchema": { "$ref": "design_tools.json#/tools/0/inputSchema" }
+    }
+  ]
+}

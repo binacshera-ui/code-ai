@@ -23,6 +23,7 @@ It is designed for operators who want one clean control plane for conversations,
 - Mobile-first session workflow instead of a desktop-only wrapper.
 - Built-in queueing and scheduling, including deferred and recurring execution.
 - Topic grouping, project boards, reminders, anchors, skills, and reusable context tools.
+- Session-scoped Design Mode: Codex keeps control of code and behavior while a read-only Gemini specialist supplies implementation-ready visual direction, optionally informed by a full or cropped user canvas.
 - Cross-provider transfers and cross-user session copy flows.
 - Internal support mode with isolated storage and sandbox rules.
 - Trigger endpoints that can wake a normal session from an external system event.
@@ -34,6 +35,7 @@ It is designed for operators who want one clean control plane for conversations,
 - starting regular chats
 - forking or transferring sessions
 - attaching files, anchors, skills, reminders, and agent modes
+- opening a drawing canvas and activating Design Mode only for the session that needs Codex × Gemini visual collaboration
 - scheduling one-shot or recurring runs
 - tracking session-local subtasks and project assignments
 - inspecting changed files, tool traces, queue state, context usage, permissions, and rate limits
@@ -90,6 +92,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 `
 
 - `client/` — the mobile UI
 - `server/` — provider routing, queueing, parsing, and orchestration
+- `skills/` — session-scoped specialist workflows, exposed only by the modes that activate them
 - `deploy/code-ai/` — installer, export flow, and deployment assets
 - `scripts/` — repo-local utilities
 - `ecosystem.config.cjs` — PM2 process definition
