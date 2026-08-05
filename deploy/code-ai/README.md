@@ -24,6 +24,7 @@ It is designed for operators who want one clean control plane for conversations,
 - Built-in queueing and scheduling, including deferred and recurring execution.
 - Topic grouping, project boards, reminders, anchors, skills, and reusable context tools.
 - Session-scoped Design Mode: Codex keeps control of code and behavior while a read-only Gemini specialist supplies implementation-ready visual direction, optionally informed by a full or cropped user canvas.
+- Session-scoped UX Mode: Codex records a private thesis, Gemini produces a blind independent baseline, and the models may challenge one another for up to ten adversarial exchanges before a customer-stage product synthesis.
 - Cross-provider transfers and cross-user session copy flows.
 - Internal support mode with isolated storage and sandbox rules.
 - Trigger endpoints that can wake a normal session from an external system event.
@@ -36,6 +37,7 @@ It is designed for operators who want one clean control plane for conversations,
 - forking or transferring sessions
 - attaching files, anchors, skills, reminders, and agent modes
 - opening a drawing canvas and activating Design Mode only for the session that needs Codex × Gemini visual collaboration
+- activating UX Mode only for the session that needs structured journey, trust, behavioral, psychological, friction, or visual-hierarchy analysis
 - scheduling one-shot or recurring runs
 - tracking session-local subtasks and project assignments
 - inspecting changed files, tool traces, queue state, context usage, permissions, and rate limits

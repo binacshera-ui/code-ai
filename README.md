@@ -18,6 +18,7 @@
 - **Reusable context** with files, anchors, skills, reminders, and session-scoped restrictions.
 - **Real browser mode for Codex** with a live Chromium session and persisted profile.
 - **Codex × Gemini Design Mode** with a user canvas and deliberate `omit / full / region` visual handoffs chosen per consultation by Codex.
+- **Codex × Gemini UX Mode** with a blind independent baseline, a private Codex thesis, and up to ten adversarial product exchanges before customer-stage synthesis.
 - **Projects, topics, archives, and cross-user copy flows** for keeping large operator work organized.
 
 ## Product Tour
@@ -49,6 +50,7 @@
   - an agent-session orchestration flow,
   - a real browser session,
   - a session-scoped Gemini design consultation flow with a drawing canvas,
+  - a session-scoped UX debate that challenges assumptions across journeys, trust, psychology, behavioral economics, friction, and visual hierarchy,
   - or a restricted-edit session.
 
 ### Workspace Visibility
@@ -85,6 +87,7 @@
 - **Agent session mode** plans and tracks coordinated sub-agents for a larger initiative.
 - **Real browser mode** attaches a real Chromium toolplane to Codex for navigation, reading, forms, screenshots, console, network, and tab work.
 - **Design mode** exposes a dedicated skill and six MCP design tools only to the active session. Gemini returns visual specifications while Codex alone owns implementation, behavior, and code safety.
+- **UX mode** exposes seven session-scoped MCP tools. Codex first records its own private thesis, Gemini answers a neutral question without seeing that thesis, and only then can the two models challenge each other for up to ten evidence-based exchanges. The final synthesis is decomposed by customer stage, metrics, risks, experiments, and implementation sequence.
 
 ### Operate Like a Power User
 

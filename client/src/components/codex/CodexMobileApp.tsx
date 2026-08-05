@@ -95,6 +95,11 @@ import {
   type DesignModeProfileOption,
 } from './DesignModeDialog';
 import {
+  UxModeDialog,
+  type CodexSessionUxModeValue,
+  type UxModeProfileOption,
+} from './UxModeDialog';
+import {
   DEFAULT_THEME_PRESET_ID,
   THEME_PRESET_MAP,
   THEME_PRESETS,
@@ -672,6 +677,7 @@ interface CodexSessionBrowserMode {
 }
 
 type CodexSessionDesignMode = CodexSessionDesignModeValue;
+type CodexSessionUxMode = CodexSessionUxModeValue;
 
 interface CodexSessionTasksResponse {
   tasks: CodexSessionTask[];
@@ -691,6 +697,10 @@ interface CodexSessionBrowserModeResponse {
 
 interface CodexSessionDesignModeResponse {
   designMode: CodexSessionDesignMode;
+}
+
+interface CodexSessionUxModeResponse {
+  uxMode: CodexSessionUxMode;
 }
 
 interface CodexSessionBrowserViewerTab {
@@ -964,6 +974,17 @@ function createEmptySessionDesignMode(geminiProfileId = ''): CodexSessionDesignM
   };
 }
 
+function createEmptySessionUxMode(geminiProfileId = ''): CodexSessionUxMode {
+  return {
+    enabled: false,
+    geminiProfileId,
+    depth: 'deep',
+    productBrief: '',
+    targetAudience: '',
+    primaryOutcome: '',
+  };
+}
+
 function normalizeSessionBrowserModeValue(value: Partial<CodexSessionBrowserMode> | null | undefined): CodexSessionBrowserMode {
   const fallback = createEmptySessionBrowserMode();
   if (!value) {
@@ -1001,6 +1022,24 @@ function normalizeSessionDesignModeValue(
     brief: typeof value.brief === 'string' ? value.brief : '',
     canvasAvailable: value.canvasAvailable === true,
     canvasUpdatedAt: typeof value.canvasUpdatedAt === 'string' ? value.canvasUpdatedAt : null,
+  };
+}
+
+function normalizeSessionUxModeValue(
+  value: Partial<CodexSessionUxMode> | null | undefined,
+  fallbackGeminiProfileId = '',
+): CodexSessionUxMode {
+  const fallback = createEmptySessionUxMode(fallbackGeminiProfileId);
+  if (!value) return fallback;
+  return {
+    enabled: value.enabled === true,
+    geminiProfileId: typeof value.geminiProfileId === 'string' && value.geminiProfileId.trim()
+      ? value.geminiProfileId.trim()
+      : fallback.geminiProfileId,
+    depth: value.depth === 'focused' ? 'focused' : 'deep',
+    productBrief: typeof value.productBrief === 'string' ? value.productBrief : '',
+    targetAudience: typeof value.targetAudience === 'string' ? value.targetAudience : '',
+    primaryOutcome: typeof value.primaryOutcome === 'string' ? value.primaryOutcome : '',
   };
 }
 
@@ -2684,6 +2723,30 @@ async function saveSessionDesignMode(
     }),
   });
   return normalizeSessionDesignModeValue(data.designMode, designMode.geminiProfileId);
+}
+
+async function fetchSessionUxMode(
+  profileId: string,
+  sessionKey: string,
+  fallbackGeminiProfileId = '',
+): Promise<CodexSessionUxMode> {
+  const data = await fetchJson<CodexSessionUxModeResponse>(
+    `/api/codex/session-ux-mode?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
+  );
+  return normalizeSessionUxModeValue(data.uxMode, fallbackGeminiProfileId);
+}
+
+async function saveSessionUxMode(
+  profileId: string,
+  sessionKey: string,
+  uxMode: CodexSessionUxMode,
+): Promise<CodexSessionUxMode> {
+  const data = await fetchJson<CodexSessionUxModeResponse>('/api/codex/session-ux-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profileId, sessionKey, uxMode }),
+  });
+  return normalizeSessionUxModeValue(data.uxMode, uxMode.geminiProfileId);
 }
 
 async function fetchSessionDesignCanvasObjectUrl(
@@ -10168,6 +10231,7 @@ function ModePickerDialog({
   selectedActionRestriction,
   selectedBrowserMode,
   selectedDesignMode,
+  selectedUxMode,
   onClose,
   onToggleProfessionalMode,
   onToggleAnnotationsMode,
@@ -10176,6 +10240,7 @@ function ModePickerDialog({
   onOpenActionRestriction,
   onOpenBrowserMode,
   onOpenDesignMode,
+  onOpenUxMode,
 }: {
   isOpen: boolean;
   currentProvider: CodexProfile['provider'] | null;
@@ -10186,6 +10251,7 @@ function ModePickerDialog({
   selectedActionRestriction: CodexSessionActionRestriction | null;
   selectedBrowserMode: CodexSessionBrowserMode;
   selectedDesignMode: CodexSessionDesignMode;
+  selectedUxMode: CodexSessionUxMode;
   onClose: () => void;
   onToggleProfessionalMode: () => void;
   onToggleAnnotationsMode: () => void;
@@ -10194,6 +10260,7 @@ function ModePickerDialog({
   onOpenActionRestriction: () => void;
   onOpenBrowserMode: () => void;
   onOpenDesignMode: () => void;
+  onOpenUxMode: () => void;
 }) {
   if (!isOpen) {
     return null;
@@ -10270,6 +10337,41 @@ function ModePickerDialog({
               selectedDesignMode.enabled ? 'bg-fuchsia-100 text-fuchsia-700' : 'bg-white text-fuchsia-500'
             )}>
               <Palette className="h-4 w-4" />
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenUxMode}
+            disabled={currentProvider !== 'codex'}
+            className={cn(
+              'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
+              selectedUxMode.enabled
+                ? 'border-cyan-200 bg-cyan-50/80'
+                : 'border-slate-100 bg-slate-50/80 hover:border-cyan-200 hover:bg-cyan-50/50',
+              currentProvider !== 'codex' && 'cursor-not-allowed opacity-60 hover:border-slate-100 hover:bg-slate-50/80'
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-800">מצב חוויית משתמש</div>
+                {selectedUxMode.enabled && <span className="rounded-full bg-cyan-600 px-2 py-0.5 text-[10px] font-medium text-white">פעיל</span>}
+                <span className="rounded-full bg-white/90 px-2 py-0.5 text-[10px] font-medium text-slate-500">Codex × Gemini</span>
+              </div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">תשובה עצמאית עיוורת, עד 10 חילופי טיעון־נגד, ולבסוף מסע לקוח ומפת החלטות מוצר.</div>
+              <div className="mt-2 text-[11px] leading-5 text-slate-400">
+                {selectedUxMode.enabled
+                  ? `${selectedUxMode.depth === 'deep' ? 'דיון עמוק' : 'ממוקד'} · עמדה פרטית לפני Gemini`
+                  : currentProvider === 'codex'
+                    ? 'הסקיל והכלים נטענים רק לאחר הפעלת המצב.'
+                    : 'זמין רק כאשר הפרופיל הפעיל הוא Codex.'}
+              </div>
+            </div>
+            <div className={cn(
+              'flex h-10 w-10 shrink-0 items-center justify-center rounded-full',
+              selectedUxMode.enabled ? 'bg-cyan-100 text-cyan-700' : 'bg-white text-cyan-500'
+            )}>
+              <Brain className="h-4 w-4" />
             </div>
           </button>
 
@@ -12180,6 +12282,7 @@ export function CodexMobileApp() {
   const [isModePickerDialogOpen, setIsModePickerDialogOpen] = useState(false);
   const [isBrowserModeDialogOpen, setIsBrowserModeDialogOpen] = useState(false);
   const [isDesignModeDialogOpen, setIsDesignModeDialogOpen] = useState(false);
+  const [isUxModeDialogOpen, setIsUxModeDialogOpen] = useState(false);
   const [isAgentSessionDialogOpen, setIsAgentSessionDialogOpen] = useState(false);
   const [isTaskBoardOpen, setIsTaskBoardOpen] = useState(false);
   const [isSessionTaskDialogOpen, setIsSessionTaskDialogOpen] = useState(false);
@@ -12233,6 +12336,9 @@ export function CodexMobileApp() {
   const [sessionDesignMode, setSessionDesignMode] = useState<CodexSessionDesignMode>(
     createEmptySessionDesignMode()
   );
+  const [sessionUxMode, setSessionUxMode] = useState<CodexSessionUxMode>(
+    createEmptySessionUxMode()
+  );
   const [instructionDraft, setInstructionDraft] = useState('');
   const [projectAnchors, setProjectAnchors] = useState<CodexProjectAnchor[]>([]);
   const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
@@ -12245,9 +12351,11 @@ export function CodexMobileApp() {
   const [isSessionContextSelectionLoading, setIsSessionContextSelectionLoading] = useState(false);
   const [isSessionBrowserModeLoading, setIsSessionBrowserModeLoading] = useState(false);
   const [isSessionDesignModeLoading, setIsSessionDesignModeLoading] = useState(false);
+  const [isSessionUxModeLoading, setIsSessionUxModeLoading] = useState(false);
   const [isSessionContextSelectionSaving, setIsSessionContextSelectionSaving] = useState(false);
   const [isSessionBrowserModeSaving, setIsSessionBrowserModeSaving] = useState(false);
   const [isSessionDesignModeSaving, setIsSessionDesignModeSaving] = useState(false);
+  const [isSessionUxModeSaving, setIsSessionUxModeSaving] = useState(false);
   const [isBrowserViewerLoading, setIsBrowserViewerLoading] = useState(false);
   const [isProjectAnchorsLoading, setIsProjectAnchorsLoading] = useState(false);
   const [isUnifiedSkillsLoading, setIsUnifiedSkillsLoading] = useState(false);
@@ -12275,6 +12383,7 @@ export function CodexMobileApp() {
   const [actionRestrictionDraft, setActionRestrictionDraft] = useState<CodexSessionActionRestriction | null>(null);
   const [browserModeDraft, setBrowserModeDraft] = useState<CodexSessionBrowserMode>(createEmptySessionBrowserMode());
   const [designModeDraft, setDesignModeDraft] = useState<CodexSessionDesignMode>(createEmptySessionDesignMode());
+  const [uxModeDraft, setUxModeDraft] = useState<CodexSessionUxMode>(createEmptySessionUxMode());
   const [designCanvasObjectUrl, setDesignCanvasObjectUrl] = useState<string | null>(null);
   const [browserViewerState, setBrowserViewerState] = useState<CodexSessionBrowserViewerState | null>(null);
   const [browserViewerError, setBrowserViewerError] = useState<string | null>(null);
@@ -12389,6 +12498,7 @@ export function CodexMobileApp() {
   const latestSessionContextSelectionLoadTokenRef = useRef(0);
   const latestSessionBrowserModeLoadTokenRef = useRef(0);
   const latestSessionDesignModeLoadTokenRef = useRef(0);
+  const latestSessionUxModeLoadTokenRef = useRef(0);
   const latestProjectAnchorsLoadTokenRef = useRef(0);
   const latestUnifiedSkillsLoadTokenRef = useRef(0);
   const latestSessionRemindersLoadTokenRef = useRef(0);
@@ -12430,6 +12540,12 @@ export function CodexMobileApp() {
   const activeSessionCwd = selectedSession?.cwd || null;
   const currentProfile = visibleProfiles.find((profile) => profile.id === profileId) || null;
   const designGeminiProfiles = useMemo<DesignModeProfileOption[]>(
+    () => profiles
+      .filter((profile) => profile.provider === 'gemini' && profile.mode !== 'support')
+      .map((profile) => ({ id: profile.id, label: profile.label })),
+    [profiles]
+  );
+  const uxGeminiProfiles = useMemo<UxModeProfileOption[]>(
     () => profiles
       .filter((profile) => profile.provider === 'gemini' && profile.mode !== 'support')
       .map((profile) => ({ id: profile.id, label: profile.label })),
@@ -13863,6 +13979,10 @@ export function CodexMobileApp() {
     setDesignModeDraft(emptyDesignMode);
     setDesignCanvasObjectUrl(null);
     setIsDesignModeDialogOpen(false);
+    const emptyUxMode = createEmptySessionUxMode(uxGeminiProfiles[0]?.id || '');
+    setSessionUxMode(emptyUxMode);
+    setUxModeDraft(emptyUxMode);
+    setIsUxModeDialogOpen(false);
     clearDraftAttachments();
     setScheduledFor('');
     setIsScheduleOpen(false);
@@ -13974,6 +14094,14 @@ export function CodexMobileApp() {
     setDesignModeDraft(emptyDesignMode);
     setDesignCanvasObjectUrl(null);
     setIsDesignModeDialogOpen(false);
+    const emptyUxMode = createEmptySessionUxMode(
+      profiles.find((profile) => profile.id === nextProfileId && profile.provider === 'gemini')?.id
+        || profiles.find((profile) => profile.provider === 'gemini' && profile.mode !== 'support')?.id
+        || ''
+    );
+    setSessionUxMode(emptyUxMode);
+    setUxModeDraft(emptyUxMode);
+    setIsUxModeDialogOpen(false);
     setIsGamePickerOpen(false);
     setIsGameOpen(false);
     setIsRunnerGameOpen(false);
@@ -15611,6 +15739,53 @@ export function CodexMobileApp() {
     }
   }
 
+  async function loadCurrentSessionUxMode(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
+    const fallbackGeminiProfileId = uxGeminiProfiles[0]?.id || '';
+    if (!nextProfileId || !nextSessionKey) {
+      const emptyMode = createEmptySessionUxMode(fallbackGeminiProfileId);
+      setSessionUxMode(emptyMode);
+      setUxModeDraft(emptyMode);
+      return;
+    }
+
+    const requestToken = ++latestSessionUxModeLoadTokenRef.current;
+    setIsSessionUxModeLoading(true);
+    try {
+      const mode = await fetchSessionUxMode(nextProfileId, nextSessionKey, fallbackGeminiProfileId);
+      if (requestToken !== latestSessionUxModeLoadTokenRef.current) return;
+      setSessionUxMode(mode);
+      setUxModeDraft(mode);
+    } catch (uxModeError: any) {
+      if (requestToken === latestSessionUxModeLoadTokenRef.current) {
+        const emptyMode = createEmptySessionUxMode(fallbackGeminiProfileId);
+        setSessionUxMode(emptyMode);
+        setUxModeDraft(emptyMode);
+        setError(uxModeError.message || 'Failed to load UX mode');
+      }
+    } finally {
+      if (requestToken === latestSessionUxModeLoadTokenRef.current) {
+        setIsSessionUxModeLoading(false);
+      }
+    }
+  }
+
+  async function persistSessionUxMode(nextMode: CodexSessionUxMode): Promise<boolean> {
+    if (!profileId || !currentQueueKey) return false;
+    setIsSessionUxModeSaving(true);
+    try {
+      const savedMode = await saveSessionUxMode(profileId, currentQueueKey, nextMode);
+      setSessionUxMode(savedMode);
+      setUxModeDraft(savedMode);
+      return true;
+    } catch (uxModeError: any) {
+      setError(uxModeError.message || 'Failed to save UX mode');
+      void loadCurrentSessionUxMode(profileId, currentQueueKey);
+      return false;
+    } finally {
+      setIsSessionUxModeSaving(false);
+    }
+  }
+
   function buildNextSessionContextSelection(
     overrides: Partial<CodexSessionContextSelection>
   ): CodexSessionContextSelection {
@@ -15931,6 +16106,36 @@ export function CodexMobileApp() {
     const saved = await persistSessionDesignMode({ ...designModeDraft, enabled: false });
     if (saved) {
       setIsDesignModeDialogOpen(false);
+      setIsModePickerDialogOpen(false);
+    }
+  }
+
+  function openUxModeDialog() {
+    setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(false);
+    setUxModeDraft({
+      ...sessionUxMode,
+      geminiProfileId: sessionUxMode.geminiProfileId || uxGeminiProfiles[0]?.id || '',
+    });
+    setIsUxModeDialogOpen(true);
+  }
+
+  async function saveUxModeDraft() {
+    if (uxModeDraft.enabled && !uxModeDraft.geminiProfileId) {
+      setError('לא נמצא פרופיל Gemini זמין עבור מצב חוויית המשתמש.');
+      return;
+    }
+    const saved = await persistSessionUxMode(uxModeDraft);
+    if (saved) {
+      setIsUxModeDialogOpen(false);
+      setIsModePickerDialogOpen(false);
+    }
+  }
+
+  async function disableUxMode() {
+    const saved = await persistSessionUxMode({ ...uxModeDraft, enabled: false });
+    if (saved) {
+      setIsUxModeDialogOpen(false);
       setIsModePickerDialogOpen(false);
     }
   }
@@ -16886,6 +17091,7 @@ export function CodexMobileApp() {
     void loadCurrentSessionContextSelection(profileId, currentQueueKey);
     void loadCurrentSessionBrowserMode(profileId, currentQueueKey);
     void loadCurrentSessionDesignMode(profileId, currentQueueKey);
+    void loadCurrentSessionUxMode(profileId, currentQueueKey);
     void loadCurrentSessionReminders(profileId, currentQueueKey);
   }, [currentQueueKey, profileId]);
 
@@ -17690,7 +17896,7 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionDesignMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionDesignModeLoading) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionDesignMode.enabled || sessionUxMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionDesignModeLoading || isSessionUxModeLoading) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
                 {isProfessionalModeSelected && (
                   <button
@@ -17744,6 +17950,16 @@ export function CodexMobileApp() {
                     <span className="truncate">
                       מצב עיצוב · {sessionDesignMode.quality === 'deep' ? 'עמוק' : 'מאוזן'}{sessionDesignMode.canvasAvailable ? ' · קנבס' : ''}
                     </span>
+                  </button>
+                )}
+                {sessionUxMode.enabled && (
+                  <button
+                    type="button"
+                    onClick={openUxModeDialog}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-[11px] font-medium text-cyan-700 transition hover:bg-cyan-100"
+                  >
+                    <Brain className="h-3.5 w-3.5" />
+                    <span className="truncate">מצב UX · {sessionUxMode.depth === 'deep' ? 'דיון עמוק' : 'ממוקד'}</span>
                   </button>
                 )}
                 {selectedActionRestriction && (
@@ -19102,6 +19318,7 @@ export function CodexMobileApp() {
         selectedActionRestriction={selectedActionRestriction}
         selectedBrowserMode={sessionBrowserMode}
         selectedDesignMode={sessionDesignMode}
+        selectedUxMode={sessionUxMode}
         onClose={() => setIsModePickerDialogOpen(false)}
         onToggleProfessionalMode={toggleProfessionalMode}
         onToggleAnnotationsMode={toggleAnnotationsMode}
@@ -19110,6 +19327,7 @@ export function CodexMobileApp() {
         onOpenActionRestriction={openActionRestrictionDialog}
         onOpenBrowserMode={openBrowserModeDialog}
         onOpenDesignMode={openDesignModeDialog}
+        onOpenUxMode={openUxModeDialog}
       />
 
       <DesignModeDialog
@@ -19126,6 +19344,21 @@ export function CodexMobileApp() {
         onChange={setDesignModeDraft}
         onSave={saveDesignModeDraft}
         onDisable={disableDesignMode}
+      />
+
+      <UxModeDialog
+        isOpen={isUxModeDialogOpen}
+        provider={currentProfile?.provider || null}
+        value={uxModeDraft}
+        profiles={uxGeminiProfiles}
+        isSaving={isSessionUxModeSaving}
+        onClose={() => {
+          setIsUxModeDialogOpen(false);
+          setUxModeDraft(sessionUxMode);
+        }}
+        onChange={setUxModeDraft}
+        onSave={saveUxModeDraft}
+        onDisable={disableUxMode}
       />
 
       <BrowserModeDialog

@@ -10,6 +10,7 @@ import { CODEX_APP_CONFIG } from './config.js';
 import { startCodexQueueWorker } from './codexQueue.js';
 import { repairAllProviderHomesOwnership } from './providerRuntimeOwnership.js';
 import { shutdownCodexDesignModeBridge } from './codexDesignMode.js';
+import { shutdownCodexUxModeBridge } from './codexUxMode.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -188,7 +189,10 @@ server.once('listening', () => {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
-    void shutdownCodexDesignModeBridge().finally(() => {
+    void Promise.allSettled([
+      shutdownCodexDesignModeBridge(),
+      shutdownCodexUxModeBridge(),
+    ]).finally(() => {
       server.close(() => process.exit(0));
     });
   });

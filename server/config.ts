@@ -350,7 +350,7 @@ export const CODEX_APP_CONFIG = {
   allowAnyPaths: ALLOW_ANY_PATHS,
   allowedFileRoots: ALLOWED_FILE_ROOTS,
   searchableFileRoots: BASE_ALLOWED_FILE_ROOTS,
-  deviceAdminPassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || '403005Ashim@',
+  deviceAdminPassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || 'change-me-now',
   sessionSecret: process.env.SESSION_SECRET || 'code-ai-session-secret',
   databaseUrl: process.env.DATABASE_URL?.trim() || '',
   sessionCookieDomain: process.env.SESSION_COOKIE_DOMAIN?.trim() || '',

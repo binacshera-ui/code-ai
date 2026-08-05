@@ -37,6 +37,12 @@ import {
   rebindSessionDesignMode,
   type CodexSessionDesignMode,
 } from './codexDesignMode.js';
+import {
+  buildSessionUxModePromptAdditions,
+  consumeSessionUxModeAfterDispatch,
+  rebindSessionUxMode,
+  type CodexSessionUxMode,
+} from './codexUxMode.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
 import { getSessionTopicMap, setSessionTopic } from './codexSessionTopics.js';
 import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
@@ -86,6 +92,7 @@ export interface CodexQueueItem {
   actionRestriction: CodexSessionActionRestriction | null;
   browserMode: CodexSessionBrowserMode | null;
   designMode: CodexSessionDesignMode | null;
+  uxMode: CodexSessionUxMode | null;
   goalMode: CodexQueueGoalMode | null;
   forkContext?: CodexForkContext | null;
   attachments: CodexUploadedAttachment[];
@@ -130,6 +137,7 @@ interface EnqueueCodexQueueInput {
   actionRestriction?: CodexSessionActionRestriction | null;
   browserMode?: CodexSessionBrowserMode | null;
   designMode?: CodexSessionDesignMode | null;
+  uxMode?: CodexSessionUxMode | null;
   goalMode?: CodexQueueGoalMode | null;
   forkContext?: unknown;
   scheduledAt?: string | null;
@@ -259,6 +267,16 @@ function cloneQueueItem(item: CodexQueueItem): CodexQueueItem {
         canvasUpdatedAt: item.designMode.canvasUpdatedAt || null,
       }
       : null,
+    uxMode: item.uxMode
+      ? {
+        enabled: item.uxMode.enabled === true,
+        geminiProfileId: item.uxMode.geminiProfileId,
+        depth: item.uxMode.depth === 'focused' ? 'focused' : 'deep',
+        productBrief: item.uxMode.productBrief,
+        targetAudience: item.uxMode.targetAudience,
+        primaryOutcome: item.uxMode.primaryOutcome,
+      }
+      : null,
     goalMode: item.goalMode
       ? {
         chainId: item.goalMode.chainId,
@@ -329,6 +347,24 @@ function normalizeDesignMode(value: unknown): CodexSessionDesignMode | null {
     canvasUpdatedAt: typeof (value as any).canvasUpdatedAt === 'string'
       ? (value as any).canvasUpdatedAt
       : null,
+  };
+}
+
+function normalizeUxMode(value: unknown): CodexSessionUxMode | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const stringField = (name: string) => (
+    typeof (value as any)[name] === 'string' ? (value as any)[name] : ''
+  );
+  return {
+    enabled: (value as any).enabled === true,
+    geminiProfileId: stringField('geminiProfileId').trim(),
+    depth: (value as any).depth === 'focused' ? 'focused' : 'deep',
+    productBrief: stringField('productBrief'),
+    targetAudience: stringField('targetAudience'),
+    primaryOutcome: stringField('primaryOutcome'),
   };
 }
 
@@ -853,6 +889,7 @@ async function loadState() {
         actionRestriction: normalizeActionRestriction(item.actionRestriction),
         browserMode: normalizeBrowserMode(item.browserMode),
         designMode: normalizeDesignMode(item.designMode),
+        uxMode: normalizeUxMode(item.uxMode),
         goalMode: normalizeGoalMode(item.goalMode),
         forkContext: normalizeForkContext(item.forkContext),
         scheduleMode: item.scheduleMode === 'recurring' ? 'recurring' : 'once',
@@ -1224,11 +1261,15 @@ async function processQueueItem(item: CodexQueueItem) {
   const designModePrompt = item.designMode
     ? buildSessionDesignModePromptAdditions(item.designMode)
     : null;
+  const uxModePrompt = item.uxMode
+    ? buildSessionUxModePromptAdditions(item.uxMode)
+    : null;
   const effectiveRunPrompt = [
     runPrompt,
     restrictionPrompt?.trim() || null,
     browserModePrompt?.trim() || null,
     designModePrompt?.trim() || null,
+    uxModePrompt?.trim() || null,
   ]
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     .join('\n\n');
@@ -1285,6 +1326,9 @@ async function processQueueItem(item: CodexQueueItem) {
         designMode: item.designMode,
         designModeProfileId: item.sourceProfileId || item.profileId,
         designModeSessionKey: resolvedSessionId || item.queueKey,
+        uxMode: item.uxMode,
+        uxModeProfileId: item.sourceProfileId || item.profileId,
+        uxModeSessionKey: resolvedSessionId || item.queueKey,
       }
     );
 
@@ -1292,16 +1336,21 @@ async function processQueueItem(item: CodexQueueItem) {
       await copySessionSidebarMetadataToRecoveredSession(item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionBrowserMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionDesignMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
+      await rebindSessionUxMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
     }
 
     await rebindQueueItemsToSession(item.profileId, item.queueKey, result.sessionId);
     await rebindSessionBrowserMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionDesignMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
+    await rebindSessionUxMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     if (item.browserMode && item.browserMode.enabled !== true) {
       await consumeSessionBrowserModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
     }
     if (item.designMode && item.designMode.enabled !== true) {
       await consumeSessionDesignModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
+    }
+    if (item.uxMode && item.uxMode.enabled !== true) {
+      await consumeSessionUxModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
     }
 
     if (isRecurringItem(item)) {
@@ -1554,6 +1603,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
     actionRestriction: normalizeActionRestriction(input.actionRestriction),
     browserMode: normalizeBrowserMode(input.browserMode),
     designMode: normalizeDesignMode(input.designMode),
+    uxMode: normalizeUxMode(input.uxMode),
     goalMode: normalizeGoalMode(input.goalMode),
     forkContext: normalizeForkContext(input.forkContext),
     attachments: (input.attachments || []).map((attachment) => ({ ...attachment })),

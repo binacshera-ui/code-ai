@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "ux_customer_journey",
+      "description": "Begin an independent Gemini assessment of an end-to-end customer journey. Codex MUST first provide its own private position, which is recorded locally but never sent to Gemini on this first call. Gemini receives only the neutral product question and context.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request", "codex_position"],
+        "properties": {
+          "request": { "type": "string", "description": "A neutral, concrete UX/product question for independent assessment. Do not embed Codex's preferred answer here." },
+          "codex_position": { "type": "string", "description": "Codex's private initial thesis. The server persists it for debate but MUST NOT send it to Gemini in this initial consultation." },
+          "product_context": { "type": "string", "description": "What the product does, relevant feature and business context." },
+          "target_audience": { "type": "string", "description": "Primary customer segment, needs, constraints and expertise." },
+          "journey_scope": { "type": "string", "enum": ["end_to_end", "acquisition", "onboarding", "activation", "core_value", "retention", "recovery", "advocacy"] },
+          "file_paths": { "type": "array", "maxItems": 24, "items": { "type": "string" }, "description": "Smallest relevant source, copy or analytics-contract files inside the session workspace." },
+          "reference_image_paths": { "type": "array", "maxItems": 6, "items": { "type": "string" }, "description": "Optional screenshots or visual references inside the workspace or authenticated uploads." },
+          "constraints": { "type": "array", "maxItems": 30, "items": { "type": "string" } },
+          "current_behavior": { "type": "array", "maxItems": 40, "items": { "type": "string" }, "description": "Capabilities and semantics that must survive." },
+          "success_metrics": { "type": "array", "maxItems": 20, "items": { "type": "string" }, "description": "Customer and business success signals." },
+          "assumptions": { "type": "array", "maxItems": 20, "items": { "type": "string" }, "description": "Items that need validation rather than fabricated certainty." },
+          "target_platform": { "type": "string", "enum": ["responsive-web", "mobile-web", "desktop-web", "native-like-web", "multi-surface"] },
+          "target_direction": { "type": "string", "enum": ["rtl", "ltr", "mixed", "auto"] }
+        }
+      }
+    },
+    {
+      "name": "ux_behavioral_economics",
+      "description": "Begin an independent Gemini assessment through behavioral economics: choice architecture, cognitive load, defaults, progress, commitment, loss framing, social proof, timing and feedback. Recommend only transparent, reversible, customer-beneficial behavior; never dark patterns.",
+      "inputSchema": { "$ref": "ux_tools.json#/tools/0/inputSchema" }
+    },
+    {
+      "name": "ux_psychology_and_trust",
+      "description": "Begin an independent Gemini assessment of motivation, mental models, emotion, anxiety, trust, perceived control, accessibility and recovery. Gemini's first response remains independent of Codex's private thesis.",
+      "inputSchema": { "$ref": "ux_tools.json#/tools/0/inputSchema" }
+    },
+    {
+      "name": "ux_visual_hierarchy",
+      "description": "Begin an independent Gemini assessment of information architecture, visual cognition, hierarchy, reading order, attention, content density and RTL/LTR comprehension. Preserve product behavior and provide product-level visual rules.",
+      "inputSchema": { "$ref": "ux_tools.json#/tools/0/inputSchema" }
+    },
+    {
+      "name": "ux_friction_audit",
+      "description": "Begin an independent Gemini audit of one flow's ambiguity, effort, waiting, errors, drop-off, accessibility gaps and recovery failures. Rank friction by customer harm and expected product impact.",
+      "inputSchema": { "$ref": "ux_tools.json#/tools/0/inputSchema" }
+    },
+    {
+      "name": "ux_debate_turn",
+      "description": "Continue a recorded Codex × Gemini UX debate. Give Gemini Codex's counterargument only after Gemini has independently answered the neutral first question. The blind opening is not a debate exchange: up to ten explicit Codex-counterargument → Gemini-response exchanges are allowed. Stop early only when the convergence test is explicit.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["debate_id", "codex_counterargument", "decision_question"],
+        "properties": {
+          "debate_id": { "type": "string", "description": "ID returned by the initial UX consultation." },
+          "codex_counterargument": { "type": "string", "description": "Codex's reasoned disagreement, evidence or alternative. It will be sent to Gemini in this follow-up turn." },
+          "decision_question": { "type": "string", "description": "The precise product decision that remains contested." },
+          "new_evidence": { "type": "array", "maxItems": 20, "items": { "type": "string" } },
+          "convergence_test": { "type": "string", "description": "Observable condition that would make the debate sufficiently resolved." }
+        }
+      }
+    },
+    {
+      "name": "ux_product_synthesis",
+      "description": "Synthesize one or more completed Codex × Gemini debates into the final product-level UX plan. Return a clear, decomposed customer-stage journey with decisions, behavioral and psychological rationale, visual guidance, risks, metrics, experiments and implementation sequencing.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request", "debate_ids"],
+        "properties": {
+          "request": { "type": "string", "description": "Final product outcome and the decision to synthesize." },
+          "debate_ids": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string" }, "description": "Debates to reconcile into the final customer-stage plan." },
+          "constraints": { "type": "array", "maxItems": 30, "items": { "type": "string" } },
+          "success_metrics": { "type": "array", "maxItems": 20, "items": { "type": "string" } },
+          "implementation_context": { "type": "string", "description": "Current product constraints or technical sequencing that the synthesis must respect." }
+        }
+      }
+    }
+  ]
+}

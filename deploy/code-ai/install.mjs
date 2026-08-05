@@ -99,7 +99,7 @@ function parseArgs(argv) {
     databaseUrl: process.env.DATABASE_URL || '',
     sessionSecret: process.env.SESSION_SECRET || 'code-ai-session-secret',
     cookieDomain: process.env.SESSION_COOKIE_DOMAIN || '',
-    devicePassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || '403005Ashim@',
+    devicePassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || 'change-me-now',
     codexBin: process.env.CODEX_BIN || getDefaultCodexBin(),
     skipNpmInstall: false,
     skipBuild: false,

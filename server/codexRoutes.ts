@@ -130,6 +130,16 @@ import {
   validateSessionDesignMode,
 } from './codexDesignMode.js';
 import {
+  buildSessionUxModePromptAdditions,
+  consumeSessionUxModeAfterDispatch,
+  deleteSessionUxMode,
+  getSessionUxMode,
+  getSessionUxModeRecord,
+  rebindSessionUxMode,
+  setSessionUxMode,
+  validateSessionUxMode,
+} from './codexUxMode.js';
+import {
   closeSessionBrowserViewer,
   openSessionBrowserViewer,
   performSessionBrowserViewerAction,
@@ -1003,6 +1013,7 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
     deleteSessionReminders(profileId, sessionId),
     deleteSessionBrowserMode(profileId, sessionId),
     deleteSessionDesignMode(profileId, sessionId),
+    deleteSessionUxMode(profileId, sessionId),
     deleteSessionTrigger(profileId, sessionId),
     deleteForkSessionMetadata(sessionId),
     deleteSupportSessionRecord(profileId, sessionId),
@@ -2669,6 +2680,10 @@ router.post('/session-triggers/:triggerId/fire', async (req, res) => {
     const designMode = designModeRecord
       ? await getSessionDesignMode(trigger.profileId, trigger.sessionId)
       : null;
+    const uxModeRecord = await getSessionUxModeRecord(trigger.profileId, trigger.sessionId);
+    const uxMode = uxModeRecord
+      ? await getSessionUxMode(trigger.profileId, trigger.sessionId)
+      : null;
     const triggerPrompt = buildSessionTriggerPrompt(trigger.label, req.body);
     const item = await enqueueCodexQueueItem({
       profileId: trigger.profileId,
@@ -2684,6 +2699,7 @@ router.post('/session-triggers/:triggerId/fire', async (req, res) => {
       actionRestriction: sessionContextSelection.actionRestriction,
       browserMode,
       designMode,
+      uxMode,
     });
 
     await recordSessionTriggerInvocation(trigger.profileId, trigger.sessionId, triggerPrompt.payloadPreview);
@@ -2942,6 +2958,50 @@ router.post('/session-design-mode', requireCodexAccess, async (req, res) => {
     res.json({ designMode });
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to update session design mode' });
+  }
+});
+
+router.get('/session-ux-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const uxMode = await getSessionUxMode(profileId, sessionKey);
+    res.json({ uxMode });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session UX mode' });
+  }
+});
+
+router.post('/session-ux-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const uxModeInput = await validateSessionUxMode(configuredProfile, req.body?.uxMode || null);
+    const uxMode = await setSessionUxMode(profileId, sessionKey, uxModeInput);
+    res.json({ uxMode });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update session UX mode' });
   }
 });
 
@@ -3984,12 +4044,22 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     const sessionDesignMode = sessionDesignModeRecord
       ? await getSessionDesignMode(visibleProfileId, sessionContextKey)
       : null;
+    const sessionUxModeRecord = sessionContextKey
+      ? await getSessionUxModeRecord(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionUxMode = sessionUxModeRecord
+      ? await getSessionUxMode(visibleProfileId, sessionContextKey)
+      : null;
     if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
       return;
     }
     if (sessionDesignModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב עיצוב זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionUxModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב חוויית משתמש זמין כרגע רק לסשני Codex.' });
       return;
     }
     const contextCwd = cwd || (
@@ -4030,6 +4100,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       }
       if (sessionDesignModeRecord?.enabled) {
         res.status(400).json({ error: 'לא ניתן לשלב מצב עיצוב עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionUxModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב חוויית משתמש עם מצב סוכנים באותו שלב.' });
         return;
       }
       const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
@@ -4108,6 +4182,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           actionRestriction: sessionContextSelection.actionRestriction,
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -4161,6 +4236,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           actionRestriction: sessionContextSelection.actionRestriction,
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -4205,6 +4281,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           actionRestriction: sessionContextSelection.actionRestriction,
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -4248,6 +4325,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       actionRestriction: sessionContextSelection.actionRestriction,
       browserMode: sessionBrowserMode,
       designMode: sessionDesignMode,
+      uxMode: sessionUxMode,
       forkContext: hydratedForkDraft.forkContext,
       scheduledAt,
       attachments,
@@ -4420,12 +4498,20 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const sessionDesignMode = sessionDesignModeRecord
       ? await getSessionDesignMode(visibleProfileId, sessionContextKey)
       : null;
+    const sessionUxModeRecord = await getSessionUxModeRecord(visibleProfileId, sessionContextKey);
+    const sessionUxMode = sessionUxModeRecord
+      ? await getSessionUxMode(visibleProfileId, sessionContextKey)
+      : null;
     if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
       return;
     }
     if (sessionDesignModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב עיצוב זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionUxModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב חוויית משתמש זמין כרגע רק לסשני Codex.' });
       return;
     }
     const contextCwd = cwd || (sessionId
@@ -4442,11 +4528,15 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const designModePromptSuffix = sessionDesignModeRecord
       ? buildSessionDesignModePromptAdditions(sessionDesignModeRecord)
       : null;
+    const uxModePromptSuffix = sessionUxModeRecord
+      ? buildSessionUxModePromptAdditions(sessionUxModeRecord)
+      : null;
     const providerPromptWithAdditions = [
       providerPrompt,
       additionsPromptSuffix,
       browserModePromptSuffix,
       designModePromptSuffix,
+      uxModePromptSuffix,
     ]
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .join('\n\n');
@@ -4480,6 +4570,10 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       }
       if (sessionDesignModeRecord?.enabled) {
         res.status(400).json({ error: 'לא ניתן לשלב מצב עיצוב עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionUxModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב חוויית משתמש עם מצב סוכנים באותו שלב.' });
         return;
       }
       const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
@@ -4612,6 +4706,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           actionRestriction: sessionContextSelection.actionRestriction,
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           attachments: index === 0 ? attachments : [],
         });
@@ -4673,6 +4768,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           actionRestriction: sessionContextSelection.actionRestriction,
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           attachments: index === 0 ? attachments : [],
         });
@@ -4725,6 +4821,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           actionRestriction: sessionContextSelection.actionRestriction,
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           attachments: index === 0 ? attachments : [],
           goalMode: {
@@ -4762,6 +4859,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         designMode: sessionDesignMode,
         designModeProfileId: visibleProfileId,
         designModeSessionKey: supportSessionKey,
+        uxMode: sessionUxMode,
+        uxModeProfileId: visibleProfileId,
+        uxModeSessionKey: supportSessionKey,
       });
       if (sessionId && result.sessionId !== sessionId) {
         const sourceSession = await getAgentSessionDetail(sessionId, visibleProfileId, {
@@ -4780,6 +4880,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         await rebindSessionReminders(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionBrowserMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionDesignMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionUxMode(visibleProfileId, sessionId, result.sessionId);
       }
       if (!sessionId && supportSessionKey !== result.sessionId) {
         await rebindSessionInstruction(visibleProfileId, supportSessionKey, result.sessionId);
@@ -4787,6 +4888,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         await rebindSessionReminders(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionBrowserMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionDesignMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionUxMode(visibleProfileId, supportSessionKey, result.sessionId);
       }
       if (supportEnvelope && supportSessionKey !== result.sessionId) {
         await rebindSupportSessionRecord(visibleProfileId, supportSessionKey, result.sessionId);
@@ -4796,6 +4898,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       }
       if (sessionDesignModeRecord && sessionDesignModeRecord.enabled !== true) {
         await consumeSessionDesignModeAfterDispatch(visibleProfileId, result.sessionId);
+      }
+      if (sessionUxModeRecord && sessionUxModeRecord.enabled !== true) {
+        await consumeSessionUxModeAfterDispatch(visibleProfileId, result.sessionId);
       }
       await deleteSessionContextSelection(visibleProfileId, supportSessionKey);
       const session = await decorateSessionDetailForClient(
@@ -4835,6 +4940,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       actionRestriction: sessionContextSelection.actionRestriction,
       browserMode: sessionBrowserMode,
       designMode: sessionDesignMode,
+      uxMode: sessionUxMode,
       forkContext: hydratedForkDraft.forkContext,
       attachments,
       recurrence,
