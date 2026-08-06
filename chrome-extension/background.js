@@ -8,6 +8,7 @@ const requestByTab = new Map();
 const attachedTabs = new Set();
 const selections = new Map();
 const pendingPickers = new Map();
+const sessionSyncs = new Map();
 let settings = null;
 let socket = null;
 let connected = false;
@@ -43,38 +44,41 @@ async function storeSettings(next) {
 
 async function installAuthRules(next) {
   await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [AUTH_RULE_ID, FRAME_RULE_ID] });
-  if (!next?.deviceId || !next?.deviceToken || !next?.controlOrigin) return;
+  if (!next?.controlOrigin) return;
   const origin = new URL(next.controlOrigin);
   const requestDomains = [origin.hostname];
+  const addRules = [
+    {
+      id: FRAME_RULE_ID, priority: 10,
+      action: {
+        type: 'modifyHeaders',
+        responseHeaders: [
+          { header: 'x-frame-options', operation: 'remove' },
+          { header: 'content-security-policy', operation: 'remove' },
+        ],
+      },
+      condition: { requestDomains, initiatorDomains: [chrome.runtime.id], resourceTypes: ['sub_frame'] },
+    },
+  ];
+  if (next.deviceId && next.deviceToken) {
+    addRules.unshift({
+      id: AUTH_RULE_ID, priority: 10,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [
+          { header: 'x-code-ai-extension-device', operation: 'set', value: next.deviceId },
+          { header: 'x-code-ai-extension-token', operation: 'set', value: next.deviceToken },
+        ],
+      },
+      condition: {
+        requestDomains,
+        initiatorDomains: [chrome.runtime.id, origin.hostname],
+        resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'script', 'stylesheet', 'image', 'font', 'media', 'other'],
+      },
+    });
+  }
   await chrome.declarativeNetRequest.updateDynamicRules({
-    addRules: [
-      {
-        id: AUTH_RULE_ID, priority: 10,
-        action: {
-          type: 'modifyHeaders',
-          requestHeaders: [
-            { header: 'x-code-ai-extension-device', operation: 'set', value: next.deviceId },
-            { header: 'x-code-ai-extension-token', operation: 'set', value: next.deviceToken },
-          ],
-        },
-        condition: {
-          requestDomains,
-          initiatorDomains: [chrome.runtime.id, origin.hostname],
-          resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'script', 'stylesheet', 'image', 'font', 'media', 'other'],
-        },
-      },
-      {
-        id: FRAME_RULE_ID, priority: 10,
-        action: {
-          type: 'modifyHeaders',
-          responseHeaders: [
-            { header: 'x-frame-options', operation: 'remove' },
-            { header: 'content-security-policy', operation: 'remove' },
-          ],
-        },
-        condition: { requestDomains, initiatorDomains: [chrome.runtime.id], resourceTypes: ['sub_frame'] },
-      },
-    ],
+    addRules,
   });
 }
 
@@ -91,7 +95,13 @@ function broadcast(message) {
 }
 
 function statusSnapshot() {
-  return { paired: Boolean(settings?.deviceId && settings?.deviceToken), connected, deviceName: settings?.deviceName || null };
+  return {
+    paired: Boolean(settings?.deviceId && settings?.deviceToken),
+    connected,
+    deviceId: settings?.deviceId || null,
+    deviceName: settings?.deviceName || null,
+    controlOrigin: settings?.controlOrigin || null,
+  };
 }
 
 function broadcastStatus() {
@@ -279,14 +289,37 @@ async function inspectSelector(tab, selector) {
 
 async function startPicker(tab, mode, prompt, timeoutMs = 60000) {
   assertScriptable(tab);
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['contentScript.js'] });
+  await ensurePickerContentScript(tab.id);
   const requestId = crypto.randomUUID();
+  const acknowledgement = await chrome.tabs.sendMessage(tab.id, {
+    type: 'CODE_AI_PICKER_START', requestId, mode, prompt,
+  }).catch((error) => {
+    throw errorWithCode(
+      `לא ניתן לפתוח את בורר הרכיבים בטאב הזה: ${error?.message || error}`,
+      'CONTENT_SCRIPT_UNAVAILABLE',
+    );
+  });
+  if (!acknowledgement?.ok) {
+    throw errorWithCode('הדף לא אישר את פתיחת בורר הרכיבים.', 'CONTENT_SCRIPT_UNAVAILABLE');
+  }
   const promise = new Promise((resolve, reject) => {
     const timer = setTimeout(() => { pendingPickers.delete(requestId); reject(errorWithCode('Visual selection timed out.', 'TIMEOUT')); }, Math.min(120000, Math.max(5000, timeoutMs)));
     pendingPickers.set(requestId, { resolve, reject, timer, tabId: tab.id });
   });
-  await chrome.tabs.sendMessage(tab.id, { type: 'CODE_AI_PICKER_START', requestId, mode, prompt });
   return promise;
+}
+
+async function ensurePickerContentScript(tabId) {
+  const ping = async () => chrome.tabs.sendMessage(tabId, { type: 'CODE_AI_PICKER_PING' })
+    .then((response) => response?.ready === true)
+    .catch(() => false);
+  if (await ping()) return;
+  await chrome.scripting.executeScript({ target: { tabId }, files: ['contentScript.js'] });
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    if (await ping()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+  }
+  throw errorWithCode('הדף לא קיבל את רכיב הבחירה של CODE-AI. רענן את הטאב ונסה שוב.', 'CONTENT_SCRIPT_UNAVAILABLE');
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -307,6 +340,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'PANEL_GET_STATE') {
     sendResponse({ ...statusSnapshot(), settings, pendingApproval: currentApproval() });
     return;
+  }
+  if (message?.type === 'PANEL_CONFIGURE_ORIGIN') {
+    void configureControlOrigin(message.controlOrigin)
+      .then(() => sendResponse({ ok: true, ...statusSnapshot(), settings }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+  if (message?.type === 'ENROLL_DEVICE') {
+    void enrollDevice(message)
+      .then((value) => sendResponse({ ok: true, settings: value, ...statusSnapshot() }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+  if (message?.type === 'SYNC_ACTIVE_SESSION') {
+    void syncActiveSession(message.context)
+      .then((value) => sendResponse({ ok: true, ...value }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error), code: error.code || 'SYNC_FAILED' }));
+    return true;
   }
   if (message?.type === 'PAIR_DEVICE') {
     void pairDevice(message).then((value) => sendResponse({ ok: true, settings: value })).catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
@@ -348,9 +399,145 @@ async function pairDevice(input) {
   await storeSettings(next); connectBridge(); return next;
 }
 
+async function configureControlOrigin(rawOrigin) {
+  const parsed = new URL(String(rawOrigin || ''));
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('כתובת CODE-AI חייבת להשתמש ב־http או https.');
+  const controlOrigin = parsed.origin;
+  if (settings?.controlOrigin === controlOrigin) {
+    await installAuthRules(settings);
+    return settings;
+  }
+  if (settings?.deviceToken) {
+    throw new Error('כתובת CODE-AI של המכשיר המחובר אינה תואמת לחבילת התוסף. אפס את אישור המכשיר תחילה.');
+  }
+  const next = { controlOrigin, deviceName: settings?.deviceName || 'Chrome במחשב האישי' };
+  await storeSettings(next);
+  return next;
+}
+
+async function enrollDevice(input) {
+  await configureControlOrigin(input.controlOrigin);
+  const controlOrigin = settings.controlOrigin;
+  const response = await fetch(`${controlOrigin}/api/codex/browser-extension/enrollment/claim`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      enrollmentToken: input.enrollmentToken,
+      deviceName: String(input.deviceName || settings.deviceName || '').trim() || 'Chrome במחשב האישי',
+      extensionId: chrome.runtime.id,
+      platform: navigator.platform,
+      browserVersion: navigator.userAgent,
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `Device enrollment failed (${response.status})`);
+  const next = {
+    controlOrigin,
+    deviceName: payload.device?.name || input.deviceName || settings.deviceName,
+    deviceId: payload.deviceId,
+    deviceToken: payload.deviceToken,
+  };
+  await storeSettings(next);
+  connectBridge();
+  broadcastStatus();
+  return next;
+}
+
+async function controlRequest(pathname, init = {}, serverId = 'local') {
+  if (!settings?.deviceId || !settings?.deviceToken || !settings?.controlOrigin) {
+    throw errorWithCode('יש לאשר את המכשיר פעם אחת לפני חיבור כלי הדפדפן.', 'DEVICE_NOT_ENROLLED');
+  }
+  const headers = new Headers(init.headers || {});
+  headers.set('x-code-ai-extension-device', settings.deviceId);
+  headers.set('x-code-ai-extension-token', settings.deviceToken);
+  if (serverId && serverId !== 'local') headers.set('x-code-ai-server-id', serverId);
+  if (init.body !== undefined && !headers.has('content-type')) headers.set('content-type', 'application/json');
+  const response = await fetch(`${settings.controlOrigin}${pathname}`, { ...init, headers });
+  const contentType = response.headers.get('content-type') || '';
+  const payload = contentType.includes('application/json')
+    ? await response.json().catch(() => ({}))
+    : { error: await response.text().catch(() => '') };
+  if (!response.ok) throw errorWithCode(payload.error || `CODE-AI request failed (${response.status})`, 'CONTROL_REQUEST_FAILED', { status: response.status });
+  return payload;
+}
+
+async function syncActiveSession(context) {
+  if (!context?.authenticated || !context?.deviceUnlocked || context.provider !== 'codex') {
+    return { skipped: true, reason: 'inactive_context' };
+  }
+  const profileId = String(context.profileId || '').trim();
+  const sessionKey = String(context.sessionKey || '').trim();
+  const serverId = String(context.serverId || 'local').trim().toLowerCase() || 'local';
+  if (!profileId || !sessionKey) return { skipped: true, reason: 'missing_session' };
+  const syncKey = `${serverId}:${profileId}:${sessionKey}:${settings?.deviceId || ''}`;
+  if (sessionSyncs.has(syncKey)) return sessionSyncs.get(syncKey);
+  const operation = (async () => {
+    const query = `?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`;
+    const currentPayload = await controlRequest(`/api/codex/session-personal-chrome-mode${query}`, {}, serverId);
+    const current = currentPayload.personalChromeMode || {};
+    if (current.enabled === true && current.deviceId === settings.deviceId && current.bindingId) {
+      return { skipped: false, reused: true, serverId, profileId, sessionKey, personalChromeMode: current };
+    }
+
+    const bindingPayload = await controlRequest('/api/codex/browser-extension/bindings', {
+      method: 'POST',
+      body: JSON.stringify({
+        deviceId: settings.deviceId,
+        profileId,
+        sessionKey,
+        scopes: ['read', 'write', 'javascript', 'upload', 'ports'],
+        approvalPolicy: 'risky',
+      }),
+    });
+    const bindingId = bindingPayload.binding?.id;
+    try {
+      const savedPayload = await controlRequest('/api/codex/session-personal-chrome-mode', {
+        method: 'POST',
+        body: JSON.stringify({
+          profileId,
+          sessionKey,
+          personalChromeMode: {
+            enabled: true,
+            deviceId: settings.deviceId,
+            deviceName: settings.deviceName || 'Chrome במחשב האישי',
+            tabId: null,
+            approvalPolicy: 'risky',
+            allowJavascript: true,
+            allowUploads: true,
+            allowPorts: true,
+            bindingId,
+            bindingToken: bindingPayload.bindingToken,
+            controlUrl: bindingPayload.controlUrl || settings.controlOrigin,
+          },
+        }),
+      }, serverId);
+      if (current.bindingId && current.bindingId !== bindingId) {
+        await controlRequest(`/api/codex/browser-extension/bindings/${encodeURIComponent(current.bindingId)}`, { method: 'DELETE' }).catch(() => undefined);
+      }
+      return { skipped: false, reused: false, serverId, profileId, sessionKey, personalChromeMode: savedPayload.personalChromeMode };
+    } catch (error) {
+      if (bindingId) {
+        await controlRequest(`/api/codex/browser-extension/bindings/${encodeURIComponent(bindingId)}`, { method: 'DELETE' }).catch(() => undefined);
+      }
+      throw error;
+    }
+  })().finally(() => sessionSyncs.delete(syncKey));
+  sessionSyncs.set(syncKey, operation);
+  return operation;
+}
+
 async function unpairDevice() {
+  if (settings?.deviceId && settings?.deviceToken) {
+    await controlRequest(`/api/codex/browser-extension/devices/${encodeURIComponent(settings.deviceId)}`, { method: 'DELETE' })
+      .catch(() => undefined);
+  }
   clearTimeout(reconnectTimer); reconnectTimer = null; socket?.close(1000, 'Unpaired'); socket = null; connected = false;
-  clearPendingApprovals(); settings = null; await chrome.storage.local.remove(STORAGE_KEY); await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [AUTH_RULE_ID, FRAME_RULE_ID] }); broadcastStatus();
+  clearPendingApprovals();
+  const next = settings?.controlOrigin ? { controlOrigin: settings.controlOrigin, deviceName: settings.deviceName || 'Chrome במחשב האישי' } : null;
+  settings = next;
+  if (next) await chrome.storage.local.set({ [STORAGE_KEY]: next });
+  else await chrome.storage.local.remove(STORAGE_KEY);
+  await installAuthRules(next);
+  broadcastStatus();
 }
 
 async function runCommand(command) {

@@ -223,6 +223,7 @@ import {
 } from './remoteHostRegistry.js';
 import {
   authenticatePersonalChromeUiToken,
+  issuePersonalChromeEnrollmentToken,
   readPersonalChromeUiCredentials,
 } from './personalChromeBridge.js';
 
@@ -1551,11 +1552,27 @@ function buildDeletedTurnPromptPrefix(
   ].filter(Boolean).join('\n\n');
 }
 
-router.get('/auth/status', (req, res) => {
+router.get('/auth/status', async (req, res) => {
+  const extensionCredentials = readPersonalChromeUiCredentials(req);
+  if (extensionCredentials) {
+    try {
+      const extensionAuth = await authenticatePersonalChromeUiToken(
+        extensionCredentials.deviceId,
+        extensionCredentials.token,
+      );
+      if (extensionAuth) {
+        res.json(extensionAuth);
+        return;
+      }
+    } catch (error: any) {
+      res.status(500).json({ authenticated: false, error: error?.message || 'Extension authentication failed' });
+      return;
+    }
+  }
   res.json(readAuthenticatedUser(req));
 });
 
-router.post('/device-unlock', (req, res) => {
+router.post('/device-unlock', async (req, res) => {
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
 
   if (password !== CODEX_APP_CONFIG.deviceAdminPassword) {
@@ -1572,10 +1589,22 @@ router.post('/device-unlock', (req, res) => {
     path: '/',
   });
 
-  res.json({
-    unlocked: true,
-    deviceUnlocked: true,
-  });
+  const authState = readAuthenticatedUser(req);
+  (req as any).codexAuth = { ...authState, deviceUnlocked: true };
+
+  try {
+    const enrollment = req.body?.extensionPanel === true && authState.authenticated
+      ? await issuePersonalChromeEnrollmentToken(req)
+      : null;
+    res.json({
+      unlocked: true,
+      deviceUnlocked: true,
+      extensionEnrollmentToken: enrollment?.token || null,
+      extensionEnrollmentExpiresAt: enrollment?.expiresAt || null,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'Failed to authorize the browser extension' });
+  }
 });
 
 router.post('/logout', (req, res) => {

@@ -11,7 +11,7 @@ function usage() {
   console.log(`Usage: node scripts/package-personal-chrome-extension.mjs --output <directory> [--control-origin <origin>] [--force]
 
 Creates a ready-to-load unpacked Chrome extension directory. The source package
-stays environment-neutral; --control-origin only pre-fills the generated copy.
+stays environment-neutral; --control-origin configures the generated Side Panel.
 `);
 }
 
@@ -59,9 +59,9 @@ async function main() {
 
   const panelPath = path.join(output, 'panel.html');
   const panel = await readFile(panelPath, 'utf8');
-  const marker = 'value="http://127.0.0.1:4000"';
+  const marker = 'content="http://127.0.0.1:4000"';
   if (!panel.includes(marker)) throw new Error('Could not find the neutral control-origin marker in panel.html.');
-  await writeFile(panelPath, panel.replace(marker, `value="${controlOrigin}"`), 'utf8');
+  await writeFile(panelPath, panel.replace(marker, `content="${controlOrigin}"`), 'utf8');
   await writeFile(path.join(output, 'PACKAGED.txt'), [
     'CODE-AI Personal Chrome — unpacked extension package',
     `Preconfigured control origin: ${controlOrigin}`,

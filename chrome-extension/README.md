@@ -1,9 +1,9 @@
 # CODE-AI Personal Chrome
 
-This Manifest V3 extension opens CODE-AI in Chrome's Side Panel and connects
-explicitly paired browser tabs to a Codex session through the Personal Chrome
-mode. It is designed for real-browser inspection and interaction while keeping
-the session, device, scopes, approvals, and audit trail visible to the operator.
+This Manifest V3 extension opens the complete CODE-AI application in Chrome's
+Side Panel. After one device-password approval, users can move freely between
+profiles and sessions while the extension automatically binds the current
+Codex session to the local browser tools.
 
 ## Load the extension
 
@@ -11,8 +11,8 @@ the session, device, scopes, approvals, and audit trail visible to the operator.
 2. Enable **Developer mode**.
 3. Choose **Load unpacked** and select this `chrome-extension` directory.
 4. Click the extension icon to open the Side Panel.
-5. Enter the CODE-AI control-plane origin and a one-time pairing code created
-   in **Modes → Personal Chrome**.
+5. Enter the normal CODE-AI device password inside the application once. There
+   is no separate pairing screen or session-by-session setup.
 
 Use `npm run extension:package -- --output <directory> --control-origin
 <origin>` to create a deployable copy with a pre-filled origin. Do not edit a
@@ -20,11 +20,14 @@ deployed copy as the source of truth.
 
 ## Security model
 
-- Pairing codes are short-lived and single-use.
+- The normal device password is handled only by CODE-AI and is never exposed to
+  or stored by the extension.
+- CODE-AI returns a short-lived, single-use enrollment token after successful
+  device-password verification.
 - Device credentials are generated after pairing and stored in Chrome local
   extension storage.
-- Each Codex session receives a separate, revocable binding with explicit
-  read/write scopes and an approval policy.
+- Each active Codex session receives a separate, revocable binding automatically,
+  with explicit scopes and a risk-based approval policy.
 - High-risk actions are surfaced in the Side Panel for human approval.
 - Sensitive form values are redacted from previews and audit records.
 - Port forwards bind only to `127.0.0.1`, expire automatically, and can be

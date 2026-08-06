@@ -3,6 +3,10 @@
   globalThis.__codeAiPickerInstalled = true;
   let cleanupCurrent = null;
 
+  function reportPickerResult(message) {
+    void chrome.runtime.sendMessage(message).catch(() => undefined);
+  }
+
   function selectorFor(element) {
     if (!(element instanceof Element)) return '';
     if (element.id) return `#${CSS.escape(element.id)}`;
@@ -55,7 +59,7 @@
     };
     const finish = (payload, error) => {
       cleanup();
-      chrome.runtime.sendMessage({ type: 'CODE_AI_PICKER_RESULT', requestId, payload, error });
+      reportPickerResult({ type: 'CODE_AI_PICKER_RESULT', requestId, payload, error });
     };
     const click = (event) => {
       event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation();
@@ -90,7 +94,7 @@
     const down = (event) => { start = { x: event.clientX, y: event.clientY }; render(event.clientX, event.clientY); };
     const move = (event) => { if (start) render(event.clientX, event.clientY); };
     const finish = (payload, error) => {
-      cleanup(); chrome.runtime.sendMessage({ type: 'CODE_AI_PICKER_RESULT', requestId, payload, error });
+      cleanup(); reportPickerResult({ type: 'CODE_AI_PICKER_RESULT', requestId, payload, error });
     };
     const up = (event) => {
       if (!start) return;
@@ -108,6 +112,10 @@
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === 'CODE_AI_PICKER_PING') {
+      sendResponse({ ready: true });
+      return;
+    }
     if (message?.type !== 'CODE_AI_PICKER_START') return;
     if (message.mode === 'region_picker') startRegionPicker(message.requestId, message.prompt);
     else startElementPicker(message.requestId, message.prompt);

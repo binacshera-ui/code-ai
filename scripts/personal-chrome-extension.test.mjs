@@ -21,7 +21,14 @@ test('Chrome extension package is generic, complete, and load-unpacked compatibl
   }
   const source = await Promise.all(['manifest.json', 'background.js', 'contentScript.js', 'panel.html', 'panel.js']
     .map((file) => fs.readFile(path.join(extensionRoot, file), 'utf8')));
-  assert.doesNotMatch(source.join('\n'), /\/root\/projects\/|app-code-ai\./i);
-  assert.match(source.join('\n'), /browser_key/);
-  assert.doesNotMatch(await fs.readFile(path.join(extensionRoot, 'panel.html'), 'utf8'), /<script(?![^>]+src=)/i);
+  const combined = source.join('\n');
+  const panel = await fs.readFile(path.join(extensionRoot, 'panel.html'), 'utf8');
+  assert.doesNotMatch(combined, /\/root\/projects\/|app-code-ai\./i);
+  assert.match(combined, /browser_key/);
+  assert.match(combined, /ENROLL_DEVICE/);
+  assert.match(combined, /SYNC_ACTIVE_SESSION/);
+  assert.match(combined, /CODE_AI_PICKER_PING/);
+  assert.match(combined, /extensionPanel=1/);
+  assert.doesNotMatch(panel, /pairing-code|pair-button|קוד חד/);
+  assert.doesNotMatch(panel, /<script(?![^>]+src=)/i);
 });

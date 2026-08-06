@@ -62,6 +62,13 @@ interface PairingCodeRecord {
   expiresAt: string;
 }
 
+interface EnrollmentTokenRecord {
+  tokenHash: string;
+  ownerId: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
 interface PairingAttemptWindow {
   count: number;
   resetAt: number;
@@ -103,6 +110,7 @@ const BRIDGE_ROOT = path.join(CODEX_APP_CONFIG.storageRoot, 'local', 'personal-c
 const STATE_FILE = path.join(BRIDGE_ROOT, 'state.json');
 const AUDIT_FILE = path.join(BRIDGE_ROOT, 'audit.jsonl');
 const PAIRING_TTL_MS = 10 * 60_000;
+const ENROLLMENT_TTL_MS = 2 * 60_000;
 const MAX_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_WS_PAYLOAD = 10 * 1024 * 1024;
 const TOKEN_HEADER = 'x-code-ai-extension-token';
@@ -111,6 +119,7 @@ const SOCKET_PATH = '/api/codex/browser-extension/socket';
 const DEFAULT_SCOPES: PersonalChromeScope[] = ['read', 'write', 'javascript', 'upload', 'ports'];
 
 const pairingCodes = new Map<string, PairingCodeRecord>();
+const enrollmentTokens = new Map<string, EnrollmentTokenRecord>();
 const pairingAttempts = new Map<string, PairingAttemptWindow>();
 let globalPairingAttempts: PairingAttemptWindow = { count: 0, resetAt: 0 };
 const deviceConnections = new Map<string, DeviceConnection>();
@@ -176,6 +185,12 @@ function consumePairingClaimAttempt(req: Request): number | null {
 function prunePairingCodes(now = Date.now()) {
   for (const [key, pairing] of pairingCodes) {
     if (Date.parse(pairing.expiresAt) <= now) pairingCodes.delete(key);
+  }
+}
+
+function pruneEnrollmentTokens(now = Date.now()) {
+  for (const [key, enrollment] of enrollmentTokens) {
+    if (Date.parse(enrollment.expiresAt) <= now) enrollmentTokens.delete(key);
   }
 }
 
@@ -572,9 +587,25 @@ export async function authenticatePersonalChromeUiToken(deviceId: string, token:
   if (!device) return null;
   return {
     authenticated: true, localBypass: false, publicAccess: false, deviceUnlocked: true, extensionDevice: true,
-    personalChromeOwnerId: device.ownerId,
+    personalChromeOwnerId: device.ownerId, personalChromeDeviceId: device.id, personalChromeDeviceName: device.name,
     user: { id: `extension:${device.ownerId}`, email: '', name: device.name },
   };
+}
+
+export async function issuePersonalChromeEnrollmentToken(req: Request) {
+  await ensureLoaded();
+  pruneEnrollmentTokens();
+  const ownerId = ownerIdFromRequest(req);
+  for (const [key, enrollment] of enrollmentTokens) {
+    if (enrollment.ownerId === ownerId) enrollmentTokens.delete(key);
+  }
+  const token = randomBytes(32).toString('base64url');
+  const tokenHash = sha256(token);
+  const createdAt = nowIso();
+  const expiresAt = new Date(Date.now() + ENROLLMENT_TTL_MS).toISOString();
+  enrollmentTokens.set(tokenHash, { tokenHash, ownerId, createdAt, expiresAt });
+  await audit({ event: 'extension_enrollment_issued', ownerId, expiresAt });
+  return { token, expiresAt };
 }
 
 export function readPersonalChromeUiCredentials(req: Request): { deviceId: string; token: string } | null {
@@ -636,6 +667,43 @@ export function createPersonalChromeBridgeRouter(requireAccess: AccessMiddleware
     state.devices.push(device);
     await persist();
     await audit({ event: 'device_paired', deviceId: device.id, ownerId: device.ownerId, name: device.name });
+    res.status(201).json({
+      deviceId: device.id, deviceToken: token, device: publicDevice(device),
+      controlUrl: getControlUrl(req), socketPath: SOCKET_PATH,
+    });
+  });
+
+  router.post('/enrollment/claim', async (req, res) => {
+    await ensureLoaded();
+    const retryAfter = consumePairingClaimAttempt(req);
+    if (retryAfter !== null) {
+      res.setHeader('retry-after', String(Math.max(1, retryAfter)));
+      res.status(429).json({ error: 'יותר מדי ניסיונות אישור מכשיר. נסה שוב בעוד דקה.' });
+      return;
+    }
+    pruneEnrollmentTokens();
+    const rawToken = typeof req.body?.enrollmentToken === 'string' ? req.body.enrollmentToken.trim() : '';
+    const tokenHash = sha256(rawToken);
+    const enrollment = rawToken ? enrollmentTokens.get(tokenHash) : null;
+    if (!enrollment || Date.parse(enrollment.expiresAt) <= Date.now()) {
+      if (enrollment) enrollmentTokens.delete(tokenHash);
+      res.status(400).json({ error: 'אישור המכשיר אינו תקף או שפג תוקפו. הזן שוב את סיסמת המכשיר.' });
+      return;
+    }
+    enrollmentTokens.delete(tokenHash);
+    const token = randomBytes(32).toString('base64url');
+    const device: PersonalChromeDeviceRecord = {
+      id: randomUUID(), ownerId: enrollment.ownerId,
+      name: String(req.body?.deviceName || 'Chrome במחשב האישי').trim().slice(0, 120) || 'Chrome במחשב האישי',
+      tokenHash: sha256(token),
+      extensionId: typeof req.body?.extensionId === 'string' ? req.body.extensionId.slice(0, 120) : null,
+      platform: typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 120) : null,
+      browserVersion: typeof req.body?.browserVersion === 'string' ? req.body.browserVersion.slice(0, 120) : null,
+      createdAt: nowIso(), updatedAt: nowIso(), lastSeenAt: null, revokedAt: null, capabilities: [],
+    };
+    state.devices.push(device);
+    await persist();
+    await audit({ event: 'device_enrolled', deviceId: device.id, ownerId: device.ownerId, name: device.name });
     res.status(201).json({
       deviceId: device.id, deviceToken: token, device: publicDevice(device),
       controlUrl: getControlUrl(req), socketPath: SOCKET_PATH,

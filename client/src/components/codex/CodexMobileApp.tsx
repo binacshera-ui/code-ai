@@ -148,6 +148,21 @@ import {
 const IS_WORKBENCH_EMBED = typeof window !== 'undefined'
   && window.parent !== window
   && new URLSearchParams(window.location.search).get('embed') === 'workbench';
+const IS_EXTENSION_PANEL = typeof window !== 'undefined'
+  && window.parent !== window
+  && new URLSearchParams(window.location.search).get('extensionPanel') === '1';
+
+function postExtensionPanelMessage(message: Record<string, unknown>) {
+  if (!IS_EXTENSION_PANEL) return;
+  let targetOrigin = '*';
+  try {
+    const parentOrigin = new URL(document.referrer).origin;
+    if (parentOrigin.startsWith('chrome-extension://')) targetOrigin = parentOrigin;
+  } catch {
+    // The extension panel validates both event.source and the CODE-AI origin.
+  }
+  window.parent.postMessage(message, targetOrigin);
+}
 
 function buildWorkbenchSelectionPromptContext(selections: WorkbenchElementSelection[]) {
   if (selections.length === 0) return null;
@@ -14034,6 +14049,63 @@ export function CodexMobileApp() {
   ]);
 
   useEffect(() => {
+    if (!IS_EXTENSION_PANEL) return;
+
+    const publishContext = () => {
+      postExtensionPanelMessage({
+        type: 'code-ai:extension-context',
+        serverId: serverId || LOCAL_SERVER_ID,
+        profileId: currentProfile?.id || profileId || null,
+        provider: currentProfile?.provider || null,
+        sessionKey: selectedSessionId || currentQueueKey || null,
+        sessionId: selectedSessionId,
+        authenticated: authStatus?.authenticated === true,
+        deviceUnlocked: authStatus?.authenticated === true && authStatus.deviceUnlocked !== false,
+      });
+    };
+
+    const handleExtensionMessage = (event: MessageEvent) => {
+      if (event.source !== window.parent || !event.origin.startsWith('chrome-extension://')) return;
+      const message = event.data as {
+        type?: string;
+        serverId?: string;
+        profileId?: string;
+        sessionKey?: string;
+        personalChromeMode?: Partial<CodexSessionPersonalChromeMode>;
+      };
+      if (message?.type === 'code-ai:extension-request-context') {
+        publishContext();
+        return;
+      }
+      if (
+        message?.type === 'code-ai:extension-mode-synced'
+        && message.serverId === (serverId || LOCAL_SERVER_ID)
+        && message.profileId === (currentProfile?.id || profileId)
+        && message.sessionKey === (selectedSessionId || currentQueueKey)
+        && message.personalChromeMode
+      ) {
+        const mode = normalizeSessionPersonalChromeModeValue(message.personalChromeMode);
+        setSessionPersonalChromeMode(mode);
+        setPersonalChromeModeDraft(mode);
+        setPersonalChromeError(null);
+      }
+    };
+
+    window.addEventListener('message', handleExtensionMessage);
+    publishContext();
+    return () => window.removeEventListener('message', handleExtensionMessage);
+  }, [
+    authStatus?.authenticated,
+    authStatus?.deviceUnlocked,
+    currentProfile?.id,
+    currentProfile?.provider,
+    currentQueueKey,
+    profileId,
+    selectedSessionId,
+    serverId,
+  ]);
+
+  useEffect(() => {
     setCodexRuntimeContext({
       profileId,
       selectedSessionId,
@@ -14293,15 +14365,28 @@ export function CodexMobileApp() {
     setError(null);
 
     try {
-      await fetchJson('/api/codex/device-unlock', {
+      const unlock = await fetchJson<{
+        unlocked: boolean;
+        deviceUnlocked: boolean;
+        extensionEnrollmentToken?: string | null;
+        extensionEnrollmentExpiresAt?: string | null;
+      }>('/api/codex/device-unlock', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           password: devicePassword,
+          extensionPanel: IS_EXTENSION_PANEL,
         }),
       });
+      if (IS_EXTENSION_PANEL && unlock.extensionEnrollmentToken) {
+        postExtensionPanelMessage({
+          type: 'code-ai:extension-enrollment',
+          enrollmentToken: unlock.extensionEnrollmentToken,
+          expiresAt: unlock.extensionEnrollmentExpiresAt || null,
+        });
+      }
       setDevicePassword('');
       await loadAuthStatus({ silent: true });
     } catch (unlockError: any) {

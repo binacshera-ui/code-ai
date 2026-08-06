@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "CODE-AI Personal Chrome",
-  "version": "1.0.0",
-  "description": "Open CODE-AI in Chrome's side panel and securely connect selected tabs to an approved Codex session.",
+  "version": "1.1.0",
+  "description": "Open the complete CODE-AI experience in Chrome's side panel and connect browser tools after one-time device approval.",
   "icons": {
     "16": "icon-128.png",
     "32": "icon-128.png",

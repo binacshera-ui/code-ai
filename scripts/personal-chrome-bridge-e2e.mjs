@@ -5,6 +5,7 @@ import { WebSocket } from 'ws';
 
 const baseUrl = String(process.env.CODE_AI_E2E_BASE_URL || 'http://127.0.0.1:4106').replace(/\/+$/, '');
 const storageRoot = process.env.CODEX_STORAGE_ROOT || '';
+const devicePassword = process.env.CODE_AI_E2E_DEVICE_PASSWORD || 'test-device-password';
 
 async function requestJson(pathname, init = {}, expectedStatus = 200) {
   const response = await fetch(`${baseUrl}${pathname}`, init);
@@ -49,19 +50,26 @@ async function main() {
   const health = await requestJson('/api/codex/browser-extension/health');
   assert.equal(health.protocolVersion, 1);
 
-  const pairing = await requestJson('/api/codex/browser-extension/pairing/start', {
-    method: 'POST', headers: {
-      'content-type': 'application/json',
-      'x-code-ai-proxied-owner': 'a'.repeat(64),
-    }, body: '{}',
-  });
-  assert.match(pairing.code, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
-
-  const claim = await requestJson('/api/codex/browser-extension/pairing/claim', {
+  const unlock = await requestJson('/api/codex/device-unlock', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ code: pairing.code, deviceName: 'E2E Chrome', extensionId: 'e2e-extension', platform: 'test' }),
+    body: JSON.stringify({ password: devicePassword, extensionPanel: true }),
+  });
+  assert.match(unlock.extensionEnrollmentToken, /^[A-Za-z0-9_-]{32,}$/);
+
+  const claim = await requestJson('/api/codex/browser-extension/enrollment/claim', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enrollmentToken: unlock.extensionEnrollmentToken, deviceName: 'E2E Chrome', extensionId: 'e2e-extension', platform: 'test' }),
   }, 201);
   assert.ok(claim.deviceId && claim.deviceToken);
+  const extensionHeaders = {
+    'x-code-ai-extension-device': claim.deviceId,
+    'x-code-ai-extension-token': claim.deviceToken,
+  };
+
+  await requestJson('/api/codex/browser-extension/enrollment/claim', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enrollmentToken: unlock.extensionEnrollmentToken, deviceName: 'Replay attempt' }),
+  }, 400);
 
   const socketUrl = new URL(baseUrl);
   socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -73,17 +81,17 @@ async function main() {
   assert.equal((await inbox.next((message) => message.type === 'auth_ok')).deviceId, claim.deviceId);
   ws.send(JSON.stringify({ type: 'event', version: 1, name: 'capabilities', payload: ['tabs', 'e2e'] }));
 
-  const devices = await requestJson('/api/codex/browser-extension/devices');
-  assert.equal(devices.devices[0].online, true);
+  const devices = await requestJson('/api/codex/browser-extension/devices', { headers: extensionHeaders });
+  assert.equal(devices.devices.find((device) => device.id === claim.deviceId)?.online, true);
 
-  const profilePayload = await requestJson('/api/codex/profiles');
+  const profilePayload = await requestJson('/api/codex/profiles', { headers: extensionHeaders });
   const profiles = Array.isArray(profilePayload) ? profilePayload : profilePayload.profiles;
   const profile = profiles.find((candidate) => candidate.provider === 'codex') || profiles[0];
   assert.ok(profile?.id, 'staging server must expose at least one profile');
   const sessionKey = `draft:e2e-personal-chrome-${Date.now()}`;
 
   const binding = await requestJson('/api/codex/browser-extension/bindings', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', ...extensionHeaders },
     body: JSON.stringify({
       deviceId: claim.deviceId, profileId: profile.id, sessionKey,
       scopes: ['read', 'write', 'javascript', 'upload', 'ports'], approvalPolicy: 'risky',
@@ -125,7 +133,7 @@ async function main() {
   assert.deepEqual((await networkPromise).result.entries, []);
 
   await requestJson('/api/codex/session-personal-chrome-mode', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', ...extensionHeaders },
     body: JSON.stringify({
       profileId: profile.id, sessionKey,
       personalChromeMode: {
@@ -135,14 +143,19 @@ async function main() {
       },
     }),
   });
-  const savedMode = await requestJson(`/api/codex/session-personal-chrome-mode?profileId=${encodeURIComponent(profile.id)}&sessionKey=${encodeURIComponent(sessionKey)}`);
+  const savedMode = await requestJson(`/api/codex/session-personal-chrome-mode?profileId=${encodeURIComponent(profile.id)}&sessionKey=${encodeURIComponent(sessionKey)}`, { headers: extensionHeaders });
   assert.equal(savedMode.personalChromeMode.enabled, true);
   assert.equal(Object.hasOwn(savedMode.personalChromeMode, 'bindingToken'), false);
 
   const extensionAuth = await fetch(`${baseUrl}/api/codex/profiles`, {
-    headers: { 'x-code-ai-extension-device': claim.deviceId, 'x-code-ai-extension-token': claim.deviceToken },
+    headers: extensionHeaders,
   });
   assert.equal(extensionAuth.status, 200);
+  const extensionAuthStatus = await requestJson('/api/codex/auth/status', {
+    headers: extensionHeaders,
+  });
+  assert.equal(extensionAuthStatus.extensionDevice, true);
+  assert.equal(extensionAuthStatus.deviceUnlocked, true);
 
   await new Promise((resolve) => setTimeout(resolve, 100));
   if (storageRoot) {
@@ -151,11 +164,11 @@ async function main() {
     assert.match(audit, /\[REDACTED\]/);
   }
 
-  await requestJson(`/api/codex/browser-extension/bindings/${encodeURIComponent(binding.binding.id)}`, { method: 'DELETE' });
+  await requestJson(`/api/codex/browser-extension/bindings/${encodeURIComponent(binding.binding.id)}`, { method: 'DELETE', headers: extensionHeaders });
   await requestJson('/api/codex/browser-extension/tool-call', {
     method: 'POST', headers: bearer, body: JSON.stringify({ toolName: 'browser_status', arguments: {} }),
   }, 401);
-  await requestJson(`/api/codex/browser-extension/devices/${encodeURIComponent(claim.deviceId)}`, { method: 'DELETE' });
+  await requestJson(`/api/codex/browser-extension/devices/${encodeURIComponent(claim.deviceId)}`, { method: 'DELETE', headers: extensionHeaders });
   ws.close(1000, 'E2E complete');
   console.log(JSON.stringify({ ok: true, deviceId: claim.deviceId, profileId: profile.id, testedTools: ['browser_status', 'browser_type', 'browser_network'] }));
 }
