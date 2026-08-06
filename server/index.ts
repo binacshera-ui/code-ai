@@ -4,18 +4,38 @@ import session from 'express-session';
 import connectPgSimple from 'connect-pg-simple';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import codexRoutes from './codexRoutes.js';
+import { createServer } from 'http';
+import codexRoutes, { requireCodexAccess } from './codexRoutes.js';
+import codexWordExportRoutes from './codexWordExportRoutes.js';
+import codexFinalNotificationRoutes from './codexFinalNotificationRoutes.js';
 import { recordCodexServerCrash } from './codexCrashLogs.js';
 import { CODEX_APP_CONFIG } from './config.js';
 import { startCodexQueueWorker } from './codexQueue.js';
+import { startCodexFinalNotificationWorker } from './codexFinalNotifications.js';
 import { repairAllProviderHomesOwnership } from './providerRuntimeOwnership.js';
+import {
+  createRemoteHostProxyMiddleware,
+  requireRemoteAgentToken,
+} from './remoteHostProxy.js';
+import { shutdownRemoteHostTunnels } from './remoteHostRegistry.js';
+import { shutdownCodexTerminals } from './codexTerminal.js';
 import { shutdownCodexDesignModeBridge } from './codexDesignMode.js';
 import { shutdownCodexUxModeBridge } from './codexUxMode.js';
+import {
+  attachPersonalChromeBridge,
+  createPersonalChromeBridgeRouter,
+  shutdownPersonalChromeBridge,
+} from './personalChromeBridge.js';
+import {
+  shutdownPersonalPortForwardBroker,
+  startPersonalPortForwardBroker,
+} from './personalPortForwardBroker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const HOST = process.env.HOST?.trim() || '0.0.0.0';
 const configuredCorsOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
   .split(',')
   .map((value) => value.trim())
@@ -84,7 +104,7 @@ const sessionConfig: session.SessionOptions = {
       ? CODEX_APP_CONFIG.sessionCookieDomain
       : undefined,
   },
-  name: 'forum.session',
+  name: 'code-ai.session',
 };
 
 if (CODEX_APP_CONFIG.databaseUrl) {
@@ -149,6 +169,11 @@ app.get('/api/auth/check-session', async (req, res) => {
   }
 });
 
+app.use('/api/codex/browser-extension', createPersonalChromeBridgeRouter(requireCodexAccess));
+app.use('/api/codex', requireRemoteAgentToken);
+app.use('/api/codex', createRemoteHostProxyMiddleware(requireCodexAccess));
+app.use('/api/codex/message-exports', requireCodexAccess, codexWordExportRoutes);
+app.use('/api/codex/session-final-notification', requireCodexAccess, codexFinalNotificationRoutes);
 app.use('/api/codex', codexRoutes);
 
 const publicPath = path.join(__dirname, 'public');
@@ -157,7 +182,9 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(publicPath, 'index.html'));
 });
 
-const server = app.listen(PORT);
+const server = createServer(app);
+attachPersonalChromeBridge(server);
+server.listen(Number(PORT), HOST);
 
 server.once('error', (error: NodeJS.ErrnoException) => {
   console.error(`❌ Failed to start code-ai server on port ${PORT}:`, error);
@@ -174,9 +201,17 @@ server.once('error', (error: NodeJS.ErrnoException) => {
 });
 
 server.once('listening', () => {
-  console.log(`🚀 code-ai server running on port ${PORT}`);
+  console.log(`🚀 code-ai server running on ${HOST}:${PORT}`);
 
   repairAllProviderHomesOwnership(CODEX_APP_CONFIG.profiles);
+
+  void startCodexFinalNotificationWorker()
+    .then(() => {
+      console.log('🔔 Final-response notification worker started');
+    })
+    .catch((error) => {
+      console.error('❌ Failed to start final-response notification worker:', error);
+    });
 
   void startCodexQueueWorker()
     .then(() => {
@@ -185,15 +220,48 @@ server.once('listening', () => {
     .catch((error) => {
       console.error('❌ Failed to start Codex queue worker:', error);
     });
+
+  void startPersonalPortForwardBroker()
+    .then(() => {
+      console.log('🔌 Personal development port broker started');
+    })
+    .catch((error) => {
+      console.error('❌ Failed to start personal development port broker:', error);
+    });
 });
 
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.once(signal, () => {
-    void Promise.allSettled([
-      shutdownCodexDesignModeBridge(),
-      shutdownCodexUxModeBridge(),
-    ]).finally(() => {
-      server.close(() => process.exit(0));
-    });
+let shutdownStarted = false;
+function shutdownServer(signal: NodeJS.Signals): void {
+  if (shutdownStarted) {
+    return;
+  }
+  shutdownStarted = true;
+  console.log(`🛑 ${signal} received; closing code-ai cleanly`);
+  shutdownCodexTerminals();
+  shutdownRemoteHostTunnels();
+  shutdownPersonalChromeBridge();
+  shutdownPersonalPortForwardBroker();
+  void shutdownCodexDesignModeBridge();
+  void shutdownCodexUxModeBridge();
+
+  const forceExitTimer = setTimeout(() => {
+    console.error('❌ Timed out while closing code-ai; forcing open connections to close');
+    server.closeAllConnections();
+    process.exit(1);
+  }, 10_000);
+  forceExitTimer.unref();
+
+  server.close((error) => {
+    clearTimeout(forceExitTimer);
+    if (error) {
+      console.error('❌ Failed to close code-ai cleanly:', error);
+      process.exit(1);
+      return;
+    }
+    process.exit(0);
   });
+}
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => shutdownServer(signal));
 }

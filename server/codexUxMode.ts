@@ -102,6 +102,11 @@ const UX_MODE_RUNTIME_ROOT = path.join(CODEX_APP_CONFIG.appRoot, 'server', 'ux-m
 const UX_MODE_MCP_SERVER = path.join(UX_MODE_RUNTIME_ROOT, 'ux_mode_mcp_server.mjs');
 const UX_MODE_SKILL = path.join(CODEX_APP_CONFIG.appRoot, 'skills', 'gemini-ux-partner');
 const CODEX_UPLOAD_ROOT = path.resolve(CODEX_APP_CONFIG.uploadRoot);
+/**
+ * UX Mode is deliberately pinned to one model. A Gemini profile chooses the
+ * account/credentials only; silently falling back changes the debate quality.
+ */
+const UX_GEMINI_MODEL = 'gemini-3.1-pro-preview';
 
 const MAX_FIELD_CHARS = 20_000;
 const MAX_REQUEST_CHARS = 30_000;
@@ -797,15 +802,15 @@ function extractUxSpec(raw: string, expectedKind: string): Record<string, unknow
   return { ...candidate.value, consultation_type: expectedKind };
 }
 
-function selectUxModel(catalog: Awaited<ReturnType<typeof getGeminiModelCatalog>>, depth: CodexUxDepth): string | null {
-  const models = catalog.models.map((model) => model.slug);
-  if (depth === 'deep') {
-    return models.find((model) => /3(?:\.|-).*pro/i.test(model))
-      || models.find((model) => /2\.5.*pro/i.test(model))
-      || models.find((model) => /pro/i.test(model))
-      || catalog.selectedModel;
-  }
-  return models.find((model) => /flash/i.test(model)) || catalog.selectedModel;
+function selectUxModel(catalog: Awaited<ReturnType<typeof getGeminiModelCatalog>>): string {
+  const exactModel = catalog.models.find((model) => model.slug === UX_GEMINI_MODEL)?.slug;
+  if (exactModel) return exactModel;
+  throw makeUxToolError(
+    'UX_REQUIRED_MODEL_UNAVAILABLE',
+    `UX Mode requires ${UX_GEMINI_MODEL}, but it is not available for the selected Gemini profile.`,
+    false,
+    'Choose a Gemini profile with Gemini 3.1 Pro Preview access, then retry. UX Mode will not silently fall back to another model.',
+  );
 }
 
 function buildContract(expectedKind: string, synthesis = false): Record<string, unknown> {
@@ -1001,7 +1006,7 @@ async function runGeminiUxPrompt(
   prompt: string,
 ): Promise<{ finalMessage: string; model: string | null }> {
   const catalog = await geminiModelCatalogProvider(registration.record.geminiProfileId);
-  const model = selectUxModel(catalog, registration.record.depth);
+  const model = selectUxModel(catalog);
   return geminiUxInvoker({
     prompt,
     profileId: registration.record.geminiProfileId,

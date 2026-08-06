@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { CODEX_APP_CONFIG, type CodexProfileConfig } from './config.js';
@@ -64,6 +65,7 @@ interface BrowserTabsContextResponse {
 interface BrowserScreenshotResponse {
   currentUrl?: string | null;
   imageId: string;
+  liveStreamAvailable?: boolean;
   outputPath: string;
   tabId: number;
 }
@@ -84,7 +86,38 @@ interface BrowserFrameSummary {
   capturedAt: string;
   imageId: string;
   imageUrl: string;
+  streamUrl: string | null;
   tabId: number;
+}
+
+export interface BrowserViewerLiveFrame {
+  capturedAt: string | null;
+  data: Buffer;
+  height: number | null;
+  sequence: number;
+  tabId: number;
+  width: number | null;
+}
+
+export interface BrowserElementInspectionResponse {
+  currentUrl?: string | null;
+  element?: Record<string, any> | null;
+  inspectedAt?: string | null;
+  tabId: number;
+  title?: string | null;
+}
+
+export interface SessionBrowserElementSelection {
+  selectionId: string;
+  tabId: number;
+  url: string | null;
+  title: string | null;
+  capturedAt: string;
+  screenshotImageId: string | null;
+  screenshotUrl: string | null;
+  cropImageId: string | null;
+  cropUrl: string | null;
+  element: Record<string, any>;
 }
 
 export interface SessionBrowserViewerState {
@@ -96,26 +129,41 @@ export interface SessionBrowserViewerState {
   profileDir: string;
   sessionKey: string;
   tabs: BrowserTabSummary[];
+  selection?: SessionBrowserElementSelection | null;
 }
 
 type BrowserViewerAction =
   | { type: 'back'; tabId?: number | null }
+  | { type: 'capture'; tabId?: number | null }
   | { type: 'click'; tabId?: number | null; x: number; y: number; button?: 'left' | 'right'; clickCount?: 1 | 2 | 3 }
   | { type: 'drag'; tabId?: number | null; startX: number; startY: number; endX: number; endY: number }
   | { type: 'forward'; tabId?: number | null }
+  | { type: 'inspect'; tabId?: number | null; x: number; y: number }
   | { type: 'key'; tabId?: number | null; key: string }
   | { type: 'navigate'; tabId?: number | null; url: string }
   | { type: 'newTab'; url?: string | null }
   | { type: 'refresh'; tabId?: number | null }
+  | { type: 'resize'; tabId?: number | null; width: number; height: number }
   | { type: 'scroll'; amount?: number | null; direction: 'up' | 'down' | 'top' | 'bottom'; tabId?: number | null }
   | { type: 'switchTab'; tabId: number }
+  | { type: 'sync'; tabId?: number | null }
   | { type: 'type'; tabId?: number | null; text: string };
+
+export type BrowserViewerInput =
+  | { type: 'hover'; tabId?: number | null; x: number; y: number }
+  | { type: 'scroll'; tabId?: number | null; deltaX: number; deltaY: number };
 
 interface PendingRpcCall {
   reject: (error: Error) => void;
   resolve: (value: any) => void;
   timeoutId: ReturnType<typeof setTimeout>;
 }
+
+interface BrowserHttpBridgeEndpoint {
+  token: string | null;
+  url: string;
+}
+
 
 function buildViewerKey(profileId: string, sessionKey: string) {
   return `${profileId}:${sessionKey}`;
@@ -165,19 +213,30 @@ function normalizeViewerUrl(value: string | null | undefined) {
 class BrowserViewerBridge {
   private readonly bridgeInfoPath: string;
   private readonly capturePaths = new Map<string, string>();
+  private readonly captureOrder: string[] = [];
+  private readonly latestFrameByTab = new Map<number, BrowserFrameSummary>();
+  private readonly retainedCaptureIds = new Set<string>();
+  private readonly streamVersionByTab = new Map<number, number>();
+  private readonly streamViewportByTab = new Map<number, { height: number; width: number }>();
+  private inputDrainActive = false;
+  private inputDrainPreferScroll = false;
+  private pendingHoverInput: Extract<BrowserViewerInput, { type: 'hover' }> | null = null;
+  private pendingScrollInput: Extract<BrowserViewerInput, { type: 'scroll' }> | null = null;
   private httpBridgeUrl: string | null = null;
+  private httpBridgeToken: string | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private operationTail: Promise<unknown> = Promise.resolve();
   private pendingCalls = new Map<number, PendingRpcCall>();
   private process: ChildProcessWithoutNullStreams | null = null;
   private readyPromise: Promise<void> | null = null;
   private rpcCounter = 1;
+  private runtimeLeaseCount = 0;
   private stderrTail = '';
   private stdoutTail = '';
 
   constructor(
     private readonly profileId: string,
-    private readonly sessionKey: string,
+    private sessionKey: string,
     private readonly mode: CodexSessionBrowserModeRecord,
     private readonly launch: BrowserModeRuntimeLaunch,
   ) {
@@ -186,6 +245,28 @@ class BrowserViewerBridge {
 
   getCapturePath(imageId: string) {
     return this.capturePaths.get(imageId) || null;
+  }
+
+  matchesSessionDirectory(profileId: string, sessionDir: string) {
+    return this.profileId === profileId && this.mode.sessionDir === sessionDir;
+  }
+
+  rebindSessionKey(sessionKey: string) {
+    this.sessionKey = sessionKey;
+  }
+
+  private trackCapture(imageId: string, outputPath: string, retain = false) {
+    this.capturePaths.set(imageId, outputPath);
+    this.captureOrder.push(imageId);
+    if (retain) this.retainedCaptureIds.add(imageId);
+    while (this.captureOrder.length > 120) {
+      const expiredImageId = this.captureOrder.shift();
+      if (!expiredImageId) break;
+      if (this.retainedCaptureIds.has(expiredImageId)) continue;
+      const expiredPath = this.capturePaths.get(expiredImageId);
+      this.capturePaths.delete(expiredImageId);
+      if (expiredPath) void fs.unlink(expiredPath).catch(() => {});
+    }
   }
 
   async close() {
@@ -198,6 +279,8 @@ class BrowserViewerBridge {
     this.process = null;
     this.readyPromise = null;
     this.httpBridgeUrl = null;
+    this.httpBridgeToken = null;
+    this.runtimeLeaseCount = 0;
 
     if (!child || child.killed) {
       return;
@@ -216,6 +299,24 @@ class BrowserViewerBridge {
         resolve();
       });
     });
+  }
+
+  async acquireRuntimeLease() {
+    await this.enqueue(async () => {
+      await this.ensureReady();
+      this.runtimeLeaseCount += 1;
+      if (this.idleTimer) {
+        clearTimeout(this.idleTimer);
+        this.idleTimer = null;
+      }
+    });
+  }
+
+  releaseRuntimeLease() {
+    this.runtimeLeaseCount = Math.max(0, this.runtimeLeaseCount - 1);
+    if (this.runtimeLeaseCount === 0) {
+      this.resetIdleTimer();
+    }
   }
 
   async open(initialUrl?: string | null): Promise<SessionBrowserViewerState> {
@@ -256,6 +357,8 @@ class BrowserViewerBridge {
       switch (action.type) {
         case 'back':
           await this.callTool('navigate', { tabId: action.tabId || undefined, direction: 'back' });
+          return this.captureAfterLiveAction(action.tabId || null);
+        case 'capture':
           return this.captureState(action.tabId || null);
         case 'click': {
           const computerAction = action.button === 'right'
@@ -270,7 +373,7 @@ class BrowserViewerBridge {
             coordinate: [action.x, action.y],
             tabId: action.tabId || undefined,
           });
-          return this.captureState(action.tabId || null);
+          return this.captureAfterLiveAction(action.tabId || null);
         }
         case 'drag':
           await this.callTool('computer', {
@@ -279,13 +382,66 @@ class BrowserViewerBridge {
             start_coordinate: [action.startX, action.startY],
             tabId: action.tabId || undefined,
           });
-          return this.captureState(action.tabId || null);
+          return this.captureAfterLiveAction(action.tabId || null);
         case 'forward':
           await this.callTool('navigate', { tabId: action.tabId || undefined, direction: 'forward' });
-          return this.captureState(action.tabId || null);
+          return this.captureAfterLiveAction(action.tabId || null);
+        case 'inspect': {
+          const inspected = await this.callTool<BrowserElementInspectionResponse>('inspect_at_point', {
+            tabId: action.tabId || undefined,
+            x: action.x,
+            y: action.y,
+          });
+          const state = await this.captureState(inspected.tabId || action.tabId || null);
+          const element = inspected.element || null;
+          if (!element) {
+            throw new Error('No element was found at the selected point');
+          }
+
+          let cropImageId: string | null = null;
+          let cropUrl: string | null = null;
+          const rect = element.rect && typeof element.rect === 'object' ? element.rect : null;
+          const viewport = element.viewport && typeof element.viewport === 'object' ? element.viewport : null;
+          if (rect && Number(rect.width) > 0 && Number(rect.height) > 0) {
+            const padding = 12;
+            const viewportWidth = Number(viewport?.width) || 1440;
+            const viewportHeight = Number(viewport?.height) || 1200;
+            const x0 = Math.max(0, Number(rect.x) - padding);
+            const y0 = Math.max(0, Number(rect.y) - padding);
+            const x1 = Math.min(viewportWidth, Number(rect.x) + Number(rect.width) + padding);
+            const y1 = Math.min(viewportHeight, Number(rect.y) + Number(rect.height) + padding);
+            try {
+              const crop = await this.callTool<BrowserScreenshotResponse>('screenshot', {
+                format: 'png',
+                region: [x0, y0, x1, y1],
+                tabId: inspected.tabId,
+                timeout_ms: 20_000,
+              });
+              this.trackCapture(crop.imageId, crop.outputPath, true);
+              cropImageId = crop.imageId;
+              cropUrl = this.buildFrameUrl(crop.imageId);
+            } catch {
+              // The full frame is still a valid selection artifact if a tiny or transient node cannot be cropped.
+            }
+          }
+
+          state.selection = {
+            selectionId: randomUUID(),
+            tabId: inspected.tabId,
+            url: asUrl(inspected.currentUrl) || state.currentUrl,
+            title: asTitle(inspected.title) || state.currentTitle,
+            capturedAt: inspected.inspectedAt || new Date().toISOString(),
+            screenshotImageId: state.frame?.imageId || null,
+            screenshotUrl: state.frame?.imageUrl || null,
+            cropImageId,
+            cropUrl,
+            element,
+          };
+          return state;
+        }
         case 'key':
           await this.callTool('press_key', { key: action.key, tabId: action.tabId || undefined });
-          return this.captureState(action.tabId || null);
+          return this.captureAfterLiveAction(action.tabId || null);
         case 'navigate':
           if (!normalizeViewerUrl(action.url)) {
             throw new Error('A valid URL is required for navigation');
@@ -295,7 +451,7 @@ class BrowserViewerBridge {
             url: normalizeViewerUrl(action.url),
             waitUntil: 'domcontentloaded',
           });
-          return this.captureState(action.tabId || null);
+          return this.captureAfterLiveAction(action.tabId || null);
         case 'newTab': {
           const created = await this.callTool<BrowserTabsCreateResponse>('tabs_create', {});
           const normalizedUrl = normalizeViewerUrl(action.url);
@@ -310,30 +466,172 @@ class BrowserViewerBridge {
         }
         case 'refresh':
           await this.callTool('navigate', { tabId: action.tabId || undefined, direction: 'reload' });
-          return this.captureState(action.tabId || null);
+          return this.captureAfterLiveAction(action.tabId || null);
+        case 'resize': {
+          const resized = await this.callTool<{ tabId: number }>('resize_window', {
+            tabId: action.tabId || undefined,
+            width: action.width,
+            height: action.height,
+          });
+          this.streamViewportByTab.set(resized.tabId, { height: action.height, width: action.width });
+          this.streamVersionByTab.set(resized.tabId, (this.streamVersionByTab.get(resized.tabId) || 0) + 1);
+          return this.captureState(resized.tabId);
+        }
         case 'scroll':
           await this.callTool('scroll', {
             amount: action.amount || 900,
             direction: action.direction,
             tabId: action.tabId || undefined,
           });
-          return this.captureState(action.tabId || null);
+          return this.captureAfterLiveAction(action.tabId || null);
         case 'switchTab':
-          return this.captureState(action.tabId);
+          // A live-stream-only state sync does not touch Playwright's current
+          // tab. Capture once so both the viewer and the AI MCP inherit the
+          // exact tab the user selected.
+          return this.captureState(action.tabId, true);
+        case 'sync':
+          return this.captureState(action.tabId || null, false);
         case 'type':
           await this.callTool('computer', {
             action: 'type',
             tabId: action.tabId || undefined,
             text: action.text,
           });
-          return this.captureState(action.tabId || null);
+          return this.captureAfterLiveAction(action.tabId || null);
         default:
           throw new Error('Unsupported browser viewer action');
       }
     });
   }
 
-  private async captureState(preferredTabId?: number | null): Promise<SessionBrowserViewerState> {
+  queueInput(input: BrowserViewerInput) {
+    if (input.type === 'hover') {
+      this.pendingHoverInput = input;
+    } else if (this.pendingScrollInput && this.pendingScrollInput.tabId === input.tabId) {
+      this.pendingScrollInput.deltaX = Math.max(-2_400, Math.min(2_400, this.pendingScrollInput.deltaX + input.deltaX));
+      this.pendingScrollInput.deltaY = Math.max(-2_400, Math.min(2_400, this.pendingScrollInput.deltaY + input.deltaY));
+    } else {
+      this.pendingScrollInput = input;
+    }
+
+    if (!this.inputDrainActive) void this.drainQueuedInput();
+  }
+
+  private async drainQueuedInput() {
+    if (this.inputDrainActive) return;
+    this.inputDrainActive = true;
+    try {
+      while (this.pendingHoverInput || this.pendingScrollInput) {
+        let input: BrowserViewerInput | null = null;
+        if (this.inputDrainPreferScroll && this.pendingScrollInput) {
+          input = this.pendingScrollInput;
+          this.pendingScrollInput = null;
+          this.inputDrainPreferScroll = false;
+        } else if (this.pendingHoverInput) {
+          input = this.pendingHoverInput;
+          this.pendingHoverInput = null;
+          this.inputDrainPreferScroll = true;
+        } else if (this.pendingScrollInput) {
+          input = this.pendingScrollInput;
+          this.pendingScrollInput = null;
+          this.inputDrainPreferScroll = false;
+        }
+        if (!input) continue;
+        const queuedInput = input;
+
+        await this.enqueue(async () => {
+          await this.ensureReady();
+          if (queuedInput.type === 'hover') {
+            await this.callTool('computer', {
+              action: 'hover',
+              coordinate: [queuedInput.x, queuedInput.y],
+              tabId: queuedInput.tabId || undefined,
+            });
+            return;
+          }
+          await this.callTool('computer', {
+            action: 'wheel',
+            delta_x: queuedInput.deltaX,
+            delta_y: queuedInput.deltaY,
+            tabId: queuedInput.tabId || undefined,
+          });
+        });
+      }
+    } catch (error: any) {
+      console.warn('[browser-viewer-input] Browser input was skipped', {
+        message: error?.message || 'unknown error',
+      });
+    } finally {
+      this.inputDrainActive = false;
+      if (this.pendingHoverInput || this.pendingScrollInput) void this.drainQueuedInput();
+    }
+  }
+
+  async inspectAtPoint(x: number, y: number, tabId?: number | null): Promise<BrowserElementInspectionResponse> {
+    return this.enqueue(async () => {
+      await this.ensureReady();
+      return this.callTool<BrowserElementInspectionResponse>('inspect_at_point', {
+        tabId: tabId || undefined,
+        x,
+        y,
+      });
+    });
+  }
+
+
+  async readLiveFrame(
+    tabId: number,
+    afterSequence = 0,
+    waitMs = 1_000,
+  ): Promise<BrowserViewerLiveFrame | null> {
+    this.resetIdleTimer();
+    await this.ensureReady();
+    let bridgeUrl = this.httpBridgeUrl;
+    let bridgeToken = this.httpBridgeToken;
+    if (!bridgeUrl) {
+      const liveBridge = await this.resolveLiveBridge();
+      if (!liveBridge) return null;
+      bridgeUrl = liveBridge.url;
+      bridgeToken = liveBridge.token;
+      this.httpBridgeUrl = bridgeUrl;
+      this.httpBridgeToken = bridgeToken;
+    }
+
+    const query = new URLSearchParams({
+      after: String(Math.max(0, Math.round(afterSequence))),
+      tabId: String(tabId),
+      waitMs: String(Math.max(0, Math.min(5_000, Math.round(waitMs)))),
+    });
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), Math.max(3_000, waitMs + 2_000));
+    try {
+      const response = await fetch(`${bridgeUrl}/viewer/frame?${query}`, {
+        headers: bridgeToken ? { Authorization: `Bearer ${bridgeToken}` } : {},
+        signal: abortController.signal,
+      });
+      if (response.status === 204 || response.status === 404) return null;
+      if (!response.ok) throw new Error(`Browser live frame bridge returned HTTP ${response.status}`);
+      const sequenceHeader = response.headers.get('x-frame-sequence');
+      const sequence = sequenceHeader ? Number(sequenceHeader) : Number.NaN;
+      if (!Number.isFinite(sequence)) return null;
+      const widthHeader = response.headers.get('x-frame-width');
+      const heightHeader = response.headers.get('x-frame-height');
+      const width = widthHeader ? Number(widthHeader) : Number.NaN;
+      const height = heightHeader ? Number(heightHeader) : Number.NaN;
+      return {
+        capturedAt: response.headers.get('x-frame-captured-at'),
+        data: Buffer.from(await response.arrayBuffer()),
+        height: Number.isFinite(height) ? height : null,
+        sequence,
+        tabId,
+        width: Number.isFinite(width) ? width : null,
+      };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  private async captureState(preferredTabId?: number | null, captureFrame = true): Promise<SessionBrowserViewerState> {
     let context = await this.getTabsContext();
     if (!context.tabs.length) {
       const created = await this.callTool<BrowserTabsCreateResponse>('tabs_create', {});
@@ -349,7 +647,7 @@ class BrowserViewerBridge {
     }
 
     const tabId = preferredTabId || context.currentTabId || context.tabs[0]?.tabId || null;
-    let frame: BrowserFrameSummary | null = null;
+    let frame: BrowserFrameSummary | null = tabId ? this.latestFrameByTab.get(tabId) || null : null;
 
     if (tabId) {
       const targetTab = context.tabs.find((candidate) => candidate.tabId === tabId) || null;
@@ -362,26 +660,30 @@ class BrowserViewerBridge {
         context = await this.getTabsContext();
       }
       try {
-        const screenshot = await this.callTool<BrowserScreenshotResponse>('screenshot', {
-          format: 'png',
-          full_page: false,
-          tabId,
-          timeout_ms: 20_000,
-        });
-        this.capturePaths.set(screenshot.imageId, screenshot.outputPath);
-        frame = {
-          capturedAt: new Date().toISOString(),
-          imageId: screenshot.imageId,
-          imageUrl: `/api/codex/session-browser-viewer/frame?profileId=${encodeURIComponent(this.profileId)}&sessionKey=${encodeURIComponent(this.sessionKey)}&imageId=${encodeURIComponent(screenshot.imageId)}`,
-          tabId: screenshot.tabId,
-        };
+        if (captureFrame) {
+          const screenshot = await this.callTool<BrowserScreenshotResponse>('screenshot', {
+            format: 'jpeg',
+            quality: 90,
+            full_page: false,
+            tabId,
+            timeout_ms: 20_000,
+          });
+          this.trackCapture(screenshot.imageId, screenshot.outputPath);
+          frame = {
+            capturedAt: new Date().toISOString(),
+            imageId: screenshot.imageId,
+            imageUrl: this.buildFrameUrl(screenshot.imageId),
+            streamUrl: screenshot.liveStreamAvailable === true ? this.buildStreamUrl(screenshot.tabId) : null,
+            tabId: screenshot.tabId,
+          };
+          this.latestFrameByTab.set(screenshot.tabId, frame);
+        }
       } catch (error: any) {
         const message = String(error?.message || error || '');
         if (!message.includes('captureScreenshot')) {
           throw error;
         }
       }
-      context = await this.getTabsContext();
     }
 
     const currentTabId = (
@@ -403,6 +705,32 @@ class BrowserViewerBridge {
       sessionKey: this.sessionKey,
       tabs: context.tabs,
     };
+  }
+
+  private captureAfterLiveAction(tabId?: number | null) {
+    const hasLiveFrame = typeof tabId === 'number'
+      ? Boolean(this.latestFrameByTab.get(tabId)?.streamUrl)
+      : [...this.latestFrameByTab.values()].some((frame) => Boolean(frame.streamUrl));
+    return this.captureState(tabId || null, !hasLiveFrame);
+  }
+
+  private buildFrameUrl(imageId: string) {
+    return `/api/codex/session-browser-viewer/frame?profileId=${encodeURIComponent(this.profileId)}&sessionKey=${encodeURIComponent(this.sessionKey)}&imageId=${encodeURIComponent(imageId)}`;
+  }
+
+  private buildStreamUrl(tabId: number) {
+    const query = new URLSearchParams({
+      profileId: this.profileId,
+      sessionKey: this.sessionKey,
+      tabId: String(tabId),
+      version: String(this.streamVersionByTab.get(tabId) || 0),
+    });
+    const viewport = this.streamViewportByTab.get(tabId);
+    if (viewport) {
+      query.set('height', String(viewport.height));
+      query.set('width', String(viewport.width));
+    }
+    return `/api/codex/session-browser-viewer/stream?${query}`;
   }
 
   private async getTabsContext(): Promise<{ currentTabId: number | null; tabs: BrowserTabSummary[] }> {
@@ -433,7 +761,14 @@ class BrowserViewerBridge {
 
   private async ensureReady() {
     if (this.httpBridgeUrl) {
-      return;
+      const liveBridge = await this.resolveLiveBridge();
+      if (liveBridge) {
+        this.httpBridgeUrl = liveBridge.url;
+        this.httpBridgeToken = liveBridge.token;
+        return;
+      }
+      this.httpBridgeUrl = null;
+      this.httpBridgeToken = null;
     }
 
     if (this.process && this.readyPromise) {
@@ -441,9 +776,10 @@ class BrowserViewerBridge {
     }
 
     this.readyPromise = (async () => {
-      const liveBridgeUrl = await this.resolveLiveBridgeUrl();
-      if (liveBridgeUrl) {
-        this.httpBridgeUrl = liveBridgeUrl;
+      const liveBridge = await this.resolveLiveBridge();
+      if (liveBridge) {
+        this.httpBridgeUrl = liveBridge.url;
+        this.httpBridgeToken = liveBridge.token;
         return;
       }
 
@@ -501,6 +837,11 @@ class BrowserViewerBridge {
         },
         protocolVersion: '2025-11-25',
       });
+      const spawnedBridge = await this.resolveLiveBridge();
+      if (spawnedBridge) {
+        this.httpBridgeUrl = spawnedBridge.url;
+        this.httpBridgeToken = spawnedBridge.token;
+      }
     })();
 
     try {
@@ -518,6 +859,7 @@ class BrowserViewerBridge {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(this.httpBridgeToken ? { Authorization: `Bearer ${this.httpBridgeToken}` } : {}),
         },
         body: JSON.stringify({
           arguments: argumentsValue,
@@ -614,13 +956,17 @@ class BrowserViewerBridge {
   private resetIdleTimer() {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    if (this.runtimeLeaseCount > 0) {
+      return;
     }
     this.idleTimer = setTimeout(() => {
       void this.close();
     }, VIEWER_IDLE_TTL_MS);
   }
 
-  private async resolveLiveBridgeUrl(): Promise<string | null> {
+  private async resolveLiveBridge(): Promise<BrowserHttpBridgeEndpoint | null> {
     const infoRaw = await fs.readFile(this.bridgeInfoPath, 'utf-8').catch(() => '');
     if (!infoRaw.trim()) {
       return null;
@@ -640,7 +986,13 @@ class BrowserViewerBridge {
       return null;
     }
 
-    const response = await fetch(`${candidateUrl}/health`).catch(() => null);
+    const token = typeof parsed?.token === 'string' && parsed.token.trim()
+      ? parsed.token.trim()
+      : null;
+
+    const response = await fetch(`${candidateUrl}/health`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }).catch(() => null);
     if (!response?.ok) {
       return null;
     }
@@ -650,33 +1002,93 @@ class BrowserViewerBridge {
       return null;
     }
 
-    return candidateUrl;
+    return { token, url: candidateUrl };
   }
 }
 
 const viewerByKey = new Map<string, BrowserViewerBridge>();
+const viewerCreationBySessionDirectory = new Map<string, Promise<BrowserViewerBridge>>();
 
-async function resolveViewerBridge(profile: CodexProfileConfig, sessionKey: string) {
-  const record = await getSessionBrowserModeRecord(profile.id, sessionKey);
+async function resolveViewerBridge(
+  profile: CodexProfileConfig,
+  sessionKey: string,
+  stateProfileId = profile.id,
+) {
+  const record = await getSessionBrowserModeRecord(stateProfileId, sessionKey);
   if (!record || record.enabled !== true) {
     throw new Error('Browser mode is not enabled for this session');
   }
 
-  const prepared = await prepareCodexBrowserModeForRun(profile, profile.id, sessionKey, record);
+  const prepared = await prepareCodexBrowserModeForRun(profile, stateProfileId, sessionKey, record);
   if (!prepared) {
     throw new Error('Browser mode could not be prepared for this session');
   }
 
-  const key = buildViewerKey(profile.id, sessionKey);
+  const key = buildViewerKey(stateProfileId, sessionKey);
   const existing = viewerByKey.get(key);
   if (existing) {
     return existing;
   }
 
-  const launch = await buildBrowserModeRuntimeLaunch(prepared.mode);
-  const bridge = new BrowserViewerBridge(profile.id, sessionKey, prepared.mode, launch);
-  viewerByKey.set(key, bridge);
-  return bridge;
+  // Draft Code-AI conversations are rebound to the real provider session after
+  // their first turn. The browser-mode record intentionally keeps the same
+  // persisted profile directory. Reuse the live bridge as well so logins,
+  // tabs, page state, and the current selection survive that transition.
+  const reboundEntry = [...viewerByKey.entries()].find(([, candidate]) => (
+    candidate.matchesSessionDirectory(stateProfileId, prepared.mode.sessionDir)
+  ));
+  if (reboundEntry) {
+    const [previousKey, reboundBridge] = reboundEntry;
+    viewerByKey.delete(previousKey);
+    reboundBridge.rebindSessionKey(sessionKey);
+    viewerByKey.set(key, reboundBridge);
+    return reboundBridge;
+  }
+
+  const sessionDirectoryKey = `${stateProfileId}:${prepared.mode.sessionDir}`;
+  let creation = viewerCreationBySessionDirectory.get(sessionDirectoryKey);
+  if (!creation) {
+    creation = (async () => {
+      const existingAfterLock = viewerByKey.get(key);
+      if (existingAfterLock) return existingAfterLock;
+      const reboundAfterLock = [...viewerByKey.values()].find((candidate) => (
+        candidate.matchesSessionDirectory(stateProfileId, prepared.mode.sessionDir)
+      ));
+      if (reboundAfterLock) return reboundAfterLock;
+      const launch = await buildBrowserModeRuntimeLaunch(prepared.mode);
+      return new BrowserViewerBridge(stateProfileId, sessionKey, prepared.mode, launch);
+    })();
+    viewerCreationBySessionDirectory.set(sessionDirectoryKey, creation);
+  }
+
+  try {
+    const bridge = await creation;
+    for (const [candidateKey, candidate] of viewerByKey.entries()) {
+      if (candidate === bridge && candidateKey !== key) viewerByKey.delete(candidateKey);
+    }
+    bridge.rebindSessionKey(sessionKey);
+    viewerByKey.set(key, bridge);
+    return bridge;
+  } finally {
+    if (viewerCreationBySessionDirectory.get(sessionDirectoryKey) === creation) {
+      viewerCreationBySessionDirectory.delete(sessionDirectoryKey);
+    }
+  }
+}
+
+export async function acquireSessionBrowserRuntime(
+  profile: CodexProfileConfig,
+  stateProfileId: string,
+  sessionKey: string,
+): Promise<() => void> {
+  const bridge = await resolveViewerBridge(profile, sessionKey, stateProfileId);
+  await bridge.acquireRuntimeLease();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    bridge.releaseRuntimeLease();
+  };
 }
 
 export async function openSessionBrowserViewer(
@@ -696,6 +1108,28 @@ export async function performSessionBrowserViewerAction(
   const bridge = await resolveViewerBridge(profile, sessionKey);
   return bridge.perform(action);
 }
+
+export async function queueSessionBrowserViewerInput(
+  profile: CodexProfileConfig,
+  sessionKey: string,
+  input: BrowserViewerInput,
+) {
+  const bridge = viewerByKey.get(buildViewerKey(profile.id, sessionKey))
+    || await resolveViewerBridge(profile, sessionKey);
+  bridge.queueInput(input);
+}
+
+export async function inspectSessionBrowserViewerPoint(
+  profile: CodexProfileConfig,
+  sessionKey: string,
+  x: number,
+  y: number,
+  tabId?: number | null,
+) {
+  const bridge = await resolveViewerBridge(profile, sessionKey);
+  return bridge.inspectAtPoint(x, y, tabId);
+}
+
 
 export async function closeSessionBrowserViewer(profileId: string, sessionKey: string) {
   const key = buildViewerKey(profileId, sessionKey);
@@ -733,4 +1167,27 @@ export async function resolveSessionBrowserViewerFramePath(
   }
 
   return resolvedPath;
+}
+
+export async function readSessionBrowserViewerLiveFrame(
+  profile: CodexProfileConfig,
+  sessionKey: string,
+  tabId: number,
+  afterSequence = 0,
+  waitMs = 1_000,
+) {
+  const bridge = await resolveViewerBridge(profile, sessionKey);
+  return bridge.readLiveFrame(tabId, afterSequence, waitMs);
+}
+
+export async function openSessionBrowserViewerLiveFrameReader(
+  profile: CodexProfileConfig,
+  sessionKey: string,
+) {
+  const bridge = await resolveViewerBridge(profile, sessionKey);
+  return {
+    read(tabId: number, afterSequence = 0, waitMs = 1_000) {
+      return bridge.readLiveFrame(tabId, afterSequence, waitMs);
+    },
+  };
 }

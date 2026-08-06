@@ -83,6 +83,8 @@ import type { CodexSessionActionRestriction } from './codexSessionContextSelecti
 import type { CodexSessionBrowserMode } from './codexBrowserMode.js';
 import type { CodexSessionDesignMode } from './codexDesignMode.js';
 import type { CodexSessionUxMode } from './codexUxMode.js';
+import type { CodexSessionPersonalChromeMode } from './codexPersonalChromeMode.js';
+import { enqueueFinalResponseNotification } from './codexFinalNotifications.js';
 
 export type AgentProfile = CodexProfile;
 
@@ -369,12 +371,20 @@ export async function runAgentPrompt(
     browserMode?: CodexSessionBrowserMode | null;
     browserModeProfileId?: string | null;
     browserModeSessionKey?: string | null;
+    personalChromeMode?: CodexSessionPersonalChromeMode | null;
+    personalChromeModeProfileId?: string | null;
+    personalChromeModeSessionKey?: string | null;
     designMode?: CodexSessionDesignMode | null;
     designModeProfileId?: string | null;
     designModeSessionKey?: string | null;
     uxMode?: CodexSessionUxMode | null;
     uxModeProfileId?: string | null;
     uxModeSessionKey?: string | null;
+    finalNotification?: {
+      profileId?: string | null;
+      sessionKey?: string | null;
+      dedupeKey?: string | null;
+    };
   } = {}
 ): Promise<AgentRunResult> {
   const profile = resolveProfile(profileId);
@@ -424,6 +434,31 @@ export async function runAgentPrompt(
     }
 
     await discardSessionChangeCapture(capture);
+
+    const notificationProfileId = options.finalNotification?.profileId?.trim()
+      || options.browserModeProfileId?.trim()
+      || options.designModeProfileId?.trim()
+      || options.uxModeProfileId?.trim()
+      || profile.id;
+    const notificationSessionKey = options.finalNotification?.sessionKey?.trim()
+      || options.browserModeSessionKey?.trim()
+      || options.designModeSessionKey?.trim()
+      || options.uxModeSessionKey?.trim()
+      || sessionId
+      || result.sessionId;
+    await enqueueFinalResponseNotification({
+      profileId: notificationProfileId,
+      preferenceSessionKey: notificationSessionKey,
+      sessionId: result.sessionId,
+      sessionTitle: afterDetail?.title || null,
+      provider: profile.provider,
+      finalMessage: result.finalMessage,
+      dedupeKey: options.finalNotification?.dedupeKey?.trim()
+        || options.runId?.trim()
+        || entryId,
+    }).catch((notificationError) => {
+      console.error('❌ Failed to enqueue final-response notification:', notificationError);
+    });
 
     return result;
   } catch (error) {

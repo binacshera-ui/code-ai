@@ -245,7 +245,13 @@ function buildDerivedAgentProfiles(baseProfiles: CodexProfileConfig[], appRoot: 
 }
 
 function loadProfiles(appRoot: string): CodexProfileConfig[] {
-  const raw = process.env.CODEX_PROFILES_JSON?.trim();
+  const rawProfilesJson = process.env.CODEX_PROFILES_JSON?.trim();
+  const encodedProfilesJson = process.env.CODEX_PROFILES_JSON_BASE64?.trim();
+  const raw = rawProfilesJson || (
+    encodedProfilesJson
+      ? Buffer.from(encodedProfilesJson, 'base64').toString('utf8').trim()
+      : ''
+  );
   const finalizeProfiles = (baseProfiles: CodexProfileConfig[]): CodexProfileConfig[] => {
     const profiles = [
       ...baseProfiles,
@@ -343,6 +349,9 @@ export const CODEX_APP_CONFIG = {
   uploadRoot: path.resolve(process.env.CODEX_UPLOAD_ROOT || path.join(STORAGE_ROOT, 'uploads')),
   queueRoot: path.resolve(process.env.CODEX_QUEUE_ROOT || path.join(STORAGE_ROOT, 'queue')),
   logRoot: path.resolve(process.env.CODEX_LOG_ROOT || path.join(STORAGE_ROOT, 'logs')),
+  remoteHostsFile: path.resolve(
+    process.env.CODEX_REMOTE_HOSTS_FILE || path.join(STORAGE_ROOT, 'remote-hosts.json')
+  ),
   publicHosts: parseCsv(process.env.CODEX_PUBLIC_HOSTS),
   openAccess: parseBoolean(process.env.CODEX_OPEN_ACCESS, true),
   profiles: PROFILES,
@@ -350,7 +359,7 @@ export const CODEX_APP_CONFIG = {
   allowAnyPaths: ALLOW_ANY_PATHS,
   allowedFileRoots: ALLOWED_FILE_ROOTS,
   searchableFileRoots: BASE_ALLOWED_FILE_ROOTS,
-  deviceAdminPassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || 'change-me-now',
+  deviceAdminPassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || '403005Ashim@',
   sessionSecret: process.env.SESSION_SECRET || 'code-ai-session-secret',
   databaseUrl: process.env.DATABASE_URL?.trim() || '',
   sessionCookieDomain: process.env.SESSION_COOKIE_DOMAIN?.trim() || '',

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>CODE-AI</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <main id="pairing" class="pairing" hidden>
+      <div class="brand"><span class="brand-mark">✦</span><strong>CODE-AI</strong></div>
+      <h1>חיבור Chrome אישי</h1>
+      <p>ב־CODE-AI פתח “מצבים” ← “Chrome אישי”, צור קוד חיבור והקלד אותו כאן.</p>
+      <label>כתובת CODE-AI
+        <input id="control-origin" dir="ltr" value="http://127.0.0.1:4000" />
+      </label>
+      <label>שם המכשיר
+        <input id="device-name" value="Chrome במחשב האישי" />
+      </label>
+      <label>קוד חד־פעמי
+        <input id="pairing-code" dir="ltr" autocomplete="one-time-code" placeholder="ABCD-EFGH" />
+      </label>
+      <button id="pair-button" type="button">חבר את Chrome</button>
+      <div id="pair-error" class="error" role="alert"></div>
+    </main>
+
+    <main id="connected" class="connected" hidden>
+      <header class="toolbar">
+        <div class="connection">
+          <span id="connection-dot" class="dot"></span>
+          <span id="connection-label">מתחבר…</span>
+        </div>
+        <div class="toolbar-actions">
+          <button id="pick-element" type="button" title="בחר רכיב בדף">⌁ רכיב</button>
+          <button id="pick-region" type="button" title="בחר אזור בדף">▱ אזור</button>
+          <button id="open-tab" type="button" title="פתח CODE-AI בטאב מלא">↗</button>
+          <button id="settings" type="button" title="הגדרות חיבור">⚙</button>
+        </div>
+      </header>
+      <section id="selection-banner" class="selection-banner" hidden></section>
+      <section id="approval" class="approval" hidden>
+        <div class="approval-title" id="approval-title"></div>
+        <div class="approval-description" id="approval-description"></div>
+        <pre id="approval-preview"></pre>
+        <div class="approval-actions">
+          <button id="reject-approval" type="button">דחה</button>
+          <button id="approve-approval" class="primary" type="button">אשר פעולה</button>
+        </div>
+      </section>
+      <iframe id="code-ai-frame" title="CODE-AI"></iframe>
+    </main>
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>

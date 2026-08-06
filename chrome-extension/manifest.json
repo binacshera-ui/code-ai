@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "CODE-AI Personal Chrome",
+  "version": "1.0.0",
+  "description": "Open CODE-AI in Chrome's side panel and securely connect selected tabs to an approved Codex session.",
+  "icons": {
+    "16": "icon-128.png",
+    "32": "icon-128.png",
+    "48": "icon-128.png",
+    "128": "icon-128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "debugger",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess",
+    "notifications",
+    "scripting",
+    "sidePanel",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "פתח CODE-AI"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; frame-src https: http://127.0.0.1:* http://localhost:*"
+  }
+}

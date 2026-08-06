@@ -1949,14 +1949,13 @@ export async function runGeminiEphemeralDesignPrompt(
   });
 }
 
+/**
+ * Generic name for the disposable, read-only Gemini specialist runner. The
+ * design export remains for backwards compatibility with Design Mode.
+ */
 export type GeminiEphemeralSpecialistRunInput = GeminiEphemeralDesignRunInput;
 export type GeminiEphemeralSpecialistRunResult = GeminiEphemeralDesignRunResult;
 
-/**
- * Generic read-only specialist entry point used by session-scoped MCP modes.
- * It deliberately reuses the hardened disposable Gemini runner so specialist
- * consultations cannot create durable sidebar sessions or obtain write access.
- */
 export async function runGeminiEphemeralSpecialistPrompt(
   input: GeminiEphemeralSpecialistRunInput
 ): Promise<GeminiEphemeralSpecialistRunResult> {

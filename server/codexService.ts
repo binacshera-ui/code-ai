@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'child_process';
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'child_process';
 import { randomUUID } from 'crypto';
 import { createReadStream, promises as fs } from 'fs';
 import path from 'path';
@@ -21,6 +21,7 @@ import {
   prepareCodexBrowserModeForRun,
   type CodexSessionBrowserMode,
 } from './codexBrowserMode.js';
+import { acquireSessionBrowserRuntime } from './codexBrowserViewer.js';
 import {
   prepareCodexDesignModeForRun,
   type CodexSessionDesignMode,
@@ -29,6 +30,10 @@ import {
   prepareCodexUxModeForRun,
   type CodexSessionUxMode,
 } from './codexUxMode.js';
+import {
+  prepareCodexPersonalChromeModeForRun,
+  type CodexSessionPersonalChromeMode,
+} from './codexPersonalChromeMode.js';
 
 export interface CodexProfile {
   id: string;
@@ -2754,13 +2759,17 @@ export function resolveCodexProfile(profileId?: string): CodexProfile {
 
 export async function getAvailableProfiles(): Promise<CodexProfile[]> {
   const available: CodexProfile[] = [];
+  const includeConfiguredProfiles = Boolean(process.env.CODEX_REMOTE_AGENT_TOKEN?.trim());
 
   for (const profile of CANDIDATE_PROFILES) {
     const hasHome = await pathExists(profile.codexHome);
     const hasAuth = await pathExists(path.join(profile.codexHome, 'auth.json'));
     const hasSessions = await pathExists(path.join(profile.codexHome, 'sessions'));
-
-    if (hasHome && (hasAuth || hasSessions)) {
+    // A configured account must remain selectable even before its first login
+    // or first conversation on a remote sidecar. The local control plane keeps
+    // its historical filtering behavior so empty default homes do not appear
+    // as phantom accounts after this feature is installed.
+    if (hasHome && (includeConfiguredProfiles || hasAuth || hasSessions)) {
       available.push(profile);
     }
   }
@@ -3911,6 +3920,9 @@ export async function runCodexPrompt(
     browserMode?: CodexSessionBrowserMode | null;
     browserModeProfileId?: string | null;
     browserModeSessionKey?: string | null;
+    personalChromeMode?: CodexSessionPersonalChromeMode | null;
+    personalChromeModeProfileId?: string | null;
+    personalChromeModeSessionKey?: string | null;
     designMode?: CodexSessionDesignMode | null;
     designModeProfileId?: string | null;
     designModeSessionKey?: string | null;
@@ -3967,6 +3979,9 @@ export async function runCodexPrompt(
           browserMode: options.browserMode,
           browserModeProfileId: options.browserModeProfileId,
           browserModeSessionKey: options.browserModeSessionKey,
+          personalChromeMode: options.personalChromeMode,
+          personalChromeModeProfileId: options.personalChromeModeProfileId,
+          personalChromeModeSessionKey: options.personalChromeModeSessionKey,
           designMode: options.designMode,
           designModeProfileId: options.designModeProfileId,
           designModeSessionKey: options.designModeSessionKey,
@@ -3988,6 +4003,7 @@ export async function runCodexPrompt(
     const browserModeSessionKey = options.browserModeSessionKey?.trim()
       || sessionId?.trim()
       || null;
+    const browserModeStateProfileId = options.browserModeProfileId?.trim() || profile.id;
     const designModeSessionKey = options.designModeSessionKey?.trim()
       || sessionId?.trim()
       || null;
@@ -4020,25 +4036,74 @@ export async function runCodexPrompt(
     const uxAwareProfile = preparedUxMode
       ? { ...designAwareProfile, codexHome: preparedUxMode.envCodeXHome }
       : designAwareProfile;
-    const preparedBrowserMode = browserModeSessionKey
-      ? await prepareCodexBrowserModeForRun(
-        uxAwareProfile,
-        options.browserModeProfileId?.trim() || profile.id,
-        browserModeSessionKey,
-        options.browserMode || null
-      )
-      : null;
+    let releaseBrowserRuntimeLease: (() => void) | null = null;
+    let preparedBrowserMode: Awaited<ReturnType<typeof prepareCodexBrowserModeForRun>> = null;
+    try {
+      if (browserModeSessionKey && options.browserMode?.enabled === true) {
+        releaseBrowserRuntimeLease = await acquireSessionBrowserRuntime(
+          profile,
+          browserModeStateProfileId,
+          browserModeSessionKey,
+        );
+      }
+      preparedBrowserMode = browserModeSessionKey
+        ? await prepareCodexBrowserModeForRun(
+          uxAwareProfile,
+          browserModeStateProfileId,
+          browserModeSessionKey,
+          options.browserMode || null
+        )
+        : null;
+    } catch (browserModeError) {
+      releaseBrowserRuntimeLease?.();
+      throw browserModeError;
+    }
+
+    const releaseSharedBrowserRuntime = () => {
+      const release = releaseBrowserRuntimeLease;
+      releaseBrowserRuntimeLease = null;
+      release?.();
+    };
+
+    const personalChromeSessionKey = options.personalChromeModeSessionKey?.trim()
+      || sessionId?.trim()
+      || null;
+    const personalChromeStateProfileId = options.personalChromeModeProfileId?.trim() || profile.id;
+    const browserAwareProfile = preparedBrowserMode
+      ? { ...uxAwareProfile, codexHome: preparedBrowserMode.envCodeXHome }
+      : uxAwareProfile;
+    let preparedPersonalChromeMode: Awaited<ReturnType<typeof prepareCodexPersonalChromeModeForRun>> = null;
+    try {
+      preparedPersonalChromeMode = personalChromeSessionKey
+        ? await prepareCodexPersonalChromeModeForRun(
+          browserAwareProfile,
+          personalChromeStateProfileId,
+          personalChromeSessionKey,
+          options.personalChromeMode || null,
+        )
+        : null;
+    } catch (personalChromeError) {
+      releaseSharedBrowserRuntime();
+      throw personalChromeError;
+    }
 
     return new Promise<CodexRunResult>((resolve, reject) => {
-      const child = spawn(CODEX_BIN, args, {
-        cwd: runCwd,
-        env: buildCodexProcessEnv(
-          profile,
-          preparedBrowserMode?.envCodeXHome || preparedUxMode?.envCodeXHome || preparedDesignMode?.envCodeXHome || null,
-        ),
-        stdio: ['pipe', 'pipe', 'pipe'],
-        ...getProfileSpawnIdentity(profile),
-      });
+      let child: ChildProcessWithoutNullStreams;
+      try {
+        child = spawn(CODEX_BIN, args, {
+          cwd: runCwd,
+          env: buildCodexProcessEnv(
+            profile,
+            preparedPersonalChromeMode?.envCodeXHome || preparedBrowserMode?.envCodeXHome || preparedUxMode?.envCodeXHome || preparedDesignMode?.envCodeXHome || null,
+          ),
+          stdio: ['pipe', 'pipe', 'pipe'],
+          ...getProfileSpawnIdentity(profile),
+        });
+      } catch (spawnError) {
+        releaseSharedBrowserRuntime();
+        reject(spawnError);
+        return;
+      }
       const activeRunId = options.runId;
 
       if (activeRunId) {
@@ -4114,6 +4179,7 @@ export async function runCodexPrompt(
       child.on('error', (error) => {
         const cancelled = wasCancellationRequested();
         clearActiveRun();
+        releaseSharedBrowserRuntime();
         if (cancelled) {
           reject(new CodexRunCancelledError());
           return;
@@ -4124,6 +4190,7 @@ export async function runCodexPrompt(
       child.on('close', async (code) => {
         const cancelled = wasCancellationRequested();
         clearActiveRun();
+        releaseSharedBrowserRuntime();
 
         if (cancelled) {
           reject(new CodexRunCancelledError());
@@ -4159,6 +4226,9 @@ export async function runCodexPrompt(
                   browserMode: options.browserMode,
                   browserModeProfileId: options.browserModeProfileId,
                   browserModeSessionKey: options.browserModeSessionKey,
+                  personalChromeMode: options.personalChromeMode,
+                  personalChromeModeProfileId: options.personalChromeModeProfileId,
+                  personalChromeModeSessionKey: options.personalChromeModeSessionKey,
                   designMode: options.designMode,
                   designModeProfileId: options.designModeProfileId,
                   designModeSessionKey: options.designModeSessionKey,

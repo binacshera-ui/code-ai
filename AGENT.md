@@ -77,7 +77,7 @@ The real logic is split like this:
 ### Linux / macOS
 
 ```bash
-git clone https://github.com/binacshera-ui/code-ai.git
+git clone <repository-url>
 cd code-ai
 ./install.sh \
   --app-name code-ai \
@@ -90,7 +90,7 @@ cd code-ai
 ### Windows PowerShell
 
 ```powershell
-git clone https://github.com/binacshera-ui/code-ai.git
+git clone <repository-url>
 cd code-ai
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
   --app-name code-ai `

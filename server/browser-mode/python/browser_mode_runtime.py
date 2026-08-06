@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import queue
 import re
+import secrets
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from browser_mode_extractor import extract_page_content, extract_page_text, looks_like_blocked_page
 
@@ -46,6 +50,9 @@ DEFAULT_MAX_CAPTURED_EVENTS = 500
 DEFAULT_MAX_PAGE_CHARS = 50_000
 DEFAULT_BRIDGE_PORT_BASE = 39000
 DEFAULT_BRIDGE_PORT_SPAN = 2000
+LIVE_FRAME_MAX_HEIGHT = 2160
+LIVE_FRAME_MAX_WIDTH = 2560
+LIVE_FRAME_QUALITY = 85
 INTERACTION_SELECTOR = ", ".join(
     [
         "a[href]",
@@ -327,6 +334,247 @@ return (() => {
 })();
 """
 
+INSPECT_AT_POINT_SCRIPT = PAGE_HELPERS_SCRIPT + r"""
+return (() => {
+  const pointX = Number(params.x);
+  const pointY = Number(params.y);
+  if (!Number.isFinite(pointX) || !Number.isFinite(pointY)) {
+    throw new Error('inspect_at_point requires numeric x and y coordinates');
+  }
+
+  const framePath = [];
+  const shadowPath = [];
+  let targetDocument = document;
+  let localX = pointX;
+  let localY = pointY;
+  let element = targetDocument.elementFromPoint(localX, localY);
+
+  for (let depth = 0; depth < 12 && element; depth += 1) {
+    let advanced = false;
+
+    if (element.shadowRoot && typeof element.shadowRoot.elementFromPoint === 'function') {
+      const shadowElement = element.shadowRoot.elementFromPoint(localX, localY);
+      if (shadowElement && shadowElement !== element) {
+        shadowPath.push(buildUniqueSelector(element));
+        element = shadowElement;
+        advanced = true;
+      }
+    }
+
+    if (advanced) continue;
+
+    if (element.tagName && element.tagName.toLowerCase() === 'iframe') {
+      try {
+        const frameRect = element.getBoundingClientRect();
+        const childDocument = element.contentDocument;
+        if (childDocument) {
+          const childX = localX - frameRect.left;
+          const childY = localY - frameRect.top;
+          const childElement = childDocument.elementFromPoint(childX, childY);
+          if (childElement) {
+            framePath.push({
+              selector: buildUniqueSelector(element),
+              src: element.getAttribute('src') || null,
+              title: element.getAttribute('title') || null
+            });
+            targetDocument = childDocument;
+            localX = childX;
+            localY = childY;
+            element = childElement;
+            advanced = true;
+          }
+        }
+      } catch (_error) {
+        // Cross-origin frames remain selectable as the iframe element itself.
+      }
+    }
+
+    if (!advanced) break;
+  }
+
+  if (!element) return null;
+
+  const tagName = element.tagName.toLowerCase();
+  const inputType = collapseWhitespace(element.getAttribute('type')).toLowerCase();
+  const fieldName = collapseWhitespace(element.getAttribute('name')).toLowerCase();
+  const autocomplete = collapseWhitespace(element.getAttribute('autocomplete')).toLowerCase();
+  const isSensitive = inputType === 'password'
+    || autocomplete.includes('password')
+    || autocomplete.includes('cc-')
+    || /password|passwd|token|secret|authorization|credit|card|cvv|cvc/.test(fieldName);
+
+  const textValue = isSensitive
+    ? '[redacted]'
+    : collapseWhitespace(element.innerText || element.textContent || '').slice(0, 500);
+  const accessibleName = isSensitive
+    ? collapseWhitespace(element.getAttribute('aria-label') || element.getAttribute('title') || '')
+    : collapseWhitespace(
+      element.getAttribute('aria-label')
+      || element.getAttribute('title')
+      || element.getAttribute('placeholder')
+      || textValue
+    ).slice(0, 300);
+
+  const allowedAttributes = [
+    'id', 'class', 'role', 'name', 'type', 'href', 'src', 'alt', 'title',
+    'placeholder', 'aria-label', 'aria-labelledby', 'aria-describedby',
+    'data-testid', 'data-test', 'data-cy', 'data-component',
+    'data-code-ai-source', 'data-source'
+  ];
+  const attributes = {};
+  for (const attributeName of allowedAttributes) {
+    const value = element.getAttribute(attributeName);
+    if (value === null) continue;
+    attributes[attributeName] = isSensitive && ['placeholder', 'title'].includes(attributeName)
+      ? '[redacted]'
+      : collapseWhitespace(value).slice(0, 500);
+  }
+
+  const selectorCandidates = [];
+  const primarySelector = buildUniqueSelector(element);
+  if (element.id) selectorCandidates.push({ kind: 'id', value: '#' + CSS.escape(element.id), score: 100 });
+  for (const attributeName of ['data-testid', 'data-test', 'data-cy']) {
+    const value = element.getAttribute(attributeName);
+    if (value) {
+      selectorCandidates.push({
+        kind: 'test-id',
+        value: tagName + '[' + attributeName + '=' + JSON.stringify(value) + ']',
+        score: 96
+      });
+    }
+  }
+  if (accessibleName) {
+    selectorCandidates.push({
+      kind: 'role',
+      value: inferRole(element) + ':' + accessibleName,
+      score: 88
+    });
+  }
+  selectorCandidates.push({ kind: 'css', value: primarySelector, score: 80 });
+
+  const computedStyle = window.getComputedStyle(element);
+  const styleKeys = [
+    'display', 'position', 'top', 'right', 'bottom', 'left', 'z-index',
+    'width', 'height', 'min-width', 'max-width', 'min-height', 'max-height',
+    'margin', 'padding', 'gap', 'align-items', 'justify-content',
+    'grid-template-columns', 'flex-direction', 'flex-wrap',
+    'font-family', 'font-size', 'font-weight', 'line-height', 'text-align',
+    'color', 'background-color', 'border', 'border-radius', 'box-shadow',
+    'opacity', 'overflow', 'transform', 'visibility', 'cursor'
+  ];
+  const computedStyleSubset = {};
+  for (const key of styleKeys) {
+    computedStyleSubset[key] = computedStyle.getPropertyValue(key);
+  }
+
+  const matchedCssRules = [];
+  function collectRules(ruleList, sourceUrl, mediaText) {
+    for (const rule of Array.from(ruleList || [])) {
+      if (matchedCssRules.length >= 60) return;
+      if (rule.cssRules) {
+        collectRules(rule.cssRules, sourceUrl, rule.conditionText || mediaText || null);
+        continue;
+      }
+      if (!rule.selectorText) continue;
+      let matches = false;
+      try { matches = element.matches(rule.selectorText); } catch (_error) { matches = false; }
+      if (!matches) continue;
+      const declarations = {};
+      for (const propertyName of Array.from(rule.style || [])) {
+        declarations[propertyName] = rule.style.getPropertyValue(propertyName);
+      }
+      matchedCssRules.push({
+        selector: rule.selectorText,
+        sourceUrl: sourceUrl || null,
+        media: mediaText || null,
+        declarations
+      });
+    }
+  }
+  for (const sheet of Array.from(targetDocument.styleSheets || [])) {
+    try { collectRules(sheet.cssRules, sheet.href, null); } catch (_error) { /* cross-origin stylesheet */ }
+  }
+
+  const ancestors = [];
+  let ancestor = element.parentElement;
+  while (ancestor && ancestors.length < 6) {
+    ancestors.push({
+      tag: ancestor.tagName.toLowerCase(),
+      role: inferRole(ancestor),
+      selector: buildUniqueSelector(ancestor),
+      label: collapseWhitespace(ancestor.getAttribute('aria-label') || ancestor.getAttribute('title') || '').slice(0, 160)
+    });
+    ancestor = ancestor.parentElement;
+  }
+
+  const sourceToken = element.getAttribute('data-code-ai-source')
+    || element.getAttribute('data-source')
+    || null;
+  let sourceHint = null;
+  if (sourceToken) {
+    const sourceMatch = sourceToken.match(/^(.*?):(\d+)(?::(\d+))?$/);
+    sourceHint = sourceMatch
+      ? {
+          file: sourceMatch[1],
+          line: Number(sourceMatch[2]),
+          column: sourceMatch[3] ? Number(sourceMatch[3]) : null,
+          component: element.getAttribute('data-component') || null,
+          confidence: 1,
+          method: 'bridge'
+        }
+      : {
+          file: sourceToken,
+          line: null,
+          column: null,
+          component: element.getAttribute('data-component') || null,
+          confidence: 0.9,
+          method: 'bridge'
+        };
+  }
+
+  const rect = serializeRect(element);
+  const fingerprintSource = [
+    location.href,
+    primarySelector,
+    tagName,
+    inferRole(element),
+    accessibleName,
+    Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height)
+  ].join('|');
+  let fingerprintHash = 2166136261;
+  for (let index = 0; index < fingerprintSource.length; index += 1) {
+    fingerprintHash ^= fingerprintSource.charCodeAt(index);
+    fingerprintHash = Math.imul(fingerprintHash, 16777619);
+  }
+
+  return {
+    tagName,
+    role: inferRole(element),
+    accessibleName: accessibleName || null,
+    textSnippet: textValue || null,
+    attributes,
+    rect,
+    primarySelector,
+    selectorCandidates,
+    framePath,
+    shadowPath,
+    ancestors,
+    computedStyleSubset,
+    matchedCssRules,
+    sourceHint,
+    sensitive: isSensitive,
+    domFingerprint: 'fnv1a-' + (fingerprintHash >>> 0).toString(16),
+    viewport: {
+      width: window.innerWidth,
+      height: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio || 1,
+      scrollX: window.scrollX,
+      scrollY: window.scrollY
+    }
+  };
+})();
+"""
+
 
 class BrowserRuntimeError(Exception):
     def __init__(self, error_code: str, is_retryable: bool, status_code: int, message: str, suggested_remediation: str) -> None:
@@ -348,6 +596,18 @@ class BrowserTab:
     network_requests: list[dict[str, Any]] = field(default_factory=list)
     pending_request_indexes: dict[int, int] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    live_cdp_session: Any | None = None
+    live_stream_started: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserLiveFrame:
+    captured_at: str
+    data: bytes
+    height: int
+    sequence: int
+    tab_id: int
+    width: int
 
 
 @dataclass(slots=True)
@@ -365,6 +625,7 @@ class BrowserSession:
 class BridgeDispatchRequest:
     name: str
     payload: dict[str, Any]
+    is_control: bool = False
     done: threading.Event = field(default_factory=threading.Event)
     error: Exception | None = None
     result: dict[str, Any] | None = None
@@ -419,16 +680,25 @@ class BrowserRuntime:
         self._profile_dir = Path(settings.web_browser_profile_dir)
         self._screenshot_dir = Path(settings.web_browser_screenshot_dir)
         self._bridge_file = self._profile_dir.parent / "browser-http-bridge.json"
+        self._tab_state_file = self._profile_dir.parent / "browser-tab-state.json"
+        self._bridge_token = secrets.token_urlsafe(32)
         self._bridge_port: int | None = None
         self._bridge_requests: queue.Queue[BridgeDispatchRequest] = queue.Queue()
         self._bridge_server: ThreadingHTTPServer | None = None
         self._bridge_thread: threading.Thread | None = None
         self._dispatch_lock = threading.RLock()
+        self._live_frame_condition = threading.Condition()
+        self._live_frame_sequence = 0
+        self._live_frames: dict[int, BrowserLiveFrame] = {}
         self._profile_dir.mkdir(parents=True, exist_ok=True)
         self._screenshot_dir.mkdir(parents=True, exist_ok=True)
         self._start_bridge_server()
 
     def close(self) -> None:
+        try:
+            self._persist_tab_state()
+        except Exception:
+            pass
         self._stop_bridge_server()
         if self._session is None:
             return
@@ -448,6 +718,7 @@ class BrowserRuntime:
             "profile_dir": str(self._profile_dir),
             "screenshot_dir": str(self._screenshot_dir),
             "bridge_url": self._bridge_url(),
+            "live_stream_tabs": len(self._live_frames),
         }
 
     def dispatch_action(self, name: str, arguments: dict | None = None) -> dict:
@@ -469,8 +740,17 @@ class BrowserRuntime:
 
         return self._dispatch_action_internal(name, payload)
 
+
     def _dispatch_action_internal(self, name: str, payload: dict[str, Any]) -> dict:
         with self._dispatch_lock:
+            if name.startswith("_"):
+                raise BrowserRuntimeError(
+                    "WEB_TOOL_VALIDATION_FAILED",
+                    False,
+                    400,
+                    f"Unsupported browser tool: {name}",
+                    "Use a registered browser tool name.",
+                )
             if name == "browser_health":
                 return self.health_check()
             if name == "screenshot":
@@ -484,7 +764,18 @@ class BrowserRuntime:
                     f"Unsupported browser tool: {name}",
                     "Use a registered browser tool name.",
                 )
-            return handler(payload)
+            result = handler(payload)
+            computer_action = str(payload.get("action") or "").strip().lower() if name == "computer" else ""
+            if (
+                name in {"tabs_create", "navigate", "click", "type", "form_input", "press_key"}
+                or (name == "computer" and computer_action not in {"hover", "wheel", "wait", "screenshot"})
+            ):
+                try:
+                    self._persist_tab_state()
+                except Exception:
+                    pass
+            return result
+
 
     def process_bridge_requests(self, max_requests: int = 8) -> int:
         processed = 0
@@ -495,13 +786,43 @@ class BrowserRuntime:
               break
 
           try:
-              request.result = self._dispatch_action_internal(request.name, request.payload)
+              request.result = (
+                  self._dispatch_control_action_internal(request.name, request.payload)
+                  if request.is_control
+                  else self._dispatch_action_internal(request.name, request.payload)
+              )
           except Exception as exc:
               request.error = exc
           finally:
               request.done.set()
           processed += 1
         return processed
+
+    def pump_browser_events(self) -> None:
+        """Give Playwright's sync dispatcher a short turn so CDP frames keep flowing."""
+        session = self._session
+        if session is None or not session.tabs:
+            return
+        tab = session.tabs.get(session.current_tab_id or -1) or next(iter(session.tabs.values()), None)
+        if tab is None or tab.page.is_closed():
+            return
+        try:
+            tab.page.wait_for_timeout(1)
+        except Exception:
+            # A navigation or tab close can invalidate the page between the checks.
+            return
+
+    def read_live_frame(self, tab_id: int, after_sequence: int = 0, wait_ms: int = 0) -> BrowserLiveFrame | None:
+        deadline = time.monotonic() + max(0, min(wait_ms, 5_000)) / 1_000
+        with self._live_frame_condition:
+            while True:
+                frame = self._live_frames.get(tab_id)
+                if frame is not None and frame.sequence > after_sequence:
+                    return frame
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._live_frame_condition.wait(timeout=remaining)
 
     def tabs_create(self, input_data: dict | None = None) -> dict:
         del input_data
@@ -709,6 +1030,43 @@ class BrowserRuntime:
                 "currentUrl": page.url,
                 "matchedElement": candidates[0],
                 "tabId": tab.tab_id,
+            }
+        except Exception as exc:
+            raise self._as_runtime_error(exc) from exc
+
+    def inspect_at_point(self, input_data: dict) -> dict:
+        try:
+            tab = self._get_tab_from_input(input_data)
+            page = tab.page
+            self._guard_against_blocked_page(page)
+            x = input_data.get("x")
+            y = input_data.get("y")
+            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                raise BrowserRuntimeError(
+                    "WEB_TOOL_VALIDATION_FAILED",
+                    False,
+                    400,
+                    "inspect_at_point requires numeric x and y coordinates.",
+                    "Provide viewport coordinates from the current browser frame.",
+                )
+            element = page.evaluate(
+                "(params) => { " + INSPECT_AT_POINT_SCRIPT + "}",
+                {"x": x, "y": y},
+            )
+            if not element:
+                raise BrowserRuntimeError(
+                    "WEB_ELEMENT_NOT_FOUND",
+                    False,
+                    404,
+                    "No element was found at the requested viewport coordinate.",
+                    "Refresh the frame and select a visible point inside the page.",
+                )
+            return {
+                "currentUrl": page.url,
+                "element": element,
+                "inspectedAt": datetime.now(UTC).isoformat(),
+                "tabId": tab.tab_id,
+                "title": to_title_or_none(page.title()),
             }
         except Exception as exc:
             raise self._as_runtime_error(exc) from exc
@@ -1112,6 +1470,7 @@ class BrowserRuntime:
             return {
                 "currentUrl": page.url,
                 "imageId": image_id,
+                "liveStreamAvailable": tab.live_stream_started,
                 "outputPath": str(output_path),
                 "selector": selector if (params.get("selector") or params.get("ref")) else None,
                 "tabId": tab.tab_id,
@@ -1143,6 +1502,17 @@ class BrowserRuntime:
                 direction = input_data.get("scroll_direction") or input_data.get("direction") or "down"
                 amount = int(input_data.get("scroll_amount") or 3) * 300
                 return self.scroll({"tabId": tab.tab_id, "direction": direction, "amount": amount})
+            if action == "wheel":
+                delta_x = float(input_data.get("delta_x") or 0)
+                delta_y = float(input_data.get("delta_y") or 0)
+                page.mouse.wheel(delta_x, delta_y)
+                self._maybe_capture_gif_frame(tab, label="computer-wheel")
+                return {
+                    "action": action,
+                    "deltaX": delta_x,
+                    "deltaY": delta_y,
+                    "tabId": tab.tab_id,
+                }
             if action == "scroll_to":
                 if input_data.get("ref"):
                     selector = self._resolve_selector(None, None, input_data.get("ref"), tab.tab_id)
@@ -1231,6 +1601,7 @@ class BrowserRuntime:
             "form_input": self.form_input,
             "gif_creator": self.gif_creator,
             "get_page_text": self.get_page_text,
+            "inspect_at_point": self.inspect_at_point,
             "javascript_tool": lambda data: self.run_js({"tabId": data.get("tabId"), "args": data.get("args"), "code": data["text"]}),
             "navigate": self.navigate,
             "press_key": self.press_key,
@@ -1345,8 +1716,13 @@ class BrowserRuntime:
         elif coordinate := input_data.get("coordinate"):
             x, y = self._require_coordinate(coordinate)
             page.mouse.click(x, y)
-        with self._pressed_modifiers(page, self._normalize_modifiers(input_data.get("modifiers"))):
-            page.keyboard.type(text)
+        modifiers = self._normalize_modifiers(input_data.get("modifiers"))
+        if modifiers:
+            with self._pressed_modifiers(page, modifiers):
+                page.keyboard.type(text)
+        else:
+            # insert_text preserves Hebrew and other Unicode input exactly.
+            page.keyboard.insert_text(text)
         self._maybe_capture_gif_frame(tab, label="computer-type")
         return {"tabId": tab_id, "textLength": len(text), "usedSelector": selector}
 
@@ -1398,11 +1774,106 @@ class BrowserRuntime:
         session = BrowserSession(context=context, playwright=playwright)
         self._session = session
         pages = list(context.pages) or [context.new_page()]
+        restored_state = self._read_tab_state()
+        restored_tabs = restored_state.get("tabs") if restored_state else None
+        restored_current_index = restored_state.get("currentIndex") if restored_state else 0
+        if isinstance(restored_tabs, list) and restored_tabs:
+            while len(pages) < len(restored_tabs):
+                pages.append(context.new_page())
+            for extra_page in pages[len(restored_tabs):]:
+                try:
+                    extra_page.close()
+                except Exception:
+                    pass
+            pages = pages[:len(restored_tabs)]
+
         for index, page in enumerate(pages):
-            self._register_page(session, page, set_current=index == 0)
             page.set_default_timeout(self._settings.web_browser_navigation_timeout_ms)
+            if isinstance(restored_tabs, list) and index < len(restored_tabs):
+                restored_url = restored_tabs[index].get("url") if isinstance(restored_tabs[index], dict) else None
+                if isinstance(restored_url, str) and restored_url and restored_url != page.url:
+                    try:
+                        page.goto(
+                            restored_url,
+                            timeout=self._settings.web_browser_navigation_timeout_ms,
+                            wait_until="domcontentloaded",
+                        )
+                    except Exception:
+                        # The profile is still usable if a previously open site is
+                        # temporarily unavailable. The viewer can navigate again.
+                        pass
+            self._register_page(
+                session,
+                page,
+                set_current=index == restored_current_index if isinstance(restored_current_index, int) else index == 0,
+            )
         context.on("page", lambda page: self._register_page(session, page, set_current=True))
         return session
+
+    def _read_tab_state(self) -> dict[str, Any] | None:
+        try:
+            stat = self._tab_state_file.stat()
+            if not self._tab_state_file.is_file() or stat.st_mode & 0o077:
+                return None
+            payload = json.loads(self._tab_state_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return None
+        raw_tabs = payload.get("tabs")
+        if not isinstance(raw_tabs, list):
+            return None
+        tabs = []
+        for candidate in raw_tabs[:32]:
+            url = candidate.get("url") if isinstance(candidate, dict) else None
+            if isinstance(url, str) and 0 < len(url) <= 2_000_000:
+                tabs.append({"url": url})
+        if not tabs:
+            return None
+        current_index = payload.get("currentIndex")
+        if not isinstance(current_index, int) or current_index < 0 or current_index >= len(tabs):
+            current_index = 0
+        return {"tabs": tabs, "currentIndex": current_index}
+
+    def _persist_tab_state(self) -> None:
+        session = self._session
+        if session is None:
+            return
+        ordered_tabs = [
+            tab
+            for tab in sorted(session.tabs.values(), key=lambda candidate: candidate.tab_id)
+            if not tab.page.is_closed()
+        ]
+        if not ordered_tabs:
+            return
+        current_index = next(
+            (index for index, tab in enumerate(ordered_tabs) if tab.tab_id == session.current_tab_id),
+            0,
+        )
+        payload = json.dumps({
+            "version": 1,
+            "updatedAt": datetime.now(UTC).isoformat(),
+            "currentIndex": current_index,
+            "tabs": [{"url": tab.page.url} for tab in ordered_tabs],
+        }, ensure_ascii=False)
+        temporary_path = self._tab_state_file.with_name(
+            f"{self._tab_state_file.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+        )
+        file_descriptor = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(file_descriptor, 0o600)
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as state_stream:
+                state_stream.write(payload)
+            file_descriptor = -1
+            os.replace(temporary_path, self._tab_state_file)
+            os.chmod(self._tab_state_file, 0o600)
+        finally:
+            if file_descriptor >= 0:
+                os.close(file_descriptor)
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _register_page(self, session: BrowserSession, page: Page, *, set_current: bool) -> BrowserTab:
         page_key = id(page)
@@ -1488,7 +1959,56 @@ class BrowserRuntime:
         page.on("response", on_response)
         page.on("requestfailed", on_request_failed)
         page.on("close", lambda: on_close())
+        self._start_live_stream(session, tab)
         return tab
+
+    def _start_live_stream(self, session: BrowserSession, tab: BrowserTab) -> None:
+        if tab.live_stream_started or tab.page.is_closed():
+            return
+        try:
+            cdp_session = session.context.new_cdp_session(tab.page)
+            tab.live_cdp_session = cdp_session
+
+            def on_screencast_frame(event: dict[str, Any]) -> None:
+                session_id = event.get("sessionId")
+                try:
+                    frame_data = base64.b64decode(event.get("data") or "")
+                    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+                    width = max(1, int(metadata.get("deviceWidth") or 1))
+                    height = max(1, int(metadata.get("deviceHeight") or 1))
+                    if frame_data:
+                        with self._live_frame_condition:
+                            self._live_frame_sequence += 1
+                            self._live_frames[tab.tab_id] = BrowserLiveFrame(
+                                captured_at=datetime.now(UTC).isoformat(),
+                                data=frame_data,
+                                height=height,
+                                sequence=self._live_frame_sequence,
+                                tab_id=tab.tab_id,
+                                width=width,
+                            )
+                            self._live_frame_condition.notify_all()
+                finally:
+                    if session_id is not None:
+                        try:
+                            cdp_session.send("Page.screencastFrameAck", {"sessionId": session_id})
+                        except Exception:
+                            pass
+
+            cdp_session.on("Page.screencastFrame", on_screencast_frame)
+            cdp_session.send("Page.startScreencast", {
+                "everyNthFrame": 1,
+                "format": "jpeg",
+                "maxHeight": LIVE_FRAME_MAX_HEIGHT,
+                "maxWidth": LIVE_FRAME_MAX_WIDTH,
+                "quality": LIVE_FRAME_QUALITY,
+            })
+            tab.live_stream_started = True
+        except Exception:
+            # Screenshot polling remains the compatibility fallback on browsers
+            # that do not expose the Chromium Page.screencastFrame command.
+            tab.live_cdp_session = None
+            tab.live_stream_started = False
 
     def _drop_tab(self, tab_id: int) -> None:
         if self._session is None:
@@ -1496,6 +2016,18 @@ class BrowserRuntime:
         tab = self._session.tabs.pop(tab_id, None)
         if tab is None:
             return
+        if tab.live_cdp_session is not None:
+            try:
+                tab.live_cdp_session.send("Page.stopScreencast")
+            except Exception:
+                pass
+            try:
+                tab.live_cdp_session.detach()
+            except Exception:
+                pass
+        with self._live_frame_condition:
+            self._live_frames.pop(tab_id, None)
+            self._live_frame_condition.notify_all()
         self._session.page_ids.pop(id(tab.page), None)
         if self._session.current_tab_id == tab_id:
             remaining = sorted(self._session.tabs)
@@ -1743,14 +2275,41 @@ class BrowserRuntime:
 
         class BridgeHandler(BaseHTTPRequestHandler):
             def do_GET(self):
-                if self.path != "/health":
+                if not self._is_authorized():
+                    self._write_json({"ok": False, "error": {"message": "Unauthorized browser bridge request."}}, 401)
+                    return
+                parsed = urlparse(self.path)
+                if parsed.path == "/health":
+                    self._write_json({"ok": True, "result": runtime.dispatch_action("browser_health", {})}, 200)
+                    return
+                if parsed.path == "/viewer/frame":
+                    query = parse_qs(parsed.query)
+                    try:
+                        tab_id = int((query.get("tabId") or [""])[0])
+                        after_sequence = int((query.get("after") or ["0"])[0])
+                        wait_ms = int((query.get("waitMs") or ["0"])[0])
+                    except (TypeError, ValueError):
+                        self._write_json({"ok": False, "error": {"message": "Invalid live frame query."}}, 400)
+                        return
+                    frame = runtime.read_live_frame(tab_id, after_sequence, wait_ms)
+                    if frame is None:
+                        self.send_response(204)
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        return
+                    self._write_live_frame(frame)
+                    return
+                else:
                     self.send_response(404)
                     self.end_headers()
                     return
-                self._write_json({"ok": True, "result": runtime.dispatch_action("browser_health", {})}, 200)
 
             def do_POST(self):
-                if self.path != "/call":
+                if not self._is_authorized():
+                    self._write_json({"ok": False, "error": {"message": "Unauthorized browser bridge request."}}, 401)
+                    return
+                allowed_paths = {"/call"}
+                if self.path not in allowed_paths:
                     self.send_response(404)
                     self.end_headers()
                     return
@@ -1798,6 +2357,10 @@ class BrowserRuntime:
             def log_message(self, format, *args):
                 del format, args
 
+            def _is_authorized(self) -> bool:
+                authorization = self.headers.get("authorization", "")
+                return hmac.compare_digest(authorization, f"Bearer {runtime._bridge_token}")
+
             def _write_json(self, payload: dict[str, Any], status_code: int):
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self.send_response(status_code)
@@ -1805,6 +2368,18 @@ class BrowserRuntime:
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _write_live_frame(self, frame: BrowserLiveFrame):
+                self.send_response(200)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(frame.data)))
+                self.send_header("X-Frame-Captured-At", frame.captured_at)
+                self.send_header("X-Frame-Height", str(frame.height))
+                self.send_header("X-Frame-Sequence", str(frame.sequence))
+                self.send_header("X-Frame-Width", str(frame.width))
+                self.end_headers()
+                self.wfile.write(frame.data)
 
         last_error: Exception | None = None
         start_port = self._resolve_bridge_port()
@@ -1818,13 +2393,23 @@ class BrowserRuntime:
                 self._bridge_port = port
                 self._bridge_server = server
                 self._bridge_thread = thread
-                self._bridge_file.write_text(json.dumps({
+                bridge_payload = json.dumps({
                     "pid": os.getpid(),
                     "port": port,
                     "url": f"http://127.0.0.1:{port}",
+                    "token": self._bridge_token,
                     "profile_dir": str(self._profile_dir),
                     "started_at": datetime.now(UTC).isoformat(),
-                }, ensure_ascii=False), "utf-8")
+                }, ensure_ascii=False)
+                bridge_fd = os.open(self._bridge_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                try:
+                    os.fchmod(bridge_fd, 0o600)
+                    with os.fdopen(bridge_fd, "w", encoding="utf-8") as bridge_stream:
+                        bridge_stream.write(bridge_payload)
+                    bridge_fd = -1
+                finally:
+                    if bridge_fd >= 0:
+                        os.close(bridge_fd)
                 return
             except OSError as exc:
                 last_error = exc

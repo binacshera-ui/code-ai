@@ -16,6 +16,7 @@ try {
   const result = await runGeminiEphemeralSpecialistPrompt({
     profileId: process.env.CODE_AI_UX_GEMINI_PROFILE || 'gemini-developer',
     cwd: workspace,
+    model: 'gemini-3.1-pro-preview',
     timeoutMs: 180_000,
     prompt: [
       'Act as a read-only UX/product specialist in a smoke test. Read product-context.md; do not edit files or run commands.',
@@ -29,6 +30,7 @@ try {
   assert.equal(payload.consultation_type, 'ux_customer_journey');
   assert.equal(typeof payload.executive_position, 'string');
   assert.ok(Array.isArray(payload.customer_stage_plan));
+  assert.equal(result.model, 'gemini-3.1-pro-preview');
   console.log(`UX_MODE_GEMINI_SMOKE_OK model=${result.model || 'unknown'}`);
 } finally {
   await fs.rm(workspace, { recursive: true, force: true });

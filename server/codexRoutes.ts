@@ -1,6 +1,9 @@
 import { createHmac, timingSafeEqual, randomUUID } from 'crypto';
+import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
+import { hostname } from 'os';
 import path from 'path';
+import { promisify } from 'util';
 import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
 import type { AppMode, AppProvider } from './config.js';
@@ -32,6 +35,7 @@ import {
 import { CLIENT_CRASH_LOG } from './codexCrashLogs.js';
 import {
   cancelCodexQueueItem,
+  clearCodexQueueItemStopSchedule,
   deleteCodexQueueItem,
   enqueueCodexQueueItem,
   getCodexQueueItem,
@@ -39,12 +43,20 @@ import {
   listCodexQueueItems,
   resolveCodexQueueSessionId,
   retryCodexQueueItem,
+  setCodexQueueItemStopSchedule,
 } from './codexQueue.js';
 import { CODEX_APP_CONFIG } from './config.js';
 import { appendCodexFileLog, readRecentCodexFileLogs } from './codexFileLogs.js';
 import { MAX_PREVIEW_FILE_BYTES, resolveCodexFileTarget } from './codexFileResolver.js';
 import { browseCodexFileTree } from './codexFileTree.js';
 import { browseCodexFolders, resolveCodexFolderPath } from './codexFolderBrowser.js';
+import {
+  closeCodexTerminal,
+  createCodexTerminalSession,
+  readCodexTerminalOutput,
+  resizeCodexTerminal,
+  writeCodexTerminalInput,
+} from './codexTerminal.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
 import { deleteSessionVisibility } from './codexSessionVisibility.js';
 import {
@@ -140,9 +152,21 @@ import {
   validateSessionUxMode,
 } from './codexUxMode.js';
 import {
+  buildSessionPersonalChromePromptAdditions,
+  consumeSessionPersonalChromeModeAfterDispatch,
+  deleteSessionPersonalChromeMode,
+  getSessionPersonalChromeMode,
+  getSessionPersonalChromeModeRecord,
+  rebindSessionPersonalChromeMode,
+  setSessionPersonalChromeMode,
+} from './codexPersonalChromeMode.js';
+import {
   closeSessionBrowserViewer,
+  inspectSessionBrowserViewerPoint,
+  openSessionBrowserViewerLiveFrameReader,
   openSessionBrowserViewer,
   performSessionBrowserViewerAction,
+  queueSessionBrowserViewerInput,
   resolveSessionBrowserViewerFramePath,
 } from './codexBrowserViewer.js';
 import {
@@ -173,6 +197,11 @@ import { buildSessionPromptAdditionsContext } from './sessionPromptAdditions.js'
 import { listUnifiedSkills } from './skillCatalogService.js';
 import { getSelectedPermissionModeId } from './providerPermissions.js';
 import {
+  copySessionFinalNotificationPreference,
+  deleteSessionFinalNotificationPreference,
+  rebindSessionFinalNotificationPreference,
+} from './codexFinalNotifications.js';
+import {
   buildSupportPromptEnvelope,
   deleteSupportSessionRecord,
   decorateSupportSessionDetail,
@@ -187,6 +216,15 @@ import {
   type SupportPromptEnvelope,
 } from './supportAgentService.js';
 import { deleteSessionChangeRecords } from './sessionChangeTracker.js';
+import { normalizeCanonicalFileName } from './fileNameNormalizer.js';
+import {
+  listCodeAiServers,
+  refreshRemoteHostHealth,
+} from './remoteHostRegistry.js';
+import {
+  authenticatePersonalChromeUiToken,
+  readPersonalChromeUiCredentials,
+} from './personalChromeBridge.js';
 
 const router = Router();
 const MAX_UPLOAD_SIZE = 15 * 1024 * 1024;
@@ -197,21 +235,16 @@ const CODEX_CLIENT_LOG_FILE = CLIENT_CRASH_LOG;
 const DEVICE_UNLOCK_COOKIE = 'code_ai_device_unlock';
 const FORUM_SESSION_COOKIE = 'forum.session';
 const SUPPORT_WEBHOOK_TOKEN = process.env.CODEX_SUPPORT_WEBHOOK_TOKEN?.trim() || '';
+const execFileAsync = promisify(execFile);
 
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 function sanitizeFileName(fileName: string): string {
-  const extension = path.extname(fileName);
-  const stem = path.basename(fileName, extension);
-  const normalized = stem
-    .normalize('NFKD')
-    .replace(/[^\w.-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-
-  return `${normalized || 'attachment'}${extension}`;
+  return normalizeCanonicalFileName(fileName, {
+    fallbackName: 'attachment',
+  });
 }
 
 function isPathInside(rootPath: string, targetPath: string): boolean {
@@ -796,6 +829,40 @@ export function readAuthenticatedUser(req: Request) {
 }
 
 export function requireCodexAccess(req: Request, res: Response, next: NextFunction) {
+  if ((req as any).codeAiRemoteAgentAuthenticated === true) {
+    (req as any).codexAuth = {
+      authenticated: true,
+      localBypass: false,
+      publicAccess: false,
+      deviceUnlocked: true,
+      remoteAgent: true,
+      user: {
+        id: 'code-ai-control-plane',
+        email: '',
+        name: 'code-ai control plane',
+      },
+    };
+    next();
+    return;
+  }
+
+  const extensionCredentials = readPersonalChromeUiCredentials(req);
+  if (extensionCredentials) {
+    void authenticatePersonalChromeUiToken(extensionCredentials.deviceId, extensionCredentials.token)
+      .then((authState) => {
+        if (!authState) {
+          res.status(401).json({ authenticated: false, error: 'תוסף CODE-AI אינו מזווג או שהגישה שלו בוטלה.' });
+          return;
+        }
+        (req as any).codexAuth = authState;
+        next();
+      })
+      .catch((error) => {
+        res.status(500).json({ authenticated: false, error: error?.message || 'Extension authentication failed' });
+      });
+    return;
+  }
+
   const authState = readAuthenticatedUser(req);
 
   if (!authState.authenticated) {
@@ -817,6 +884,23 @@ export function requireCodexAccess(req: Request, res: Response, next: NextFuncti
 
   (req as any).codexAuth = authState;
   next();
+}
+
+function readTerminalOwnerId(req: Request): string {
+  const authState = (req as any).codexAuth;
+  if ((req as any).codeAiRemoteAgentAuthenticated === true) {
+    const proxiedOwner = typeof req.headers['x-code-ai-proxied-owner'] === 'string'
+      ? req.headers['x-code-ai-proxied-owner'].trim().toLowerCase()
+      : '';
+    if (/^[a-f0-9]{64}$/.test(proxiedOwner)) {
+      return `proxied:${proxiedOwner}`;
+    }
+  }
+
+  const userId = String(authState?.user?.id || 'code-ai-local-user');
+  return createHmac('sha256', CODEX_APP_CONFIG.sessionSecret)
+    .update(userId)
+    .digest('hex');
 }
 
 async function logFileRouteEvent(
@@ -1003,6 +1087,20 @@ async function copySessionRemindersToSession(
   await copySessionReminders(sourceProfileId, sourceSessionId, targetProfileId, targetSessionId);
 }
 
+async function copySessionNotificationPreferenceToSession(
+  sourceProfileId: string,
+  targetProfileId: string,
+  sourceSessionId: string,
+  targetSessionId: string
+) {
+  await copySessionFinalNotificationPreference(
+    sourceProfileId,
+    sourceSessionId,
+    targetProfileId,
+    targetSessionId
+  );
+}
+
 async function deleteSessionMetadata(profileId: string, sessionId: string) {
   await Promise.all([
     deleteSessionVisibility(profileId, sessionId),
@@ -1014,6 +1112,8 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
     deleteSessionBrowserMode(profileId, sessionId),
     deleteSessionDesignMode(profileId, sessionId),
     deleteSessionUxMode(profileId, sessionId),
+    deleteSessionPersonalChromeMode(profileId, sessionId),
+    deleteSessionFinalNotificationPreference(profileId, sessionId),
     deleteSessionTrigger(profileId, sessionId),
     deleteForkSessionMetadata(sessionId),
     deleteSupportSessionRecord(profileId, sessionId),
@@ -1544,6 +1644,73 @@ router.post('/uploads', requireCodexAccess, upload.array('files', MAX_UPLOAD_FIL
   }
 });
 
+router.get('/remote-agent/health', requireCodexAccess, async (_req, res) => {
+  try {
+    const profiles = await getAvailableProfiles();
+    let codexVersion: string | null = null;
+    try {
+      const result = await execFileAsync(process.env.CODEX_BIN?.trim() || 'codex', ['--version'], {
+        timeout: 3_000,
+        maxBuffer: 256 * 1024,
+      });
+      codexVersion = String(result.stdout || result.stderr || '').trim() || null;
+    } catch {
+      codexVersion = null;
+    }
+
+    const decoratedProfiles = await Promise.all(profiles.map(async (profile) => {
+      let authenticated = false;
+      if (profile.provider === 'codex') {
+        authenticated = await fs.access(path.join(profile.codexHome, 'auth.json'))
+          .then(() => true)
+          .catch(() => false);
+      } else {
+        authenticated = true;
+      }
+      return {
+        id: profile.id,
+        label: profile.label,
+        provider: profile.provider,
+        mode: profile.mode,
+        authenticated,
+      };
+    }));
+
+    res.json({
+      ok: true,
+      hostname: hostname(),
+      version: '1.0.0',
+      codexVersion,
+      checkedAt: new Date().toISOString(),
+      profiles: decoratedProfiles,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to read remote agent health' });
+  }
+});
+
+router.get('/servers', requireCodexAccess, async (req, res) => {
+  try {
+    const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    const servers = await listCodeAiServers({ refresh });
+    res.json({ servers });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load code-ai servers' });
+  }
+});
+
+router.post('/servers/:serverId/connect', requireCodexAccess, async (req, res) => {
+  try {
+    const serverId = Array.isArray(req.params.serverId) ? req.params.serverId[0] : req.params.serverId;
+    const health = await refreshRemoteHostHealth(serverId);
+    const servers = await listCodeAiServers();
+    const server = servers.find((candidate) => candidate.id === serverId) || null;
+    res.json({ server, health });
+  } catch (error: any) {
+    res.status(502).json({ error: error.message || 'Failed to connect remote code-ai server' });
+  }
+});
+
 router.get('/profiles', requireCodexAccess, async (_req, res) => {
   try {
     const mode = readRequestedMode((_req as any).query?.mode);
@@ -1877,6 +2044,90 @@ router.get('/files/logs', requireCodexAccess, async (req, res) => {
   }
 });
 
+router.post('/terminal/sessions', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+    if (!profileId || !requestedCwd) {
+      res.status(400).json({ error: 'Profile id and terminal directory are required' });
+      return;
+    }
+
+    const { profile, resolvedPath } = await resolveCodexFolderPath(requestedCwd, profileId);
+    const terminal = createCodexTerminalSession({
+      ownerId: readTerminalOwnerId(req),
+      profile,
+      cwd: resolvedPath,
+      columns: typeof req.body?.columns === 'number' ? req.body.columns : undefined,
+      rows: typeof req.body?.rows === 'number' ? req.body.rows : undefined,
+    });
+    res.status(201).json({ terminal });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to start terminal' });
+  }
+});
+
+router.get('/terminal/sessions/:terminalId/output', requireCodexAccess, (req, res) => {
+  try {
+    const terminalId = readRouteParam(req.params.terminalId);
+    const cursor = typeof req.query.cursor === 'string'
+      ? Number.parseInt(req.query.cursor, 10)
+      : 0;
+    const output = readCodexTerminalOutput(
+      readTerminalOwnerId(req),
+      terminalId,
+      Number.isInteger(cursor) ? cursor : 0
+    );
+    res.json(output);
+  } catch (error: any) {
+    const message = error.message || 'Failed to read terminal output';
+    res.status(message === 'Terminal session was not found' ? 404 : 400).json({ error: message });
+  }
+});
+
+router.post('/terminal/sessions/:terminalId/input', requireCodexAccess, (req, res) => {
+  try {
+    const terminalId = readRouteParam(req.params.terminalId);
+    const data = typeof req.body?.data === 'string' ? req.body.data : '';
+    writeCodexTerminalInput(readTerminalOwnerId(req), terminalId, data);
+    res.json({ accepted: true });
+  } catch (error: any) {
+    const message = error.message || 'Failed to write terminal input';
+    res.status(message === 'Terminal session was not found' ? 404 : 400).json({ error: message });
+  }
+});
+
+router.post('/terminal/sessions/:terminalId/resize', requireCodexAccess, (req, res) => {
+  try {
+    const terminalId = readRouteParam(req.params.terminalId);
+    resizeCodexTerminal(
+      readTerminalOwnerId(req),
+      terminalId,
+      typeof req.body?.columns === 'number' ? req.body.columns : undefined,
+      typeof req.body?.rows === 'number' ? req.body.rows : undefined
+    );
+    res.json({ resized: true });
+  } catch (error: any) {
+    const message = error.message || 'Failed to resize terminal';
+    res.status(message === 'Terminal session was not found' ? 404 : 400).json({ error: message });
+  }
+});
+
+router.delete('/terminal/sessions/:terminalId', requireCodexAccess, (req, res) => {
+  try {
+    const terminalId = readRouteParam(req.params.terminalId);
+    closeCodexTerminal(readTerminalOwnerId(req), terminalId);
+    res.json({ closed: true });
+  } catch (error: any) {
+    const message = error.message || 'Failed to close terminal';
+    res.status(message === 'Terminal session was not found' ? 404 : 400).json({ error: message });
+  }
+});
+
 router.get('/sessions', requireCodexAccess, async (req, res) => {
   try {
     const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
@@ -1979,6 +2230,7 @@ router.post('/sessions/copy', requireCodexAccess, async (req, res) => {
         await copySessionInstructionToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
         await copySessionContextSelectionToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
         await copySessionRemindersToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
+        await copySessionNotificationPreferenceToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
 
         copied.push({
           sessionId,
@@ -2334,6 +2586,7 @@ router.post('/sessions/:sessionId/fork', requireCodexAccess, async (req, res) =>
     );
     await copySessionContextSelectionToSession(profileId, profileId, sourceSession.id, forkResult.sessionId);
     await copySessionRemindersToSession(profileId, profileId, sourceSession.id, forkResult.sessionId);
+    await copySessionNotificationPreferenceToSession(profileId, profileId, sourceSession.id, forkResult.sessionId);
     await recordForkSessionMetadata({
       sessionId: forkResult.sessionId,
       profileId,
@@ -2462,6 +2715,7 @@ router.post('/sessions/:sessionId/transfer', requireCodexAccess, async (req, res
     );
     await copySessionContextSelectionToSession(profileId, targetProfile.id, sourceSession.id, draft.sessionId);
     await copySessionRemindersToSession(profileId, targetProfile.id, sourceSession.id, draft.sessionId);
+    await copySessionNotificationPreferenceToSession(profileId, targetProfile.id, sourceSession.id, draft.sessionId);
     const autoPrompt = buildTransferAutoPrompt(selectedEntry);
     const queueItem = await enqueueCodexQueueItem({
       profileId: targetProfile.id,
@@ -2684,6 +2938,10 @@ router.post('/session-triggers/:triggerId/fire', async (req, res) => {
     const uxMode = uxModeRecord
       ? await getSessionUxMode(trigger.profileId, trigger.sessionId)
       : null;
+    const personalChromeModeRecord = await getSessionPersonalChromeModeRecord(trigger.profileId, trigger.sessionId);
+    const personalChromeMode = personalChromeModeRecord
+      ? await getSessionPersonalChromeMode(trigger.profileId, trigger.sessionId)
+      : null;
     const triggerPrompt = buildSessionTriggerPrompt(trigger.label, req.body);
     const item = await enqueueCodexQueueItem({
       profileId: trigger.profileId,
@@ -2700,6 +2958,7 @@ router.post('/session-triggers/:triggerId/fire', async (req, res) => {
       browserMode,
       designMode,
       uxMode,
+      personalChromeMode,
     });
 
     await recordSessionTriggerInvocation(trigger.profileId, trigger.sessionId, triggerPrompt.payloadPreview);
@@ -3005,6 +3264,48 @@ router.post('/session-ux-mode', requireCodexAccess, async (req, res) => {
   }
 });
 
+router.get('/session-personal-chrome-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' ? req.query.profileId.trim() : '';
+    const sessionKey = typeof req.query.sessionKey === 'string' ? req.query.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    res.json({ personalChromeMode: await getSessionPersonalChromeMode(profileId, sessionKey) });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load personal Chrome mode' });
+  }
+});
+
+router.post('/session-personal-chrome-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId.trim() : '';
+    const sessionKey = typeof req.body?.sessionKey === 'string' ? req.body.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const profile = findConfiguredProfile(profileId);
+    if (!profile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    if (req.body?.personalChromeMode?.enabled === true && profile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב Chrome אישי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    const personalChromeMode = await setSessionPersonalChromeMode(
+      profileId,
+      sessionKey,
+      req.body?.personalChromeMode || null,
+    );
+    res.json({ personalChromeMode });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update personal Chrome mode' });
+  }
+});
+
 router.get('/session-design-mode/canvas', requireCodexAccess, async (req, res) => {
   try {
     const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
@@ -3063,6 +3364,110 @@ router.get('/session-browser-viewer', requireCodexAccess, async (req, res) => {
   }
 });
 
+
+router.post('/session-browser-viewer/inspect', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    const x = Number(req.body?.x);
+    const y = Number(req.body?.y);
+    const tabId = Number.isFinite(Number(req.body?.tabId)) ? Number(req.body?.tabId) : null;
+
+    if (!profileId || !sessionKey || !Number.isFinite(x) || !Number.isFinite(y)) {
+      res.status(400).json({ error: 'Profile id, session key, x and y are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const browserMode = await getSessionBrowserMode(profileId, sessionKey);
+    if (browserMode.enabled !== true) {
+      res.status(409).json({ error: 'Browser mode must be enabled before inspecting the remote viewer' });
+      return;
+    }
+
+    const inspection = await inspectSessionBrowserViewerPoint(
+      configuredProfile,
+      sessionKey,
+      x,
+      y,
+      tabId,
+    );
+    res.json({ inspection });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to inspect browser element' });
+  }
+});
+
+router.post('/session-browser-viewer/input', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    const inputType = typeof req.body?.input === 'string' ? req.body.input.trim() : '';
+    if (!profileId || !sessionKey || !inputType) {
+      res.status(400).json({ error: 'Profile id, session key and input are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const tabId = Number.isFinite(Number(req.body?.tabId)) ? Number(req.body.tabId) : null;
+
+    if (inputType === 'hover') {
+      const x = Number(req.body?.x);
+      const y = Number(req.body?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 2560 || y > 2160) {
+        res.status(400).json({ error: 'Hover input requires viewport coordinates' });
+        return;
+      }
+      await queueSessionBrowserViewerInput(configuredProfile, sessionKey, {
+        type: 'hover',
+        tabId,
+        x,
+        y,
+      });
+      res.status(202).json({ queued: true });
+      return;
+    }
+
+    if (inputType === 'scroll') {
+      const deltaX = Number(req.body?.deltaX || 0);
+      const deltaY = Number(req.body?.deltaY || 0);
+      if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || (!deltaX && !deltaY)) {
+        res.status(400).json({ error: 'Scroll input requires a finite wheel delta' });
+        return;
+      }
+      await queueSessionBrowserViewerInput(configuredProfile, sessionKey, {
+        type: 'scroll',
+        tabId,
+        deltaX: Math.max(-2_400, Math.min(2_400, deltaX)),
+        deltaY: Math.max(-2_400, Math.min(2_400, deltaY)),
+      });
+      res.status(202).json({ queued: true });
+      return;
+    }
+
+    res.status(400).json({ error: 'Unsupported browser viewer input' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to queue browser viewer input' });
+  }
+});
+
 router.post('/session-browser-viewer/action', requireCodexAccess, async (req, res) => {
   try {
     const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
@@ -3091,13 +3496,30 @@ router.post('/session-browser-viewer/action', requireCodexAccess, async (req, re
     let viewer;
     switch (actionType) {
       case 'back':
+      case 'capture':
       case 'forward':
       case 'refresh':
+      case 'sync':
         viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
           type: actionType,
           tabId: numericTabId,
         });
         break;
+      case 'inspect': {
+        const x = Number(req.body?.x);
+        const y = Number(req.body?.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          res.status(400).json({ error: 'Inspect actions require numeric x and y coordinates' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'inspect',
+          tabId: numericTabId,
+          x,
+          y,
+        });
+        break;
+      }
       case 'click': {
         const x = Number(req.body?.x);
         const y = Number(req.body?.y);
@@ -3172,6 +3594,25 @@ router.post('/session-browser-viewer/action', requireCodexAccess, async (req, re
           url: normalizeBrowserViewerNavigationUrl(req.body?.url),
         });
         break;
+      case 'resize': {
+        const width = Math.round(Number(req.body?.width));
+        const height = Math.round(Number(req.body?.height));
+        if (!Number.isFinite(width) || !Number.isFinite(height)) {
+          res.status(400).json({ error: 'Resize actions require numeric width and height' });
+          return;
+        }
+        if (width < 320 || width > 2560 || height < 320 || height > 2160) {
+          res.status(400).json({ error: 'Viewport dimensions are outside the supported range' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'resize',
+          tabId: numericTabId,
+          width,
+          height,
+        });
+        break;
+      }
       case 'scroll': {
         const direction = typeof req.body?.direction === 'string' && req.body.direction.trim()
           ? req.body.direction.trim()
@@ -3242,6 +3683,123 @@ router.delete('/session-browser-viewer', requireCodexAccess, async (req, res) =>
     res.status(204).end();
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to close session browser viewer' });
+  }
+});
+
+router.get('/session-browser-viewer/stream', requireCodexAccess, async (req, res) => {
+  const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+    ? req.query.profileId.trim()
+    : undefined;
+  const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+    ? req.query.sessionKey.trim()
+    : undefined;
+  const tabId = Number(req.query.tabId);
+  const requestedWidth = Number(req.query.width);
+  const requestedHeight = Number(req.query.height);
+  const expectedWidth = Number.isFinite(requestedWidth) && requestedWidth > 0 ? Math.round(requestedWidth) : null;
+  const expectedHeight = Number.isFinite(requestedHeight) && requestedHeight > 0 ? Math.round(requestedHeight) : null;
+
+  if (!profileId || !sessionKey || !Number.isFinite(tabId) || tabId <= 0) {
+    res.status(400).json({ error: 'Profile id, session key and tab id are required' });
+    return;
+  }
+
+  const configuredProfile = findConfiguredProfile(profileId);
+  if (!configuredProfile) {
+    res.status(404).json({ error: 'The selected profile was not found' });
+    return;
+  }
+
+  let closed = false;
+  res.once('close', () => {
+    closed = true;
+  });
+
+  try {
+    const frameReader = await openSessionBrowserViewerLiveFrameReader(configuredProfile, sessionKey);
+    const firstFrameDeadline = Date.now() + 3_000;
+    let firstFrame: Awaited<ReturnType<typeof frameReader.read>> = null;
+    let firstFrameSequence = 0;
+    while (!closed && Date.now() < firstFrameDeadline) {
+      const candidate = await frameReader.read(
+        Math.round(tabId),
+        firstFrameSequence,
+        Math.max(1, firstFrameDeadline - Date.now()),
+      );
+      if (!candidate) break;
+      firstFrameSequence = candidate.sequence;
+      const dimensionsMatch = (
+        (expectedWidth === null || candidate.width === expectedWidth)
+        && (expectedHeight === null || candidate.height === expectedHeight)
+      );
+      if (dimensionsMatch) {
+        firstFrame = candidate;
+        break;
+      }
+    }
+    if (!firstFrame || closed) {
+      if (!closed) res.status(503).end();
+      return;
+    }
+
+    const boundary = 'code-ai-browser-frame';
+    res.status(200);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Content-Type', `multipart/x-mixed-replace; boundary=${boundary}`);
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const waitForDrain = () => new Promise<void>((resolve) => {
+      const finish = () => {
+        res.off('drain', finish);
+        res.off('close', finish);
+        resolve();
+      };
+      res.once('drain', finish);
+      res.once('close', finish);
+    });
+    const writeFrame = async (frame: typeof firstFrame) => {
+      if (!frame || closed) return;
+      const header = Buffer.from(
+        `--${boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.data.length}\r\nX-Frame-Sequence: ${frame.sequence}\r\n\r\n`,
+        'utf-8',
+      );
+      if (!res.write(header)) await waitForDrain();
+      if (closed) return;
+      if (!res.write(frame.data)) await waitForDrain();
+      if (!closed) res.write('\r\n');
+    };
+
+    let sequence = firstFrame.sequence;
+    await writeFrame(firstFrame);
+    // Chromium commits the first MJPEG part reliably once the following part
+    // begins. Prime the stream with the same frame so a static page appears
+    // immediately after a viewport-size reconnect.
+    await writeFrame(firstFrame);
+    while (!closed) {
+      const frame = await frameReader.read(
+        Math.round(tabId),
+        sequence,
+        1_500,
+      );
+      if (!frame || closed) continue;
+      sequence = frame.sequence;
+      if (
+        (expectedWidth !== null && frame.width !== expectedWidth)
+        || (expectedHeight !== null && frame.height !== expectedHeight)
+      ) {
+        continue;
+      }
+      await writeFrame(frame);
+    }
+  } catch (error: any) {
+    if (!closed && !res.headersSent) {
+      res.status(502).json({ error: error.message || 'Failed to open browser live stream' });
+    }
+  } finally {
+    if (!closed && !res.writableEnded) res.end();
   }
 });
 
@@ -4050,6 +4608,12 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     const sessionUxMode = sessionUxModeRecord
       ? await getSessionUxMode(visibleProfileId, sessionContextKey)
       : null;
+    const sessionPersonalChromeModeRecord = sessionContextKey
+      ? await getSessionPersonalChromeModeRecord(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionPersonalChromeMode = sessionPersonalChromeModeRecord
+      ? await getSessionPersonalChromeMode(visibleProfileId, sessionContextKey)
+      : null;
     if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
       return;
@@ -4060,6 +4624,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     }
     if (sessionUxModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב חוויית משתמש זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionPersonalChromeModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב Chrome אישי זמין כרגע רק לסשני Codex.' });
       return;
     }
     const contextCwd = cwd || (
@@ -4104,6 +4672,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       }
       if (sessionUxModeRecord?.enabled) {
         res.status(400).json({ error: 'לא ניתן לשלב מצב חוויית משתמש עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionPersonalChromeModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב Chrome אישי עם מצב סוכנים באותו שלב.' });
         return;
       }
       const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
@@ -4183,6 +4755,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -4237,6 +4810,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -4282,6 +4856,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -4326,6 +4901,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       browserMode: sessionBrowserMode,
       designMode: sessionDesignMode,
       uxMode: sessionUxMode,
+      personalChromeMode: sessionPersonalChromeMode,
       forkContext: hydratedForkDraft.forkContext,
       scheduledAt,
       attachments,
@@ -4350,6 +4926,37 @@ router.post('/queue/items/:itemId/cancel', requireCodexAccess, async (req, res) 
     res.json({ item });
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to cancel queue item' });
+  }
+});
+
+router.put('/queue/items/:itemId/stop-schedule', requireCodexAccess, async (req, res) => {
+  try {
+    const stopAt = typeof req.body?.stopAt === 'string' ? req.body.stopAt.trim() : '';
+    const mode = req.body?.mode === 'hard' || req.body?.mode === 'conditional'
+      ? req.body.mode
+      : null;
+    const question = typeof req.body?.question === 'string' ? req.body.question : null;
+    if (!stopAt || !mode) {
+      res.status(400).json({ error: 'Stop time and stop mode are required' });
+      return;
+    }
+
+    const item = await setCodexQueueItemStopSchedule(
+      readRouteParam(req.params.itemId),
+      { stopAt, mode, question }
+    );
+    res.json({ item });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to schedule queue item stop' });
+  }
+});
+
+router.delete('/queue/items/:itemId/stop-schedule', requireCodexAccess, async (req, res) => {
+  try {
+    const item = await clearCodexQueueItemStopSchedule(readRouteParam(req.params.itemId));
+    res.json({ item });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to remove queue item stop schedule' });
   }
 });
 
@@ -4502,6 +5109,10 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const sessionUxMode = sessionUxModeRecord
       ? await getSessionUxMode(visibleProfileId, sessionContextKey)
       : null;
+    const sessionPersonalChromeModeRecord = await getSessionPersonalChromeModeRecord(visibleProfileId, sessionContextKey);
+    const sessionPersonalChromeMode = sessionPersonalChromeModeRecord
+      ? await getSessionPersonalChromeMode(visibleProfileId, sessionContextKey)
+      : null;
     if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
       return;
@@ -4512,6 +5123,10 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     }
     if (sessionUxModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב חוויית משתמש זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionPersonalChromeModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב Chrome אישי זמין כרגע רק לסשני Codex.' });
       return;
     }
     const contextCwd = cwd || (sessionId
@@ -4531,12 +5146,16 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const uxModePromptSuffix = sessionUxModeRecord
       ? buildSessionUxModePromptAdditions(sessionUxModeRecord)
       : null;
+    const personalChromeModePromptSuffix = sessionPersonalChromeModeRecord
+      ? buildSessionPersonalChromePromptAdditions(sessionPersonalChromeModeRecord)
+      : null;
     const providerPromptWithAdditions = [
       providerPrompt,
       additionsPromptSuffix,
       browserModePromptSuffix,
       designModePromptSuffix,
       uxModePromptSuffix,
+      personalChromeModePromptSuffix,
     ]
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .join('\n\n');
@@ -4576,6 +5195,10 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         res.status(400).json({ error: 'לא ניתן לשלב מצב חוויית משתמש עם מצב סוכנים באותו שלב.' });
         return;
       }
+      if (sessionPersonalChromeModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב Chrome אישי עם מצב סוכנים באותו שלב.' });
+        return;
+      }
       const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
       if (!sourceProfile) {
         res.status(404).json({ error: 'The selected profile was not found' });
@@ -4607,6 +5230,11 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
             cwd: updatedRecord.cwd,
             injectDirectoryContext: !updatedRecord.plannerSessionId,
             executionConfig: plannerExecutionConfig,
+            finalNotification: {
+              profileId: visibleProfileId,
+              sessionKey: updatedRecord.plannerSessionId || sessionContextKey,
+              dedupeKey: clientRequestId,
+            },
           }
         );
         const parsedPlan = await readAgentPlanJsonFromDisk(updatedRecord);
@@ -4614,6 +5242,11 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           plannerSessionId: result.sessionId,
           plannerProfileId,
         });
+        await rebindSessionFinalNotificationPreference(
+          visibleProfileId,
+          updatedRecord.plannerSessionId || sessionContextKey,
+          result.sessionId
+        );
         await recordAgentSessionLinkedSession({
           sessionId: result.sessionId,
           agentSessionId: savedRecord.id,
@@ -4707,6 +5340,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           attachments: index === 0 ? attachments : [],
         });
@@ -4769,6 +5403,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           attachments: index === 0 ? attachments : [],
         });
@@ -4822,6 +5457,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           browserMode: sessionBrowserMode,
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           attachments: index === 0 ? attachments : [],
           goalMode: {
@@ -4862,6 +5498,14 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         uxMode: sessionUxMode,
         uxModeProfileId: visibleProfileId,
         uxModeSessionKey: supportSessionKey,
+        personalChromeMode: sessionPersonalChromeMode,
+        personalChromeModeProfileId: visibleProfileId,
+        personalChromeModeSessionKey: supportSessionKey,
+        finalNotification: {
+          profileId: visibleProfileId,
+          sessionKey: supportSessionKey,
+          dedupeKey: clientRequestId,
+        },
       });
       if (sessionId && result.sessionId !== sessionId) {
         const sourceSession = await getAgentSessionDetail(sessionId, visibleProfileId, {
@@ -4879,16 +5523,20 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         await rebindSessionContextSelection(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionReminders(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionBrowserMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionPersonalChromeMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionDesignMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionUxMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionFinalNotificationPreference(visibleProfileId, sessionId, result.sessionId);
       }
       if (!sessionId && supportSessionKey !== result.sessionId) {
         await rebindSessionInstruction(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionContextSelection(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionReminders(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionBrowserMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionPersonalChromeMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionDesignMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionUxMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionFinalNotificationPreference(visibleProfileId, supportSessionKey, result.sessionId);
       }
       if (supportEnvelope && supportSessionKey !== result.sessionId) {
         await rebindSupportSessionRecord(visibleProfileId, supportSessionKey, result.sessionId);
@@ -4901,6 +5549,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       }
       if (sessionUxModeRecord && sessionUxModeRecord.enabled !== true) {
         await consumeSessionUxModeAfterDispatch(visibleProfileId, result.sessionId);
+      }
+      if (sessionPersonalChromeModeRecord && sessionPersonalChromeModeRecord.enabled !== true) {
+        await consumeSessionPersonalChromeModeAfterDispatch(visibleProfileId, result.sessionId);
       }
       await deleteSessionContextSelection(visibleProfileId, supportSessionKey);
       const session = await decorateSessionDetailForClient(
@@ -4941,6 +5592,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       browserMode: sessionBrowserMode,
       designMode: sessionDesignMode,
       uxMode: sessionUxMode,
+      personalChromeMode: sessionPersonalChromeMode,
       forkContext: hydratedForkDraft.forkContext,
       attachments,
       recurrence,
@@ -5038,9 +5690,15 @@ async function handleSupportAskRequest(
         cwd,
         injectDirectoryContext: !sessionId,
         executionConfig,
+        finalNotification: {
+          profileId: profile.id,
+          sessionKey: sessionId || queueKey,
+          dedupeKey: clientRequestId,
+        },
       });
       if ((sessionId || queueKey) !== result.sessionId) {
         await rebindSupportSessionRecord(profile.id, sessionId || queueKey, result.sessionId);
+        await rebindSessionFinalNotificationPreference(profile.id, sessionId || queueKey, result.sessionId);
       }
       const session = await decorateSessionDetailForClient(
         profile.id,
@@ -5080,6 +5738,7 @@ async function handleSupportAskRequest(
     res.status(500).json({ error: error.message || 'Support request failed' });
   }
 }
+
 
 router.post('/support/ask', requireCodexAccess, async (req, res) => {
   await handleSupportAskRequest(req, res, 'api');

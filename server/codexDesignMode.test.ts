@@ -12,6 +12,7 @@ import {
   buildSessionDesignModePromptAdditions,
   deleteSessionDesignMode,
   dispatchDesignConsultationForTests,
+  extractDesignSpecForTests,
   getSessionDesignModeRecord,
   prepareCodexDesignModeForRun,
   setGeminiDesignInvokerForTests,
@@ -53,6 +54,54 @@ function fakeCatalog() {
     permissions: null,
   } as any;
 }
+
+test('recovers the final contract-compatible design spec from noisy multi-object output', () => {
+  const draft = {
+    version: '1.0',
+    consultation_type: 'design_review',
+    executive_direction: 'Draft direction',
+    preserve_exactly: ['Keep behavior'],
+    implementation_handoff: [{ code_snippet: '.clock { color: red; }' }],
+    validation_checklist: ['Draft check'],
+    design_tokens: { colors: [{ role: 'draft', value: '#ff0000' }] },
+    component_blueprint: [{ target: '.clock', change: 'Draft only' }],
+    accessibility_rules: ['Draft rule'],
+  };
+  const final = {
+    version: '1.0',
+    consultation_type: 'design_review',
+    executive_direction: 'Final accepted direction',
+    preserve_exactly: ['Keep behavior'],
+    implementation_handoff: [{
+      language: 'css',
+      code_snippet: '.clock { color: var("--clock-accent"); }',
+    }],
+    validation_checklist: ['Final check'],
+  };
+  const raw = [
+    'Analysis containing prose braces {not valid JSON}.',
+    '```json',
+    JSON.stringify(draft),
+    '```',
+    'The response is refined below.',
+    '```json',
+    JSON.stringify(final),
+    '```',
+    'Trailing non-JSON commentary.',
+  ].join('\n');
+
+  const parsed = extractDesignSpecForTests(raw, 'design_review');
+  assert.equal(parsed.executive_direction, 'Final accepted direction');
+  assert.equal(parsed.consultation_type, 'design_review');
+  assert.equal(
+    (parsed.implementation_handoff as Array<Record<string, unknown>>)[0]?.code_snippet,
+    '.clock { color: var("--clock-accent"); }',
+  );
+  assert.throws(
+    () => extractDesignSpecForTests('Prose only, then {"status":"ok"}.', 'design_review'),
+    /contract-compatible JSON object/,
+  );
+});
 
 before(async () => {
   testRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'code-ai-design-mode-'));
@@ -135,6 +184,12 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
     (await fs.lstat(path.join(prepared.envCodeXHome, 'skills', 'gemini-design-partner'))).isSymbolicLink(),
     true,
   );
+  const activeSkill = await fs.readFile(
+    path.join(prepared.envCodeXHome, 'skills', 'gemini-design-partner', 'SKILL.md'),
+    'utf8',
+  );
+  assert.match(activeSkill, /three total `design_review` calls/);
+  assert.match(activeSkill, /implementation_handoff\.code_snippet/);
   await assert.rejects(
     fs.access(path.join(codexHome, 'skills', 'gemini-design-partner')),
     /ENOENT/,
@@ -142,6 +197,8 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
   const activePrompt = buildSessionDesignModePromptAdditions(stored);
   assert.match(activePrompt, /omit, full או region/);
   assert.match(activePrompt, /לא נשלח אוטומטית/);
+  assert.match(activePrompt, /מקור המימוש המועדף/);
+  assert.match(activePrompt, /לכל היותר 3 פעמים/);
 
   const bridgeInfo = JSON.parse(await fs.readFile(stored.bridgeInfoFile, 'utf8')) as {
     url: string;
@@ -156,7 +213,7 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
       prompt: input.prompt,
       dimensions: region ? readPngDimensions(region) : null,
     });
-    return {
+    const standardResponse = {
       model: input.model || 'gemini-3-pro-preview',
       finalMessage: JSON.stringify({
         version: '1.0',
@@ -164,6 +221,29 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
         preserve_exactly: ['Keep action'],
         implementation_handoff: [{ file_hint: 'src/Card.tsx', instruction: 'Polish visual hierarchy only.' }],
       }),
+    };
+    if (input.prompt.includes('Return irrecoverable output')) {
+      return { ...standardResponse, finalMessage: '午-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x' };
+    }
+    if (!input.prompt.includes('Recover the final review')) return standardResponse;
+    const draft = {
+      version: '1.0',
+      consultation_type: 'design_review',
+      executive_direction: 'Draft review',
+      preserve_exactly: ['Keep action'],
+      implementation_handoff: [{ code_snippet: '.rounded { border-radius: 8px; }' }],
+    };
+    const final = {
+      ...draft,
+      executive_direction: 'Recovered final review',
+      implementation_handoff: [{
+        language: 'css',
+        code_snippet: '.rounded { border-radius: 12px; }',
+      }],
+    };
+    return {
+      ...standardResponse,
+      finalMessage: `Reasoning before JSON.\n\`\`\`json\n${JSON.stringify(draft)}\n\`\`\`\nRefined result.\n\`\`\`json\n${JSON.stringify(final)}\n\`\`\`\nDone.`,
     };
   });
 
@@ -189,9 +269,13 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
   assert.match(invocations[0]?.prompt || '', /canvas-region\.png/);
   assert.match(invocations[0]?.prompt || '', /Keep action/);
   assert.match(invocations[0]?.prompt || '', /Soft editorial interface/);
+  assert.match(invocations[0]?.prompt || '', /primary implementation source/);
+  assert.match(invocations[0]?.prompt || '', /code_snippet is required/);
   assert.doesNotMatch(invocations[0]?.prompt || '', /must-never-reach-gemini/);
   assert.equal((regionResult.canvas_decision as any).mode, 'region');
   assert.equal((regionResult.implementation_contract as any).code_and_behavior_owner, 'Codex');
+  assert.equal((regionResult.implementation_contract as any).gemini_visual_code_is_primary, true);
+  assert.equal((regionResult.implementation_contract as any).copy_compatible_visual_snippets_verbatim, true);
   await fs.access(String(regionResult.artifact_path));
 
   await dispatchDesignConsultationForTests({
@@ -208,6 +292,52 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
   });
   assert.equal(invocations[1]?.dimensions, null);
   assert.match(invocations[1]?.prompt || '', /No reference image was intentionally supplied/);
+
+  const recoveredReview = await dispatchDesignConsultationForTests({
+    profileId: PROFILE_ID,
+    sessionKey: SESSION_KEY,
+    workspaceCwd: workspaceRoot,
+    record: stored,
+    toolName: 'design_review',
+    arguments: {
+      request: 'Recover the final review from noisy output.',
+      file_paths: ['src/Card.tsx'],
+      canvas_input: { mode: 'omit', reason: 'The parser behavior is under test.' },
+    },
+  });
+  assert.equal(
+    (recoveredReview.design_spec as Record<string, unknown>).executive_direction,
+    'Recovered final review',
+  );
+  assert.equal(
+    ((recoveredReview.design_spec as any).implementation_handoff as Array<Record<string, unknown>>)[0]?.code_snippet,
+    '.rounded { border-radius: 12px; }',
+  );
+
+  await assert.rejects(
+    dispatchDesignConsultationForTests({
+      profileId: PROFILE_ID,
+      sessionKey: SESSION_KEY,
+      workspaceCwd: workspaceRoot,
+      record: stored,
+      toolName: 'design_review',
+      arguments: {
+        request: 'Return irrecoverable output.',
+        canvas_input: { mode: 'omit', reason: 'The invalid-output path is under test.' },
+      },
+    }),
+    (error: any) => {
+      assert.equal(error.designToolError?.error_code, 'DESIGN_OUTPUT_INVALID');
+      assert.equal(error.designToolError?.is_retryable, true);
+      assert.match(error.designToolError?.suggested_remediation || '', /maximum of 3 total design_review calls/);
+      return true;
+    },
+  );
+  const invalidArtifacts = (await fs.readdir(stored.artifactsDir))
+    .filter((name) => name.endsWith('-invalid.json'));
+  assert.equal(invalidArtifacts.length, 1);
+  const invalidMode = (await fs.stat(path.join(stored.artifactsDir, invalidArtifacts[0]))).mode & 0o777;
+  assert.equal(invalidMode, 0o600);
 
   await assert.rejects(
     dispatchDesignConsultationForTests({
@@ -297,4 +427,6 @@ test('the standalone MCP advertises all bounded design tools and the canvas deci
     assert.deepEqual(tool.inputSchema.required, ['request', 'canvas_input']);
     assert.deepEqual(tool.inputSchema.$defs.canvasInput.properties.mode.enum, ['omit', 'full', 'region']);
   }
+  const reviewTool = tools.find((tool: any) => tool.name === 'design_review');
+  assert.match(reviewTool?.description || '', /at most three design_review calls/);
 });

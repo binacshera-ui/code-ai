@@ -42,6 +42,17 @@ def main() -> None:
         # for the initial document and then assert against an interactive control.
         page.goto(BASE_URL, wait_until="domcontentloaded")
         page.locator("button:has(svg.lucide-paperclip)").wait_for(state="visible")
+        # Force a short mobile viewport: this is the state in which the header
+        # action panel used to clip its lower controls instead of scrolling.
+        page.set_viewport_size({"width": 390, "height": 480})
+        page.get_by_role("button", name="פעולות").click()
+        action_scroll_area = page.get_by_test_id("header-actions-scroll-area")
+        action_scroll_area.wait_for(state="visible")
+        assert action_scroll_area.evaluate("element => element.scrollHeight > element.clientHeight"), "Header actions must scroll internally on mobile"
+        action_scroll_area.evaluate("element => { element.scrollTop = element.scrollHeight; }")
+        page.get_by_role("button", name="טרמינל בתיקייה הפעילה").wait_for(state="visible")
+        page.get_by_label("Close actions menu").click(position={"x": 8, "y": 8})
+        page.set_viewport_size({"width": 390, "height": 844})
         page.locator("button:has(svg.lucide-paperclip)").click()
         page.get_by_text("מצבים", exact=True).click()
         page.get_by_text("מצב חוויית משתמש", exact=True).click()

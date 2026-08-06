@@ -4,8 +4,14 @@ from __future__ import annotations
 import argparse
 import json
 import select
+import signal
 import sys
+import time
+from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from browser_mode_runtime import BrowserRuntime, BrowserRuntimeError
 
@@ -139,6 +145,22 @@ TOOL_DEFS = [
         "inputSchema": {
             "type": "object",
             "properties": {"tabId": {"type": "integer"}, "query": {"type": "string"}, "description": {"type": "string"}, "limit": {"type": "integer"}},
+            "additionalProperties": True
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+    },
+    {
+        "name": "inspect_at_point",
+        "title": "Inspect Element At Point",
+        "description": "Inspect the DOM element at viewport coordinates without clicking it. Returns selectors, accessibility metadata, geometry, computed styles, matching CSS rules, source hints, and a redacted text summary.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tabId": {"type": "integer"},
+                "x": {"type": "number"},
+                "y": {"type": "number"}
+            },
+            "required": ["x", "y"],
             "additionalProperties": True
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
@@ -374,6 +396,9 @@ TOOL_DEFS = [
 
 
 def build_runtime(args):
+    if args.bridge_info_file:
+        return BrowserBridgeProxy(args.bridge_info_file)
+
     settings = SimpleNamespace(
         web_browser_executable_path=args.executable_path or None,
         web_browser_profile_dir=args.profile_dir,
@@ -387,14 +412,167 @@ def build_runtime(args):
     return BrowserRuntime(settings)
 
 
+class BrowserBridgeProxy:
+    """Forward MCP calls to the session-owned Chromium runtime.
+
+    The Code-AI viewer owns the real BrowserRuntime process. Codex launches this
+    lightweight stdio MCP adapter, which reads the owner-only bridge discovery
+    file and calls that exact runtime. This keeps the visible tab and the tab
+    operated by the model identical.
+    """
+
+    def __init__(self, bridge_info_file: str) -> None:
+        self._bridge_info_file = Path(bridge_info_file).resolve()
+
+    def _read_bridge(self) -> tuple[str, str]:
+        try:
+            stat = self._bridge_info_file.stat()
+        except OSError as exc:
+            raise BrowserRuntimeError(
+                "BROWSER_BRIDGE_UNAVAILABLE",
+                True,
+                503,
+                "The shared browser runtime is not ready.",
+                "Retry after Code-AI finishes opening the session browser.",
+            ) from exc
+
+        if not self._bridge_info_file.is_file() or stat.st_mode & 0o077:
+            raise BrowserRuntimeError(
+                "BROWSER_BRIDGE_INSECURE",
+                False,
+                500,
+                "The shared browser discovery file is not owner-only.",
+                "Repair the browser-mode session permissions before retrying.",
+            )
+
+        try:
+            payload = json.loads(self._bridge_info_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise BrowserRuntimeError(
+                "BROWSER_BRIDGE_INVALID",
+                True,
+                503,
+                "The shared browser discovery file is invalid.",
+                "Retry after Code-AI restarts the session browser.",
+            ) from exc
+
+        bridge_url = payload.get("url")
+        bridge_token = payload.get("token")
+        profile_dir = payload.get("profile_dir")
+        parsed_url = urlparse(bridge_url if isinstance(bridge_url, str) else "")
+        expected_profile_dir = (self._bridge_info_file.parent / "profile").resolve()
+        try:
+            actual_profile_dir = Path(profile_dir).resolve() if isinstance(profile_dir, str) else None
+        except OSError:
+            actual_profile_dir = None
+
+        if (
+            parsed_url.scheme != "http"
+            or parsed_url.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or parsed_url.port is None
+            or not isinstance(bridge_token, str)
+            or len(bridge_token) < 32
+            or actual_profile_dir != expected_profile_dir
+        ):
+            raise BrowserRuntimeError(
+                "BROWSER_BRIDGE_INVALID",
+                False,
+                500,
+                "The shared browser discovery file did not identify this session runtime.",
+                "Restart the browser-mode session and retry.",
+            )
+
+        return bridge_url.rstrip("/"), bridge_token
+
+    def _post(self, endpoint: str, payload: dict) -> dict:
+        last_connection_error: Exception | None = None
+        for attempt in range(3):
+            bridge_url, bridge_token = self._read_bridge()
+            request = Request(
+                f"{bridge_url}{endpoint}",
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {bridge_token}",
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                method="POST",
+            )
+            try:
+                with urlopen(request, timeout=130) as response:
+                    response_payload = json.loads(response.read().decode("utf-8") or "{}")
+            except HTTPError as exc:
+                try:
+                    response_payload = json.loads(exc.read().decode("utf-8") or "{}")
+                except Exception:
+                    response_payload = {}
+                error_payload = response_payload.get("error") if isinstance(response_payload, dict) else None
+                error_payload = error_payload if isinstance(error_payload, dict) else {}
+                raise BrowserRuntimeError(
+                    str(error_payload.get("error_code") or "BROWSER_MODE_RUNTIME_FAILURE"),
+                    bool(error_payload.get("is_retryable")),
+                    int(error_payload.get("status_code") or exc.code or 500),
+                    str(error_payload.get("message") or "The shared browser action failed."),
+                    str(error_payload.get("suggested_remediation") or "Retry the browser action."),
+                ) from exc
+            except (URLError, TimeoutError, OSError) as exc:
+                last_connection_error = exc
+                if attempt < 2:
+                    time.sleep(0.15 * (attempt + 1))
+                    continue
+                break
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise BrowserRuntimeError(
+                    "BROWSER_BRIDGE_INVALID_RESPONSE",
+                    True,
+                    502,
+                    "The shared browser runtime returned an invalid response.",
+                    "Retry the browser action.",
+                ) from exc
+
+            if not isinstance(response_payload, dict) or response_payload.get("ok") is not True:
+                error_payload = response_payload.get("error") if isinstance(response_payload, dict) else None
+                error_payload = error_payload if isinstance(error_payload, dict) else {}
+                raise BrowserRuntimeError(
+                    str(error_payload.get("error_code") or "BROWSER_MODE_RUNTIME_FAILURE"),
+                    bool(error_payload.get("is_retryable")),
+                    int(error_payload.get("status_code") or 500),
+                    str(error_payload.get("message") or "The shared browser action failed."),
+                    str(error_payload.get("suggested_remediation") or "Retry the browser action."),
+                )
+            result = response_payload.get("result")
+            return result if isinstance(result, dict) else {}
+
+        raise BrowserRuntimeError(
+            "BROWSER_BRIDGE_UNAVAILABLE",
+            True,
+            503,
+            "The shared browser runtime is temporarily unavailable.",
+            "Retry after Code-AI reopens the session browser.",
+        ) from last_connection_error
+
+    def dispatch_action(self, name: str, arguments: dict | None = None) -> dict:
+        return self._post("/call", {"name": name, "arguments": dict(arguments or {})})
+
+
+    def process_bridge_requests(self) -> None:
+        return None
+
+    def pump_browser_events(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 def call_runtime(runtime, name, arguments):
     return runtime.dispatch_action(name, dict(arguments or {}))
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile-dir", required=True)
-    parser.add_argument("--screenshot-dir", required=True)
+    parser.add_argument("--bridge-info-file", required=False)
+    parser.add_argument("--profile-dir", required=False)
+    parser.add_argument("--screenshot-dir", required=False)
     parser.add_argument("--artifacts-dir", required=False)
     parser.add_argument("--executable-path", required=False)
     parser.add_argument("--headless", dest="headless", action="store_true")
@@ -406,7 +584,17 @@ def main():
     parser.add_argument("--run-js-max-chars", type=int, default=8000)
     args = parser.parse_args()
 
+    if not args.bridge_info_file and (not args.profile_dir or not args.screenshot_dir):
+        parser.error("--profile-dir and --screenshot-dir are required unless --bridge-info-file is used")
+
     runtime = build_runtime(args)
+    stop_requested = False
+
+    def request_stop(_signal_number, _frame):
+        nonlocal stop_requested
+        stop_requested = True
+
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, request_stop)
 
     def handle_request(message):
         request_id = message.get("id")
@@ -429,6 +617,7 @@ def main():
         if method == "tools/list":
             send_result(request_id, {"tools": TOOL_DEFS})
             return
+
 
         if method == "tools/call":
             try:
@@ -480,11 +669,12 @@ def main():
 
     try:
         stdin_stream = sys.stdin
-        while True:
+        while not stop_requested:
             runtime.process_bridge_requests()
+            runtime.pump_browser_events()
 
             try:
-                ready, _, _ = select.select([stdin_stream], [], [], 0.05)
+                ready, _, _ = select.select([stdin_stream], [], [], 0.025)
             except (OSError, ValueError):
                 break
 
@@ -506,6 +696,7 @@ def main():
                 continue
             handle_request(message)
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
         runtime.close()
 
 

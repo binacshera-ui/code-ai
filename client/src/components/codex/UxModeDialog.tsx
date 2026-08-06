@@ -49,7 +49,7 @@ export function UxModeDialog({
             <div className="min-w-0">
               <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-500">UX Debate Mode</div>
               <div className="mt-0.5 text-lg font-semibold text-slate-900">מצב חוויית משתמש · Codex × Gemini</div>
-              <p className="mt-1 text-xs leading-5 text-slate-500">קודקס בונה עמדה פרטית, ג׳מיני מקבל שאלה ניטרלית, ואז מתקיימים עד 10 חילופי טיעון־נגד לפני זיקוק מוצרי.</p>
+              <p className="mt-1 text-xs leading-5 text-slate-500">קודקס בונה עמדה פרטית, Gemini 3.1 Pro Preview מקבל שאלה ניטרלית, ואז מתקיימים עד 10 חילופי טיעון־נגד לפני זיקוק מוצרי.</p>
             </div>
           </div>
           <button type="button" onClick={onClose} className="rounded-full bg-slate-50 p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"><X className="h-4 w-4" /></button>
@@ -71,10 +71,11 @@ export function UxModeDialog({
           </section>
 
           <section className="mt-4 rounded-[1.5rem] border border-slate-100 bg-white p-4 shadow-sm">
-            <label className="text-xs font-semibold text-slate-700">פרופיל Gemini לייעוץ</label>
+            <label className="text-xs font-semibold text-slate-700">פרופיל Gemini והרשאות</label>
             <select value={value.geminiProfileId} disabled={!codexOnly || profiles.length === 0} onChange={(event) => onChange({ ...value, geminiProfileId: event.currentTarget.value })} className="mt-2 w-full rounded-[1rem] border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100 disabled:opacity-50">
               {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
             </select>
+            <p className="mt-2 text-[11px] leading-5 text-slate-500">הפרופיל בוחר את החשבון המורשה בלבד. כל ייעוץ UX נשלח במפורש אל <span dir="ltr" className="font-medium text-slate-700">Gemini 3.1 Pro Preview</span>, ללא מעבר אוטומטי למודל אחר.</p>
             <div className="mt-4 text-xs font-semibold text-slate-700">עומק הדיון</div>
             <div className="mt-2 grid grid-cols-2 gap-2">
               {([

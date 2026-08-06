@@ -43,10 +43,17 @@ import {
   rebindSessionUxMode,
   type CodexSessionUxMode,
 } from './codexUxMode.js';
+import {
+  buildSessionPersonalChromePromptAdditions,
+  consumeSessionPersonalChromeModeAfterDispatch,
+  rebindSessionPersonalChromeMode,
+  type CodexSessionPersonalChromeMode,
+} from './codexPersonalChromeMode.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
 import { getSessionTopicMap, setSessionTopic } from './codexSessionTopics.js';
 import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
 import { rebindSupportSessionRecord } from './supportAgentService.js';
+import { rebindSessionFinalNotificationPreference } from './codexFinalNotifications.js';
 import {
   getAgentSessionRecord,
   recordAgentSessionLinkedSession,
@@ -54,6 +61,16 @@ import {
   updateAgentRuntimeStatus,
 } from './codexAgentSessions.js';
 import { buildActionRestrictionPromptAdditions } from './sessionPromptAdditions.js';
+import {
+  buildConditionalStopDecisionPrompt,
+  buildStoppedTaskContinuationPrompt,
+  cloneCodexQueueStopPolicy,
+  createCodexQueueStopPolicy,
+  normalizeCodexQueueStopPolicy,
+  readConditionalStopDecision,
+  type CodexQueueStopMode,
+  type CodexQueueStopPolicy,
+} from './codexQueueStopPolicy.js';
 
 export type CodexQueueItemStatus =
   | 'scheduled'
@@ -91,6 +108,7 @@ export interface CodexQueueItem {
   sessionInstruction?: string | null;
   actionRestriction: CodexSessionActionRestriction | null;
   browserMode: CodexSessionBrowserMode | null;
+  personalChromeMode: CodexSessionPersonalChromeMode | null;
   designMode: CodexSessionDesignMode | null;
   uxMode: CodexSessionUxMode | null;
   goalMode: CodexQueueGoalMode | null;
@@ -113,6 +131,10 @@ export interface CodexQueueItem {
   agentSessionId: string | null;
   agentId: string | null;
   agentLinkKind: 'planner' | 'agent' | null;
+  priority: number;
+  stopPolicy: CodexQueueStopPolicy | null;
+  stopDecisionForItemId: string | null;
+  continuationOfItemId: string | null;
 }
 
 interface CodexQueueState {
@@ -136,6 +158,7 @@ interface EnqueueCodexQueueInput {
   sessionInstruction?: string | null;
   actionRestriction?: CodexSessionActionRestriction | null;
   browserMode?: CodexSessionBrowserMode | null;
+  personalChromeMode?: CodexSessionPersonalChromeMode | null;
   designMode?: CodexSessionDesignMode | null;
   uxMode?: CodexSessionUxMode | null;
   goalMode?: CodexQueueGoalMode | null;
@@ -149,6 +172,10 @@ interface EnqueueCodexQueueInput {
   agentSessionId?: string | null;
   agentId?: string | null;
   agentLinkKind?: 'planner' | 'agent' | null;
+  priority?: number;
+  stopPolicy?: CodexQueueStopPolicy | null;
+  stopDecisionForItemId?: string | null;
+  continuationOfItemId?: string | null;
 }
 
 const QUEUE_ROOT = CODEX_APP_CONFIG.queueRoot;
@@ -156,6 +183,10 @@ const STATE_FILE = path.join(QUEUE_ROOT, 'state.json');
 const WORKER_POLL_MS = 1500;
 const MAX_PARALLEL_QUEUE_ITEMS = 6;
 const QUEUE_RETENTION_MS = 21 * 24 * 60 * 60 * 1000;
+const STOP_DECISION_PRIORITY = 100;
+const STOP_CONTINUATION_PRIORITY = 90;
+const MAX_SCHEDULED_STOP_ATTEMPTS = 3;
+const QUEUE_EXECUTION_DISABLED = process.env.CODEX_QUEUE_DISABLE_EXECUTION === '1';
 
 let stateLoadedPromise: Promise<void> | null = null;
 let persistTail: Promise<void> = Promise.resolve();
@@ -165,8 +196,10 @@ let state: CodexQueueState = {
 };
 let workerStarted = false;
 let workerTickInFlight = false;
+let stopPolicyRefreshPromise: Promise<void> | null = null;
 let activeWorkerItemIds = new Set<string>();
 let activeWorkerQueueKeys = new Set<string>();
+let activeWorkerQueueKeyByItemId = new Map<string, string>();
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -257,6 +290,9 @@ function cloneQueueItem(item: CodexQueueItem): CodexQueueItem {
           : null,
       }
       : null,
+    personalChromeMode: item.personalChromeMode
+      ? { ...item.personalChromeMode }
+      : null,
     designMode: item.designMode
       ? {
         enabled: item.designMode.enabled === true,
@@ -284,6 +320,7 @@ function cloneQueueItem(item: CodexQueueItem): CodexQueueItem {
         totalSteps: item.goalMode.totalSteps,
       }
       : null,
+    stopPolicy: cloneCodexQueueStopPolicy(item.stopPolicy),
   };
 }
 
@@ -330,6 +367,27 @@ function normalizeBrowserMode(value: unknown): CodexSessionBrowserMode | null {
   };
 }
 
+function normalizePersonalChromeMode(value: unknown): CodexSessionPersonalChromeMode | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Partial<CodexSessionPersonalChromeMode>;
+  const tabId = Number(candidate.tabId);
+  return {
+    enabled: candidate.enabled === true,
+    deviceId: typeof candidate.deviceId === 'string' ? candidate.deviceId.trim() : '',
+    deviceName: typeof candidate.deviceName === 'string' ? candidate.deviceName.trim() : '',
+    tabId: Number.isInteger(tabId) && tabId >= 0 ? tabId : null,
+    approvalPolicy: candidate.approvalPolicy === 'always' || candidate.approvalPolicy === 'never'
+      ? candidate.approvalPolicy
+      : 'risky',
+    allowJavascript: candidate.allowJavascript === true,
+    allowUploads: candidate.allowUploads !== false,
+    allowPorts: candidate.allowPorts !== false,
+    bindingId: typeof candidate.bindingId === 'string' && candidate.bindingId.trim()
+      ? candidate.bindingId.trim()
+      : null,
+  };
+}
+
 function normalizeDesignMode(value: unknown): CodexSessionDesignMode | null {
   if (!value || typeof value !== 'object') {
     return null;
@@ -351,20 +409,15 @@ function normalizeDesignMode(value: unknown): CodexSessionDesignMode | null {
 }
 
 function normalizeUxMode(value: unknown): CodexSessionUxMode | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-
-  const stringField = (name: string) => (
-    typeof (value as any)[name] === 'string' ? (value as any)[name] : ''
-  );
+  if (!value || typeof value !== 'object') return null;
+  const field = (name: string) => typeof (value as any)[name] === 'string' ? (value as any)[name] : '';
   return {
     enabled: (value as any).enabled === true,
-    geminiProfileId: stringField('geminiProfileId').trim(),
+    geminiProfileId: field('geminiProfileId').trim(),
     depth: (value as any).depth === 'focused' ? 'focused' : 'deep',
-    productBrief: stringField('productBrief'),
-    targetAudience: stringField('targetAudience'),
-    primaryOutcome: stringField('primaryOutcome'),
+    productBrief: field('productBrief'),
+    targetAudience: field('targetAudience'),
+    primaryOutcome: field('primaryOutcome'),
   };
 }
 
@@ -809,6 +862,26 @@ function sortQueueItems(items: CodexQueueItem[]): CodexQueueItem[] {
   });
 }
 
+function compareQueueExecutionOrder(left: CodexQueueItem, right: CodexQueueItem): number {
+  const priorityDifference = (right.priority || 0) - (left.priority || 0);
+  if (priorityDifference !== 0) {
+    return priorityDifference;
+  }
+
+  const leftScheduled = new Date(left.scheduledAt).getTime();
+  const rightScheduled = new Date(right.scheduledAt).getTime();
+  if (leftScheduled !== rightScheduled) {
+    return leftScheduled - rightScheduled;
+  }
+
+  const createdDifference = new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
+  if (createdDifference !== 0) {
+    return createdDifference;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
 async function ensureQueueRoot() {
   await fs.mkdir(QUEUE_ROOT, { recursive: true });
 }
@@ -888,6 +961,7 @@ async function loadState() {
           : null,
         actionRestriction: normalizeActionRestriction(item.actionRestriction),
         browserMode: normalizeBrowserMode(item.browserMode),
+        personalChromeMode: normalizePersonalChromeMode(item.personalChromeMode),
         designMode: normalizeDesignMode(item.designMode),
         uxMode: normalizeUxMode(item.uxMode),
         goalMode: normalizeGoalMode(item.goalMode),
@@ -908,6 +982,14 @@ async function loadState() {
         agentLinkKind: item.agentLinkKind === 'planner' || item.agentLinkKind === 'agent'
           ? item.agentLinkKind
           : null,
+        priority: Number.isFinite(item.priority) ? Number(item.priority) : 0,
+        stopPolicy: normalizeCodexQueueStopPolicy(item.stopPolicy),
+        stopDecisionForItemId: typeof item.stopDecisionForItemId === 'string' && item.stopDecisionForItemId.trim()
+          ? item.stopDecisionForItemId.trim()
+          : null,
+        continuationOfItemId: typeof item.continuationOfItemId === 'string' && item.continuationOfItemId.trim()
+          ? item.continuationOfItemId.trim()
+          : null,
       };
 
       if (next.scheduleMode === 'recurring' && !isRecurringItem(next)) {
@@ -918,17 +1000,28 @@ async function loadState() {
       }
 
       if (next.status === 'running') {
+        const wasScheduledStopInProgress = next.stopPolicy?.status === 'stopping';
         if (isRecurringItem(next)) {
-          applyRecurringResult(next, 'failed', {
-            sessionId: next.sessionId,
-            error: 'Interrupted by server restart before completion.',
-          });
+          if (wasScheduledStopInProgress) {
+            const interruptedAt = nowIso();
+            next.status = 'cancelled';
+            next.completedAt = interruptedAt;
+            next.updatedAt = interruptedAt;
+            next.error = null;
+            next.finalMessage = null;
+          } else {
+            applyRecurringResult(next, 'failed', {
+              sessionId: next.sessionId,
+              error: 'Interrupted by server restart before completion.',
+            });
+          }
         } else {
           const interruptedAt = nowIso();
-          next.status = 'failed';
+          next.status = wasScheduledStopInProgress ? 'cancelled' : 'failed';
           next.completedAt = interruptedAt;
           next.updatedAt = interruptedAt;
-          next.error = 'Interrupted by server restart before completion.';
+          next.error = wasScheduledStopInProgress ? null : 'Interrupted by server restart before completion.';
+          next.finalMessage = null;
         }
         changed = true;
       }
@@ -1002,7 +1095,7 @@ function hasBlockingPreviousItem(candidate: CodexQueueItem): boolean {
       return false;
     }
 
-    return new Date(item.createdAt).getTime() < new Date(candidate.createdAt).getTime();
+    return compareQueueExecutionOrder(item, candidate) < 0;
   });
 }
 
@@ -1036,6 +1129,334 @@ function applyRecurringResult(
   item.status = 'scheduled';
 }
 
+function markStopPolicyNotNeeded(item: CodexQueueItem) {
+  const policy = item.stopPolicy;
+  if (!policy || (policy.status !== 'armed' && policy.status !== 'stopping')) {
+    return;
+  }
+
+  const resolvedAt = nowIso();
+  policy.status = 'not-needed';
+  policy.resolvedAt = resolvedAt;
+  policy.decision = null;
+  policy.outcome = 'completed-before-stop';
+  policy.error = null;
+}
+
+function markHardStopResolved(item: CodexQueueItem) {
+  const policy = item.stopPolicy;
+  if (!policy) {
+    return;
+  }
+
+  const resolvedAt = nowIso();
+  policy.status = 'stopped';
+  policy.resolvedAt = resolvedAt;
+  policy.decision = false;
+  policy.outcome = 'hard-stopped';
+  policy.error = null;
+}
+
+function markQueueItemStopped(item: CodexQueueItem) {
+  const stoppedAt = nowIso();
+  item.status = 'cancelled';
+  item.updatedAt = stoppedAt;
+  item.completedAt = stoppedAt;
+  item.finalMessage = null;
+  item.error = null;
+}
+
+function findStopDecisionItem(sourceItemId: string): CodexQueueItem | null {
+  return state.items.find((candidate) => candidate.stopDecisionForItemId === sourceItemId) || null;
+}
+
+function findStopContinuationItem(sourceItemId: string): CodexQueueItem | null {
+  return state.items.find((candidate) => candidate.continuationOfItemId === sourceItemId) || null;
+}
+
+async function createStopContinuationItem(
+  sourceItem: CodexQueueItem,
+  decisionSessionId: string | null
+): Promise<CodexQueueItem> {
+  const existing = findStopContinuationItem(sourceItem.id);
+  if (existing) {
+    return existing;
+  }
+
+  const policy = sourceItem.stopPolicy;
+  if (!policy?.triggeredAt) {
+    throw new Error('Scheduled stop trigger metadata is missing');
+  }
+
+  const resolvedSessionId = resolveQueueItemSessionId(
+    decisionSessionId || sourceItem.sessionId,
+    sourceItem.queueKey
+  );
+  const needsDraftContext = !resolvedSessionId;
+  return enqueueCodexQueueItem({
+    profileId: sourceItem.profileId,
+    sourceProfileId: sourceItem.sourceProfileId,
+    queueKey: sourceItem.queueKey,
+    clientRequestId: `stop-continuation:${sourceItem.id}:${policy.triggeredAt}`,
+    sessionId: resolvedSessionId,
+    cwd: sourceItem.cwd,
+    model: sourceItem.model,
+    reasoningEffort: sourceItem.reasoningEffort,
+    permissionModeId: sourceItem.permissionModeId,
+    prompt: buildStoppedTaskContinuationPrompt({
+      originalTask: sourceItem.prompt,
+      taskHadStarted: sourceItem.attempts > 0,
+    }),
+    promptPreview: `המשך משימה שנעצרה · ${sourceItem.promptPreview}`,
+    contextPrefix: needsDraftContext ? sourceItem.contextPrefix : null,
+    sessionInstruction: sourceItem.sessionInstruction,
+    actionRestriction: sourceItem.actionRestriction,
+    browserMode: sourceItem.browserMode,
+    personalChromeMode: sourceItem.personalChromeMode,
+    designMode: sourceItem.designMode,
+    uxMode: sourceItem.uxMode,
+    goalMode: sourceItem.goalMode,
+    forkContext: needsDraftContext ? sourceItem.forkContext : null,
+    attachments: sourceItem.attachments,
+    priority: STOP_CONTINUATION_PRIORITY,
+    continuationOfItemId: sourceItem.id,
+    agentSessionId: sourceItem.agentSessionId,
+    agentId: sourceItem.agentId,
+    agentLinkKind: sourceItem.agentLinkKind,
+  });
+}
+
+async function resolveConditionalStopDecision(
+  decisionItem: CodexQueueItem,
+  finalMessage: string | null,
+  decisionSessionId: string | null
+) {
+  if (!decisionItem.stopDecisionForItemId) {
+    return;
+  }
+
+  const sourceItem = state.items.find((candidate) => candidate.id === decisionItem.stopDecisionForItemId);
+  const policy = sourceItem?.stopPolicy;
+  if (!sourceItem || !policy || policy.mode !== 'conditional') {
+    return;
+  }
+  if (policy.status === 'continued' || policy.status === 'stopped' || policy.status === 'failed') {
+    return;
+  }
+
+  const decision = readConditionalStopDecision(finalMessage);
+  policy.decisionItemId = decisionItem.id;
+  policy.resolvedAt = nowIso();
+  policy.decision = decision === true;
+  policy.error = null;
+
+  if (decision !== true) {
+    policy.status = 'stopped';
+    policy.outcome = decision === false ? 'continue-declined' : 'invalid-decision';
+    await persistState();
+    return;
+  }
+
+  try {
+    const continuationItem = await createStopContinuationItem(sourceItem, decisionSessionId);
+    policy.continuationItemId = continuationItem.id;
+    policy.status = 'continued';
+    policy.outcome = 'continue-approved';
+    await persistState();
+  } catch (error: any) {
+    policy.status = 'failed';
+    policy.outcome = 'decision-failed';
+    policy.error = error?.message || 'Failed to enqueue the stopped task continuation';
+    await persistState();
+  }
+}
+
+async function failConditionalStopDecision(decisionItem: CodexQueueItem, errorMessage: string) {
+  if (!decisionItem.stopDecisionForItemId) {
+    return;
+  }
+
+  const sourceItem = state.items.find((candidate) => candidate.id === decisionItem.stopDecisionForItemId);
+  const policy = sourceItem?.stopPolicy;
+  if (!sourceItem || !policy || policy.mode !== 'conditional') {
+    return;
+  }
+  if (policy.status === 'continued' || policy.status === 'stopped') {
+    return;
+  }
+
+  policy.decisionItemId = decisionItem.id;
+  policy.status = 'failed';
+  policy.resolvedAt = nowIso();
+  policy.decision = false;
+  policy.outcome = 'decision-failed';
+  policy.error = errorMessage;
+}
+
+async function ensureConditionalStopDecisionItem(sourceItem: CodexQueueItem) {
+  const policy = sourceItem.stopPolicy;
+  if (!policy || policy.mode !== 'conditional' || !policy.question) {
+    return;
+  }
+  if (policy.status === 'continued' || policy.status === 'stopped' || policy.status === 'failed') {
+    return;
+  }
+
+  const existing = findStopDecisionItem(sourceItem.id);
+  if (existing) {
+    policy.decisionItemId = existing.id;
+    if (existing.status === 'completed') {
+      await resolveConditionalStopDecision(existing, existing.finalMessage, existing.sessionId);
+    } else if (existing.status === 'failed' || existing.status === 'cancelled') {
+      await failConditionalStopDecision(
+        existing,
+        existing.error || 'The scheduled continuation decision did not complete successfully'
+      );
+      await persistState();
+    } else {
+      policy.status = 'awaiting-decision';
+      await persistState();
+    }
+    return;
+  }
+
+  policy.status = 'awaiting-decision';
+  await persistState();
+
+  try {
+    const decisionItem = await enqueueCodexQueueItem({
+      profileId: sourceItem.profileId,
+      sourceProfileId: sourceItem.sourceProfileId,
+      queueKey: sourceItem.queueKey,
+      clientRequestId: `stop-decision:${sourceItem.id}:${policy.triggeredAt || policy.stopAt}`,
+      sessionId: resolveQueueItemSessionId(sourceItem.sessionId, sourceItem.queueKey),
+      cwd: sourceItem.cwd,
+      model: sourceItem.model,
+      reasoningEffort: sourceItem.reasoningEffort,
+      permissionModeId: sourceItem.permissionModeId,
+      prompt: buildConditionalStopDecisionPrompt({
+        question: policy.question,
+        originalTask: sourceItem.prompt,
+      }),
+      promptPreview: `בדיקת המשך לאחר עצירה · ${policy.question}`,
+      attachments: [],
+      priority: STOP_DECISION_PRIORITY,
+      stopDecisionForItemId: sourceItem.id,
+    });
+    policy.decisionItemId = decisionItem.id;
+    await persistState();
+  } catch (error: any) {
+    policy.status = 'failed';
+    policy.resolvedAt = nowIso();
+    policy.decision = false;
+    policy.outcome = 'decision-failed';
+    policy.error = error?.message || 'Failed to enqueue the scheduled continuation decision';
+    await persistState();
+  }
+}
+
+async function refreshDueStopPolicies() {
+  await ensureStateLoaded();
+
+  const now = Date.now();
+  let changed = false;
+  const decisionSources: CodexQueueItem[] = [];
+
+  for (const item of state.items) {
+    const policy = item.stopPolicy;
+    if (!policy) {
+      continue;
+    }
+
+    if (
+      (policy.status === 'stopping' || policy.status === 'awaiting-decision')
+      && item.status === 'cancelled'
+      && policy.mode === 'conditional'
+    ) {
+      decisionSources.push(item);
+      continue;
+    }
+
+    if (policy.status !== 'armed') {
+      continue;
+    }
+
+    if (isTerminalStatus(item.status)) {
+      markStopPolicyNotNeeded(item);
+      changed = true;
+      continue;
+    }
+
+    if (new Date(policy.stopAt).getTime() > now) {
+      continue;
+    }
+
+    const triggeredAt = nowIso();
+    policy.triggeredAt = policy.triggeredAt || triggeredAt;
+    policy.stopAttempts += 1;
+    policy.lastStopAttemptAt = triggeredAt;
+    policy.error = null;
+
+    if (item.status === 'scheduled' || item.status === 'queued') {
+      policy.status = 'stopping';
+      markQueueItemStopped(item);
+      if (policy.mode === 'hard') {
+        markHardStopResolved(item);
+      } else {
+        decisionSources.push(item);
+      }
+      changed = true;
+      continue;
+    }
+
+    if (item.status === 'running') {
+      if (cancelAgentRun(item.id, item.profileId)) {
+        item.status = 'cancelling';
+        item.updatedAt = triggeredAt;
+        item.error = null;
+        policy.status = 'stopping';
+      } else if (policy.stopAttempts < MAX_SCHEDULED_STOP_ATTEMPTS) {
+        policy.status = 'armed';
+        policy.error = `Stop request is retrying (${policy.stopAttempts}/${MAX_SCHEDULED_STOP_ATTEMPTS})`;
+      } else {
+        policy.status = 'failed';
+        policy.resolvedAt = triggeredAt;
+        policy.decision = false;
+        policy.outcome = 'stop-failed';
+        policy.error = 'The running task could not be stopped at its scheduled time';
+      }
+      changed = true;
+      continue;
+    }
+
+    if (item.status === 'cancelling') {
+      policy.status = 'stopping';
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await persistState();
+  }
+
+  for (const sourceItem of decisionSources) {
+    await ensureConditionalStopDecisionItem(sourceItem);
+  }
+}
+
+async function refreshQueueState() {
+  if (!stopPolicyRefreshPromise) {
+    stopPolicyRefreshPromise = (async () => {
+      await refreshDueStopPolicies();
+      await refreshDueItems();
+    })().finally(() => {
+      stopPolicyRefreshPromise = null;
+    });
+  }
+
+  await stopPolicyRefreshPromise;
+}
+
 function pickRunnableItems(limit: number): CodexQueueItem[] {
   if (limit <= 0) {
     return [];
@@ -1044,15 +1465,7 @@ function pickRunnableItems(limit: number): CodexQueueItem[] {
   const reservedQueueKeys = new Set(activeWorkerQueueKeys);
   const dueItems = state.items
     .filter((item) => item.status === 'queued')
-    .sort((left, right) => {
-      const leftScheduled = new Date(left.scheduledAt).getTime();
-      const rightScheduled = new Date(right.scheduledAt).getTime();
-      if (leftScheduled !== rightScheduled) {
-        return leftScheduled - rightScheduled;
-      }
-
-      return new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
-    });
+    .sort(compareQueueExecutionOrder);
 
   const pickedItems: CodexQueueItem[] = [];
 
@@ -1082,10 +1495,16 @@ function launchQueueItem(item: CodexQueueItem) {
   const workerQueueKey = item.queueKey;
   activeWorkerItemIds.add(item.id);
   activeWorkerQueueKeys.add(workerQueueKey);
+  activeWorkerQueueKeyByItemId.set(item.id, workerQueueKey);
 
   void processQueueItem(item).finally(() => {
+    const currentWorkerQueueKey = activeWorkerQueueKeyByItemId.get(item.id);
     activeWorkerItemIds.delete(item.id);
     activeWorkerQueueKeys.delete(workerQueueKey);
+    if (currentWorkerQueueKey) {
+      activeWorkerQueueKeys.delete(currentWorkerQueueKey);
+    }
+    activeWorkerQueueKeyByItemId.delete(item.id);
     scheduleImmediateTick();
   });
 }
@@ -1109,6 +1528,13 @@ async function rebindQueueItemsToSession(profileId: string, queueKey: string, se
 
     if (candidate.sessionId && candidate.sessionId !== sessionId) {
       continue;
+    }
+
+    if (activeWorkerItemIds.has(candidate.id)) {
+      const activeQueueKey = activeWorkerQueueKeyByItemId.get(candidate.id) || candidate.queueKey;
+      activeWorkerQueueKeys.delete(activeQueueKey);
+      activeWorkerQueueKeys.add(sessionId);
+      activeWorkerQueueKeyByItemId.set(candidate.id, sessionId);
     }
 
     candidate.queueKey = sessionId;
@@ -1258,6 +1684,9 @@ async function processQueueItem(item: CodexQueueItem) {
   const browserModePrompt = item.browserMode
     ? buildSessionBrowserModePromptAdditions(item.browserMode)
     : null;
+  const personalChromeModePrompt = item.personalChromeMode
+    ? buildSessionPersonalChromePromptAdditions(item.personalChromeMode)
+    : null;
   const designModePrompt = item.designMode
     ? buildSessionDesignModePromptAdditions(item.designMode)
     : null;
@@ -1268,6 +1697,7 @@ async function processQueueItem(item: CodexQueueItem) {
     runPrompt,
     restrictionPrompt?.trim() || null,
     browserModePrompt?.trim() || null,
+    personalChromeModePrompt?.trim() || null,
     designModePrompt?.trim() || null,
     uxModePrompt?.trim() || null,
   ]
@@ -1323,34 +1753,66 @@ async function processQueueItem(item: CodexQueueItem) {
         browserMode: item.browserMode,
         browserModeProfileId: item.sourceProfileId || item.profileId,
         browserModeSessionKey: resolvedSessionId || item.queueKey,
+        personalChromeMode: item.personalChromeMode,
+        personalChromeModeProfileId: item.sourceProfileId || item.profileId,
+        personalChromeModeSessionKey: resolvedSessionId || item.queueKey,
         designMode: item.designMode,
         designModeProfileId: item.sourceProfileId || item.profileId,
         designModeSessionKey: resolvedSessionId || item.queueKey,
         uxMode: item.uxMode,
         uxModeProfileId: item.sourceProfileId || item.profileId,
         uxModeSessionKey: resolvedSessionId || item.queueKey,
+        finalNotification: {
+          profileId: item.sourceProfileId || item.profileId,
+          sessionKey: resolvedSessionId || item.queueKey,
+          dedupeKey: isRecurringItem(item)
+            ? `${item.id}:${item.startedAt || item.attempts}`
+            : item.id,
+        },
       }
     );
 
     if (resolvedSessionId && result.sessionId !== resolvedSessionId) {
       await copySessionSidebarMetadataToRecoveredSession(item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionBrowserMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
+      await rebindSessionPersonalChromeMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionDesignMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionUxMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
     }
 
+    await rebindSessionFinalNotificationPreference(
+      item.sourceProfileId || item.profileId,
+      resolvedSessionId || item.queueKey,
+      result.sessionId
+    );
     await rebindQueueItemsToSession(item.profileId, item.queueKey, result.sessionId);
     await rebindSessionBrowserMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
+    await rebindSessionPersonalChromeMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionDesignMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionUxMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     if (item.browserMode && item.browserMode.enabled !== true) {
       await consumeSessionBrowserModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
+    }
+    if (item.personalChromeMode && item.personalChromeMode.enabled !== true) {
+      await consumeSessionPersonalChromeModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
     }
     if (item.designMode && item.designMode.enabled !== true) {
       await consumeSessionDesignModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
     }
     if (item.uxMode && item.uxMode.enabled !== true) {
       await consumeSessionUxModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
+    }
+
+    if (isRecurringItem(item) && item.stopPolicy?.status === 'stopping') {
+      markQueueItemStopped(item);
+      if (item.stopPolicy.mode === 'hard') {
+        markHardStopResolved(item);
+      }
+      await persistState();
+      if (item.stopPolicy.mode === 'conditional') {
+        await ensureConditionalStopDecisionItem(item);
+      }
+      return;
     }
 
     if (isRecurringItem(item)) {
@@ -1392,6 +1854,7 @@ async function processQueueItem(item: CodexQueueItem) {
     item.completedAt = nowIso();
     item.updatedAt = item.completedAt;
     item.error = null;
+    markStopPolicyNotNeeded(item);
     state.sessionBindings[item.queueKey] = result.sessionId;
     if (item.agentLinkKind === 'planner') {
       await persistPlannerOutputFromDisk(item, result.sessionId);
@@ -1420,14 +1883,18 @@ async function processQueueItem(item: CodexQueueItem) {
     if (item.goalMode && isGoalModeFinished(result.finalMessage)) {
       cancelRemainingGoalModeItems(item);
     }
+    if (item.stopDecisionForItemId) {
+      await resolveConditionalStopDecision(item, result.finalMessage, result.sessionId);
+    }
     await persistState();
   } catch (error: any) {
     if (isAgentRunCancelledError(error)) {
-      item.status = 'cancelled';
-      item.completedAt = nowIso();
-      item.updatedAt = item.completedAt;
-      item.error = null;
-      item.finalMessage = null;
+      markQueueItemStopped(item);
+      if (item.stopPolicy?.status === 'stopping') {
+        if (item.stopPolicy.mode === 'hard') {
+          markHardStopResolved(item);
+        }
+      }
       if (item.agentSessionId && item.agentLinkKind === 'agent' && item.agentId) {
         await updateAgentRuntimeStatus(item.agentSessionId, item.agentId, {
           runtimeStatus: 'cancelled',
@@ -1435,7 +1902,25 @@ async function processQueueItem(item: CodexQueueItem) {
           lastError: null,
         });
       }
+      if (item.stopDecisionForItemId) {
+        await failConditionalStopDecision(item, 'The scheduled continuation decision was cancelled');
+      }
       await persistState();
+      if (item.stopPolicy?.status === 'stopping' && item.stopPolicy.mode === 'conditional') {
+        await ensureConditionalStopDecisionItem(item);
+      }
+      return;
+    }
+
+    if (item.stopPolicy?.status === 'stopping') {
+      markQueueItemStopped(item);
+      if (item.stopPolicy.mode === 'hard') {
+        markHardStopResolved(item);
+      }
+      await persistState();
+      if (item.stopPolicy.mode === 'conditional') {
+        await ensureConditionalStopDecisionItem(item);
+      }
       return;
     }
 
@@ -1451,12 +1936,16 @@ async function processQueueItem(item: CodexQueueItem) {
     item.error = error?.message || 'Codex job failed';
     item.completedAt = nowIso();
     item.updatedAt = item.completedAt;
+    markStopPolicyNotNeeded(item);
     if (item.agentSessionId && item.agentLinkKind === 'agent' && item.agentId) {
       await updateAgentRuntimeStatus(item.agentSessionId, item.agentId, {
         runtimeStatus: 'failed',
         queueItemId: item.id,
         lastError: item.error,
       });
+    }
+    if (item.stopDecisionForItemId) {
+      await failConditionalStopDecision(item, item.error || 'The scheduled continuation decision failed');
     }
     await persistState();
   }
@@ -1470,7 +1959,7 @@ async function tickWorker() {
   workerTickInFlight = true;
 
   try {
-    await refreshDueItems();
+    await refreshQueueState();
 
     const availableSlots = Math.max(0, MAX_PARALLEL_QUEUE_ITEMS - activeWorkerItemIds.size);
     if (availableSlots === 0) {
@@ -1489,6 +1978,10 @@ async function tickWorker() {
 }
 
 function scheduleImmediateTick() {
+  if (QUEUE_EXECUTION_DISABLED) {
+    return;
+  }
+
   setTimeout(() => {
     void tickWorker();
   }, 0);
@@ -1497,7 +1990,7 @@ function scheduleImmediateTick() {
 export async function startCodexQueueWorker() {
   await ensureStateLoaded();
 
-  if (workerStarted) {
+  if (workerStarted || QUEUE_EXECUTION_DISABLED) {
     return;
   }
 
@@ -1509,7 +2002,7 @@ export async function startCodexQueueWorker() {
 }
 
 export async function listCodexQueueItems(profileId?: string): Promise<CodexQueueItem[]> {
-  await refreshDueItems();
+  await refreshQueueState();
 
   const filtered = profileId
     ? state.items.filter((item) => item.profileId === profileId)
@@ -1519,7 +2012,7 @@ export async function listCodexQueueItems(profileId?: string): Promise<CodexQueu
 }
 
 export async function getCodexQueueItem(itemId: string): Promise<CodexQueueItem | null> {
-  await refreshDueItems();
+  await refreshQueueState();
   const item = state.items.find((entry) => entry.id === itemId);
   return item ? cloneQueueItem(item) : null;
 }
@@ -1602,6 +2095,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
       : null,
     actionRestriction: normalizeActionRestriction(input.actionRestriction),
     browserMode: normalizeBrowserMode(input.browserMode),
+    personalChromeMode: normalizePersonalChromeMode(input.personalChromeMode),
     designMode: normalizeDesignMode(input.designMode),
     uxMode: normalizeUxMode(input.uxMode),
     goalMode: normalizeGoalMode(input.goalMode),
@@ -1630,6 +2124,14 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
     agentLinkKind: input.agentLinkKind === 'planner' || input.agentLinkKind === 'agent'
       ? input.agentLinkKind
       : null,
+    priority: Number.isFinite(input.priority) ? Number(input.priority) : 0,
+    stopPolicy: normalizeCodexQueueStopPolicy(input.stopPolicy),
+    stopDecisionForItemId: typeof input.stopDecisionForItemId === 'string' && input.stopDecisionForItemId.trim()
+      ? input.stopDecisionForItemId.trim()
+      : null,
+    continuationOfItemId: typeof input.continuationOfItemId === 'string' && input.continuationOfItemId.trim()
+      ? input.continuationOfItemId.trim()
+      : null,
   };
 
   if (isRecurringItem(item)) {
@@ -1652,6 +2154,52 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
   return cloneQueueItem(item);
 }
 
+export async function setCodexQueueItemStopSchedule(
+  itemId: string,
+  input: {
+    stopAt: string;
+    mode: CodexQueueStopMode;
+    question?: string | null;
+  }
+): Promise<CodexQueueItem> {
+  await ensureStateLoaded();
+  const item = state.items.find((entry) => entry.id === itemId);
+  if (!item) {
+    throw new Error('Queue item was not found');
+  }
+  if (item.status !== 'scheduled' && item.status !== 'queued' && item.status !== 'running') {
+    throw new Error('A stop schedule can be set only for a waiting or running task');
+  }
+  if (item.stopDecisionForItemId) {
+    throw new Error('A stop schedule cannot be set on a continuation decision task');
+  }
+
+  item.stopPolicy = createCodexQueueStopPolicy(input);
+  item.updatedAt = nowIso();
+  await persistState();
+  scheduleImmediateTick();
+  return cloneQueueItem(item);
+}
+
+export async function clearCodexQueueItemStopSchedule(itemId: string): Promise<CodexQueueItem> {
+  await ensureStateLoaded();
+  const item = state.items.find((entry) => entry.id === itemId);
+  if (!item) {
+    throw new Error('Queue item was not found');
+  }
+  if (!item.stopPolicy) {
+    return cloneQueueItem(item);
+  }
+  if (item.stopPolicy.status !== 'armed') {
+    throw new Error('A stop schedule cannot be removed after its stop process has started');
+  }
+
+  item.stopPolicy = null;
+  item.updatedAt = nowIso();
+  await persistState();
+  return cloneQueueItem(item);
+}
+
 export async function cancelCodexQueueItem(itemId: string): Promise<CodexQueueItem> {
   await ensureStateLoaded();
   const item = state.items.find((entry) => entry.id === itemId);
@@ -1669,6 +2217,7 @@ export async function cancelCodexQueueItem(itemId: string): Promise<CodexQueueIt
       throw new Error('Running queue item could not be stopped');
     }
 
+    item.stopPolicy = null;
     item.status = 'cancelling';
     item.updatedAt = nowIso();
     item.error = null;
@@ -1681,8 +2230,12 @@ export async function cancelCodexQueueItem(itemId: string): Promise<CodexQueueIt
   }
 
   item.status = 'cancelled';
+  item.stopPolicy = null;
   item.updatedAt = nowIso();
   item.completedAt = item.updatedAt;
+  if (item.stopDecisionForItemId) {
+    await failConditionalStopDecision(item, 'The scheduled continuation decision was cancelled');
+  }
   await persistState();
   return cloneQueueItem(item);
 }
@@ -1718,6 +2271,19 @@ export async function retryCodexQueueItem(
   item.updatedAt = nowIso();
   item.startedAt = null;
   item.completedAt = null;
+  if (item.stopPolicy) {
+    item.stopPolicy = null;
+  }
+  if (item.stopDecisionForItemId) {
+    const sourceItem = state.items.find((candidate) => candidate.id === item.stopDecisionForItemId);
+    if (sourceItem?.stopPolicy?.mode === 'conditional') {
+      sourceItem.stopPolicy.status = 'awaiting-decision';
+      sourceItem.stopPolicy.resolvedAt = null;
+      sourceItem.stopPolicy.decision = null;
+      sourceItem.stopPolicy.outcome = null;
+      sourceItem.stopPolicy.error = null;
+    }
+  }
   await persistState();
   scheduleImmediateTick();
   return cloneQueueItem(item);

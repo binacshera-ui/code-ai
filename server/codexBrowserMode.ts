@@ -1,4 +1,5 @@
 import { spawnSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import { constants as fsConstants, promises as fs } from 'fs';
 import path from 'path';
 import { CODEX_APP_CONFIG } from './config.js';
@@ -67,6 +68,7 @@ const DEFAULT_BROWSER_SEED_PROFILE_DIR = process.env.CODE_AI_BROWSER_SEED_PROFIL
 const XVFB_RUN_PATH = process.env.XVFB_RUN_PATH || '/usr/bin/xvfb-run';
 const XVFB_SERVER_ARGS = '-screen 0 1440x1200x24 -ac +extension RANDR';
 const PROFILE_SOURCE_STATE_FILE = 'profile-seed-source.json';
+const BROWSER_TAB_STATE_FILE = 'browser-tab-state.json';
 
 let stateLoadedPromise: Promise<void> | null = null;
 let persistTail: Promise<void> = Promise.resolve();
@@ -433,6 +435,7 @@ async function ensureSeededBrowserProfile(record: PersistedCodexSessionBrowserMo
 
   if (needsReset) {
     await fs.rm(record.profileDir, { recursive: true, force: true });
+    await fs.rm(path.join(record.sessionDir, BROWSER_TAB_STATE_FILE), { force: true });
 
     const seedPath = record.profileSeed === 'seeded'
       ? DEFAULT_BROWSER_SEED_PROFILE_DIR
@@ -464,9 +467,8 @@ function stripExistingBrowserModeSection(configContent: string): string {
 function buildBrowserModeConfigToml(
   record: PersistedCodexSessionBrowserModeRecord,
   pythonExecutable: string,
-  resolvedExecutable: ResolvedBrowserExecutable | null
 ): string {
-  const launch = buildBrowserModeRuntimeLaunchFromResolved(record, pythonExecutable, resolvedExecutable);
+  const launch = buildBrowserModeProxyLaunch(record, pythonExecutable);
   const lines = [
     '[mcp_servers.browser_mode]',
     `command = ${escapeTomlString(launch.command)}`,
@@ -482,6 +484,21 @@ function buildBrowserModeConfigToml(
   }
 
   return lines.join('\n');
+}
+
+function buildBrowserModeProxyLaunch(
+  record: PersistedCodexSessionBrowserModeRecord,
+  pythonExecutable: string,
+): BrowserModeRuntimeLaunch {
+  return {
+    command: pythonExecutable,
+    args: [
+      record.serverScriptPath,
+      '--bridge-info-file',
+      path.join(record.sessionDir, 'browser-http-bridge.json'),
+    ],
+    env: {},
+  };
 }
 
 function buildBrowserModeRuntimeLaunchFromResolved(
@@ -534,31 +551,62 @@ function buildBrowserModeRuntimeLaunchFromResolved(
   };
 }
 
-async function ensureOverlaySymlink(targetPath: string, sourcePath: string) {
-  try {
-    const existing = await fs.readlink(targetPath);
-    if (path.resolve(path.dirname(targetPath), existing) === sourcePath) {
-      return;
-    }
-    await fs.rm(targetPath, { recursive: true, force: true });
-  } catch (error: any) {
-    if (error?.code !== 'ENOENT' && error?.code !== 'EINVAL' && error?.code !== 'UNKNOWN') {
-      try {
-        await fs.rm(targetPath, { recursive: true, force: true });
-      } catch {
-        // Ignore and attempt to recreate.
+export async function ensureOverlaySymlink(targetPath: string, sourcePath: string) {
+  const resolvedSourcePath = path.resolve(sourcePath);
+  await ensureDirectory(path.dirname(targetPath));
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const current = await fs.lstat(targetPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (current?.isSymbolicLink()) {
+      const existing = await fs.readlink(targetPath).catch(() => null);
+      if (existing && path.resolve(path.dirname(targetPath), existing) === resolvedSourcePath) {
+        return;
       }
+    }
+
+    if (current) {
+      const displacedPath = `${targetPath}.stale-${process.pid}-${randomUUID()}`;
+      try {
+        await fs.rename(targetPath, displacedPath);
+        await fs.rm(displacedPath, { recursive: true, force: true });
+      } catch (error: any) {
+        if (error?.code === 'ENOENT' || error?.code === 'EEXIST' || error?.code === 'ENOTEMPTY') {
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    const temporaryPath = `${targetPath}.link-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.symlink(resolvedSourcePath, temporaryPath);
+      try {
+        await fs.rename(temporaryPath, targetPath);
+      } catch (error: any) {
+        if (error?.code !== 'EEXIST' && error?.code !== 'ENOTEMPTY' && error?.code !== 'EPERM') {
+          throw error;
+        }
+      }
+    } finally {
+      await fs.rm(temporaryPath, { recursive: true, force: true }).catch(() => undefined);
+    }
+
+    const installed = await fs.readlink(targetPath).catch(() => null);
+    if (installed && path.resolve(path.dirname(targetPath), installed) === resolvedSourcePath) {
+      return;
     }
   }
 
-  await fs.symlink(sourcePath, targetPath);
+  throw new Error(`Unable to install browser-mode overlay symlink: ${targetPath}`);
 }
 
 async function prepareOverlayCodexHome(
   profile: BrowserModeProfile,
   record: PersistedCodexSessionBrowserModeRecord,
   pythonExecutable: string,
-  resolvedExecutable: ResolvedBrowserExecutable | null
 ) {
   await ensureDirectory(record.overlayCodexHome);
 
@@ -577,7 +625,7 @@ async function prepareOverlayCodexHome(
   const baseConfig = await fs.readFile(baseConfigPath, 'utf-8').catch(() => '');
   const mergedConfig = [
     stripExistingBrowserModeSection(baseConfig),
-    buildBrowserModeConfigToml(record, pythonExecutable, resolvedExecutable),
+    buildBrowserModeConfigToml(record, pythonExecutable),
     '',
   ].filter(Boolean).join('\n\n');
   await fs.writeFile(path.join(record.overlayCodexHome, 'config.toml'), mergedConfig, 'utf-8');
@@ -779,7 +827,7 @@ export async function prepareCodexBrowserModeForRun(
   const existing = await getSessionBrowserModeRecord(stateProfileId, sessionKey);
 
   const nextRecord = buildRecord(stateProfileId, sessionKey, normalized, existing);
-  const resolvedExecutable = await detectPlaywrightExecutable(profile.codexHome, nextRecord.headless);
+  await detectPlaywrightExecutable(profile.codexHome, nextRecord.headless);
 
   if (!nextRecord.headless) {
     await ensureVisualBrowserDependenciesAvailable();
@@ -789,7 +837,7 @@ export async function prepareCodexBrowserModeForRun(
   await ensureDirectory(nextRecord.screenshotsDir);
   await ensureDirectory(nextRecord.artifactsDir);
   await ensureSeededBrowserProfile(nextRecord);
-  await prepareOverlayCodexHome(profile, nextRecord, pythonExecutable, resolvedExecutable);
+  await prepareOverlayCodexHome(profile, nextRecord, pythonExecutable);
 
   await ensureStateLoaded();
   state.browserModeByKey[buildBrowserModeKey(stateProfileId, sessionKey)] = nextRecord;
@@ -813,4 +861,12 @@ export async function buildBrowserModeRuntimeLaunch(
   }
 
   return buildBrowserModeRuntimeLaunchFromResolved(record, pythonExecutable, resolvedExecutable);
+}
+
+export async function buildBrowserModeMcpProxyLaunch(
+  record: CodexSessionBrowserModeRecord | PersistedCodexSessionBrowserModeRecord
+): Promise<BrowserModeRuntimeLaunch> {
+  await ensureBundledBrowserModeRuntimeAvailable();
+  const pythonExecutable = await resolveBrowserPythonExecutable();
+  return buildBrowserModeProxyLaunch(record, pythonExecutable);
 }

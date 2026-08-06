@@ -24,7 +24,7 @@ It is designed for operators who want one clean control plane for conversations,
 - Built-in queueing and scheduling, including deferred and recurring execution.
 - Topic grouping, project boards, reminders, anchors, skills, and reusable context tools.
 - Session-scoped Design Mode: Codex keeps control of code and behavior while a read-only Gemini specialist supplies implementation-ready visual direction, optionally informed by a full or cropped user canvas.
-- Session-scoped UX Mode: Codex records a private thesis, Gemini produces a blind independent baseline, and the models may challenge one another for up to ten adversarial exchanges before a customer-stage product synthesis.
+- Personal Chrome Mode: a paired Manifest V3 extension opens this workspace in Chrome's Side Panel and gives Codex audited tools for real tabs, DOM snapshots, element or region selection, forms, screenshots, console, network, and JavaScript.
 - Cross-provider transfers and cross-user session copy flows.
 - Internal support mode with isolated storage and sandbox rules.
 - Trigger endpoints that can wake a normal session from an external system event.
@@ -37,7 +37,7 @@ It is designed for operators who want one clean control plane for conversations,
 - forking or transferring sessions
 - attaching files, anchors, skills, reminders, and agent modes
 - opening a drawing canvas and activating Design Mode only for the session that needs Codex × Gemini visual collaboration
-- activating UX Mode only for the session that needs structured journey, trust, behavioral, psychological, friction, or visual-hierarchy analysis
+- pairing a personal Chrome device and binding it to one session with explicit scopes and approval policy
 - scheduling one-shot or recurring runs
 - tracking session-local subtasks and project assignments
 - inspecting changed files, tool traces, queue state, context usage, permissions, and rate limits
@@ -67,7 +67,7 @@ The full multi-provider experience is available when all three are installed and
 ### Linux / macOS
 
 ```bash
-git clone https://github.com/binacshera-ui/code-ai.git
+git clone <repository-url>
 cd code-ai
 ./install.sh \
   --app-name code-ai \
@@ -80,7 +80,7 @@ cd code-ai
 ### Windows PowerShell
 
 ```powershell
-git clone https://github.com/binacshera-ui/code-ai.git
+git clone <repository-url>
 cd code-ai
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
   --app-name code-ai `
@@ -94,6 +94,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 `
 
 - `client/` — the mobile UI
 - `server/` — provider routing, queueing, parsing, and orchestration
+- `chrome-extension/` — load-unpacked Manifest V3 Side Panel and real-browser bridge
 - `skills/` — session-scoped specialist workflows, exposed only by the modes that activate them
 - `deploy/code-ai/` — installer, export flow, and deployment assets
 - `scripts/` — repo-local utilities
@@ -116,6 +117,47 @@ Examples:
 - Gemini -> `.gemini`
 
 The name stays `codexHome` for backward compatibility with existing installs and stored metadata, but it now means “provider home” across the whole app.
+
+## Private inbound SSH for a personal computer
+
+The personal-computer agent can carry an optional SSH bridge over the same
+outbound connection as the remote API. This is useful when the computer is
+behind NAT and must not expose OpenSSH to the public internet.
+
+Add these owner-only values to the pairing file:
+
+```dotenv
+CODEX_REMOTE_SSH_REVERSE_PORT=44022
+CODEX_REMOTE_SSH_LOCAL_PORT=22
+```
+
+The agent binds both reverse forwards to `127.0.0.1` on the control plane.
+Install and start OpenSSH Server on the personal computer, authorize a
+dedicated control-plane public key, and keep the public Windows firewall rule
+disabled unless direct LAN access is intentionally required. From the control
+plane, connect through `ssh -p 44022 <windows-user>@127.0.0.1`.
+
+## Personal Chrome extension
+
+The extension is deliberately separate from the isolated server-side browser.
+It controls only a Chrome device that the operator explicitly pairs and binds
+to the current session.
+
+```bash
+npm run extension:package -- \
+  --output /tmp/code-ai-personal-chrome \
+  --control-origin https://your-code-ai.example
+```
+
+Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**,
+and select the generated directory. In CODE-AI open **Modes → Personal Chrome**,
+create a one-time code, pair the extension, choose the device, configure
+read/write scopes and approval policy, then enable the mode for that session.
+
+Bindings are session-specific and revocable. Risky actions require operator
+approval according to policy, sensitive values are redacted from audit data,
+and temporary port exposure is loopback-only with a TTL. See
+`chrome-extension/README.md` for the permission and threat model.
 
 ## Where To Read Next
 

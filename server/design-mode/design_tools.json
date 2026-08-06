@@ -59,7 +59,7 @@
     },
     {
       "name": "design_review",
-      "description": "Critique an implemented UI against the request and existing design language, rank visual defects and return precise corrections. Supply current screenshots and the relevant source files.",
+      "description": "Critique an implemented UI against the request and existing design language, rank visual defects and return precise corrections. Supply current screenshots and the relevant source files. The Gemini Design Partner skill permits at most three design_review calls in one implementation cycle, including retries.",
       "inputSchema": { "$ref": "design_tools.json#/tools/0/inputSchema" }
     },
     {
