@@ -14,6 +14,11 @@ Codex session to the local browser tools.
 5. Enter the normal CODE-AI device password inside the application once. There
    is no separate pairing screen or session-by-session setup.
 
+When a packaged extension is updated to a different control origin, it revokes
+the old device credential on a best-effort basis, never forwards that credential
+to the new origin, and asks for the normal device password once. This also
+rebuilds the frame-header rules before the application iframe is opened.
+
 Use `npm run extension:package -- --output <directory> --control-origin
 <origin>` to create a deployable copy with a pre-filled origin. Do not edit a
 deployed copy as the source of truth.

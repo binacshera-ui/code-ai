@@ -16,6 +16,19 @@ let reconnectTimer = null;
 let reconnectAttempt = 0;
 const pendingApprovals = [];
 
+function disconnectBridge(reason = 'Disconnected') {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  reconnectAttempt = 0;
+  const activeSocket = socket;
+  socket = null;
+  connected = false;
+  clearPendingApprovals();
+  if (activeSocket && activeSocket.readyState < WebSocket.CLOSING) {
+    activeSocket.close(1000, reason);
+  }
+}
+
 function errorWithCode(message, code = 'COMMAND_FAILED', details) {
   const error = new Error(message);
   error.code = code;
@@ -132,14 +145,18 @@ function scheduleReconnect() {
 function connectBridge() {
   clearTimeout(reconnectTimer);
   if (!settings?.deviceToken || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
-  try { socket = new WebSocket(socketUrl()); } catch { scheduleReconnect(); return; }
-  socket.addEventListener('open', () => {
+  let activeSocket;
+  try { activeSocket = new WebSocket(socketUrl()); } catch { scheduleReconnect(); return; }
+  socket = activeSocket;
+  activeSocket.addEventListener('open', () => {
+    if (socket !== activeSocket) return;
     sendSocket({
       type: 'auth', version: PROTOCOL_VERSION, deviceId: settings.deviceId, token: settings.deviceToken,
       extensionId: chrome.runtime.id, userAgent: navigator.userAgent,
     });
   });
-  socket.addEventListener('message', (event) => {
+  activeSocket.addEventListener('message', (event) => {
+    if (socket !== activeSocket) return;
     let message;
     try { message = JSON.parse(event.data); } catch { return; }
     if (message.type === 'auth_ok') {
@@ -163,10 +180,13 @@ function connectBridge() {
     }
     if (message.type === 'command') void runCommand(message);
   });
-  socket.addEventListener('close', () => {
+  activeSocket.addEventListener('close', () => {
+    if (socket !== activeSocket) return;
     connected = false; socket = null; clearPendingApprovals(); broadcastStatus(); scheduleReconnect();
   });
-  socket.addEventListener('error', () => socket?.close());
+  activeSocket.addEventListener('error', () => {
+    if (socket === activeSocket) activeSocket.close();
+  });
 }
 
 async function activeTab() {
@@ -338,33 +358,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
   if (message?.type === 'PANEL_GET_STATE') {
-    sendResponse({ ...statusSnapshot(), settings, pendingApproval: currentApproval() });
-    return;
+    void settingsReady
+      .then(() => sendResponse({ ...statusSnapshot(), settings, pendingApproval: currentApproval() }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
   }
   if (message?.type === 'PANEL_CONFIGURE_ORIGIN') {
-    void configureControlOrigin(message.controlOrigin)
+    void settingsReady.then(() => configureControlOrigin(message.controlOrigin))
       .then(() => sendResponse({ ok: true, ...statusSnapshot(), settings }))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
   }
   if (message?.type === 'ENROLL_DEVICE') {
-    void enrollDevice(message)
+    void settingsReady.then(() => enrollDevice(message))
       .then((value) => sendResponse({ ok: true, settings: value, ...statusSnapshot() }))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
   }
   if (message?.type === 'SYNC_ACTIVE_SESSION') {
-    void syncActiveSession(message.context)
+    void settingsReady.then(() => syncActiveSession(message.context))
       .then((value) => sendResponse({ ok: true, ...value }))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error), code: error.code || 'SYNC_FAILED' }));
     return true;
   }
   if (message?.type === 'PAIR_DEVICE') {
-    void pairDevice(message).then((value) => sendResponse({ ok: true, settings: value })).catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    void settingsReady.then(() => pairDevice(message)).then((value) => sendResponse({ ok: true, settings: value })).catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
   }
   if (message?.type === 'UNPAIR_DEVICE') {
-    void unpairDevice().then(() => sendResponse({ ok: true }));
+    void settingsReady.then(() => unpairDevice()).then(() => sendResponse({ ok: true }));
     return true;
   }
   if (message?.type === 'APPROVAL_RESPONSE') {
@@ -407,11 +429,24 @@ async function configureControlOrigin(rawOrigin) {
     await installAuthRules(settings);
     return settings;
   }
-  if (settings?.deviceToken) {
-    throw new Error('כתובת CODE-AI של המכשיר המחובר אינה תואמת לחבילת התוסף. אפס את אישור המכשיר תחילה.');
+  const previous = settings;
+  if (previous?.deviceId && previous?.deviceToken && previous?.controlOrigin) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    await fetch(`${previous.controlOrigin}/api/codex/browser-extension/devices/${encodeURIComponent(previous.deviceId)}`, {
+      method: 'DELETE',
+      headers: {
+        'x-code-ai-extension-device': previous.deviceId,
+        'x-code-ai-extension-token': previous.deviceToken,
+      },
+      signal: controller.signal,
+    }).catch(() => undefined).finally(() => clearTimeout(timeout));
   }
+  disconnectBridge('Control origin changed');
+  sessionSyncs.clear();
   const next = { controlOrigin, deviceName: settings?.deviceName || 'Chrome במחשב האישי' };
   await storeSettings(next);
+  broadcastStatus();
   return next;
 }
 
@@ -530,8 +565,7 @@ async function unpairDevice() {
     await controlRequest(`/api/codex/browser-extension/devices/${encodeURIComponent(settings.deviceId)}`, { method: 'DELETE' })
       .catch(() => undefined);
   }
-  clearTimeout(reconnectTimer); reconnectTimer = null; socket?.close(1000, 'Unpaired'); socket = null; connected = false;
-  clearPendingApprovals();
+  disconnectBridge('Unpaired');
   const next = settings?.controlOrigin ? { controlOrigin: settings.controlOrigin, deviceName: settings.deviceName || 'Chrome במחשב האישי' } : null;
   settings = next;
   if (next) await chrome.storage.local.set({ [STORAGE_KEY]: next });
@@ -789,4 +823,8 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === 'code-ai-bridge-heartbeat') { if (!connected) connectBridge(); else try { sendSocket({ type: 'event', version: PROTOCOL_VERSION, name: 'heartbeat', payload: { at: new Date().toISOString() } }); } catch {} } });
 chrome.notifications.onClicked.addListener(() => void chrome.sidePanel.open({ windowId: chrome.windows.WINDOW_ID_CURRENT }).catch(() => undefined));
 
-void loadSettings().then(async () => { await installAuthRules(settings); if (settings?.deviceToken) connectBridge(); });
+const settingsReady = loadSettings().then(async () => {
+  await installAuthRules(settings);
+  if (settings?.deviceToken) connectBridge();
+  return settings;
+});

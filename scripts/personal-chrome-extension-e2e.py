@@ -13,26 +13,34 @@ from playwright.async_api import async_playwright
 APP_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_EXTENSION_ROOT = APP_ROOT / "chrome-extension"
 BASE_URL = os.environ.get("CODE_AI_E2E_BASE_URL", "http://127.0.0.1:4106").rstrip("/")
+API_BASE_URL = os.environ.get("CODE_AI_E2E_API_BASE_URL", BASE_URL).rstrip("/")
+CLEANUP_BASE_URL = os.environ.get("CODE_AI_E2E_CLEANUP_BASE_URL", API_BASE_URL).rstrip("/")
 DEVICE_PASSWORD = os.environ.get("CODE_AI_E2E_DEVICE_PASSWORD", "test-device-password")
+SEED_STALE_ORIGIN = os.environ.get("CODE_AI_E2E_SEED_STALE_ORIGIN", "0") == "1"
+PANEL_ONLY = os.environ.get("CODE_AI_E2E_PANEL_ONLY", "0") == "1"
 CHROMIUM = os.environ.get(
     "CODE_AI_E2E_CHROMIUM",
     str(APP_ROOT / ".playwright-browsers/chromium-1223/chrome-linux64/chrome"),
 )
 
 
-def request_json(pathname, method="GET", payload=None, headers=None, expected=200):
+def request_json(pathname, method="GET", payload=None, headers=None, expected=200, base_url=None):
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     request_headers = {"content-type": "application/json", **(headers or {})}
     request = urllib.request.Request(
-        f"{BASE_URL}{pathname}", data=body, headers=request_headers, method=method
+        f"{base_url or API_BASE_URL}{pathname}", data=body, headers=request_headers, method=method
     )
     try:
         with urllib.request.urlopen(request, timeout=130) as response:
             status = response.status
-            result = json.loads(response.read().decode("utf-8"))
+            raw_result = response.read().decode("utf-8")
     except urllib.error.HTTPError as error:
         status = error.code
-        result = json.loads(error.read().decode("utf-8"))
+        raw_result = error.read().decode("utf-8")
+    try:
+        result = json.loads(raw_result)
+    except json.JSONDecodeError:
+        result = {"raw": raw_result[:500]}
     if status != expected:
         raise AssertionError(f"{pathname}: expected {expected}, got {status}: {result}")
     return result
@@ -42,6 +50,21 @@ async def wait_for_service_worker(context):
     if context.service_workers:
         return context.service_workers[0]
     return await context.wait_for_event("serviceworker", timeout=15_000)
+
+
+async def launch_extension_context(playwright, profile_root, extension_root):
+    return await playwright.chromium.launch_persistent_context(
+        str(profile_root),
+        executable_path=CHROMIUM,
+        headless=False,
+        viewport={"width": 1280, "height": 900},
+        args=[
+            f"--disable-extensions-except={extension_root}",
+            f"--load-extension={extension_root}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+    )
 
 
 async def main():
@@ -65,23 +88,28 @@ async def main():
     binding_id = None
     extension_headers = None
     async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            str(profile_root),
-            executable_path=CHROMIUM,
-            headless=False,
-            viewport={"width": 1280, "height": 900},
-            args=[
-                f"--disable-extensions-except={extension_root}",
-                f"--load-extension={extension_root}",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-        )
+        context = await launch_extension_context(playwright, profile_root, extension_root)
         try:
             worker = await wait_for_service_worker(context)
             extension_id = worker.url.split("/")[2]
             manifest_name = await worker.evaluate("chrome.runtime.getManifest().name")
             assert manifest_name == "CODE-AI Personal Chrome"
+            if SEED_STALE_ORIGIN:
+                await worker.evaluate(
+                    """async settings => {
+                      await chrome.storage.local.set({codeAiPersonalChromeSettings: settings});
+                    }""",
+                    {
+                        "controlOrigin": "http://127.0.0.1:9",
+                        "deviceName": "Stale Chrome device",
+                        "deviceId": "stale-device-id",
+                        "deviceToken": "stale-device-token",
+                    },
+                )
+                await context.close()
+                context = await launch_extension_context(playwright, profile_root, extension_root)
+                worker = await wait_for_service_worker(context)
+                assert worker.url.split("/")[2] == extension_id
 
             panel = await context.new_page()
             browser_errors = []
@@ -106,6 +134,8 @@ async def main():
             stored = await worker.evaluate(
                 "async () => (await chrome.storage.local.get('codeAiPersonalChromeSettings')).codeAiPersonalChromeSettings"
             )
+            assert stored["controlOrigin"] == BASE_URL
+            assert stored["deviceToken"] != "stale-device-token"
             device_id = stored["deviceId"]
             extension_headers = {
                 "x-code-ai-extension-device": device_id,
@@ -116,6 +146,16 @@ async def main():
             )
             device = next(item for item in devices["devices"] if item["id"] == device_id)
             assert device["online"] is True
+            if PANEL_ONLY:
+                print(json.dumps({
+                    "ok": True,
+                    "extensionId": extension_id,
+                    "deviceId": device_id,
+                    "panelLoaded": True,
+                    "originMigrated": stored["controlOrigin"] == BASE_URL,
+                    "webSocketOnline": True,
+                }))
+                return
 
             profiles_payload = await asyncio.to_thread(
                 request_json, "/api/codex/profiles", "GET", None, extension_headers
@@ -225,6 +265,8 @@ async def main():
                     "DELETE",
                     None,
                     extension_headers,
+                    200,
+                    CLEANUP_BASE_URL,
                 )
             if device_id:
                 await asyncio.to_thread(
@@ -233,6 +275,8 @@ async def main():
                     "DELETE",
                     None,
                     extension_headers,
+                    200,
+                    CLEANUP_BASE_URL,
                 )
             await context.close()
 

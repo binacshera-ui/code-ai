@@ -65,8 +65,10 @@ async function initialize() {
   const configured = await sendRuntimeMessage({ type: 'PANEL_CONFIGURE_ORIGIN', controlOrigin: configuredOrigin });
   if (!configured.ok) throw new Error(configured.error || 'לא ניתן להגדיר את כתובת CODE-AI.');
   settings = configured.settings || settings;
+  setStatus(configured);
   openApp();
   const response = await sendRuntimeMessage({ type: 'PANEL_GET_STATE' });
+  if (response.ok === false) throw new Error(response.error || 'לא ניתן לקרוא את מצב התוסף.');
   settings = response.settings || settings;
   setStatus(response);
   renderApproval(response.pendingApproval || null);

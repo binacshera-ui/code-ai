@@ -29,6 +29,8 @@ test('Chrome extension package is generic, complete, and load-unpacked compatibl
   assert.match(combined, /SYNC_ACTIVE_SESSION/);
   assert.match(combined, /CODE_AI_PICKER_PING/);
   assert.match(combined, /extensionPanel=1/);
+  assert.match(combined, /Control origin changed/);
+  assert.match(combined, /settingsReady/);
   assert.doesNotMatch(panel, /pairing-code|pair-button|קוד חד/);
   assert.doesNotMatch(panel, /<script(?![^>]+src=)/i);
 });
