@@ -1561,7 +1561,8 @@ router.get('/auth/status', async (req, res) => {
         extensionCredentials.token,
       );
       if (extensionAuth) {
-        res.json(extensionAuth);
+        const { personalChromeOwnerId: _ownerId, ...publicExtensionAuth } = extensionAuth;
+        res.json(publicExtensionAuth);
         return;
       }
     } catch (error: any) {

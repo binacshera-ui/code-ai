@@ -587,7 +587,7 @@ export async function authenticatePersonalChromeUiToken(deviceId: string, token:
   if (!device) return null;
   return {
     authenticated: true, localBypass: false, publicAccess: false, deviceUnlocked: true, extensionDevice: true,
-    personalChromeOwnerId: device.ownerId, personalChromeDeviceId: device.id, personalChromeDeviceName: device.name,
+    personalChromeOwnerId: device.ownerId,
     user: { id: `extension:${device.ownerId}`, email: '', name: device.name },
   };
 }
