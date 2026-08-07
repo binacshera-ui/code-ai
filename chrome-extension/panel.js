@@ -7,6 +7,7 @@ const connectionLabel = document.querySelector('#connection-label');
 const selectionBanner = document.querySelector('#selection-banner');
 const approval = document.querySelector('#approval');
 let settings = { controlOrigin: configuredOrigin };
+let bridgeStatus = { paired: false, connected: false, extensionId: null, installationId: null };
 let currentApproval = null;
 let enrollmentInFlight = false;
 let lastContextKey = '';
@@ -86,6 +87,7 @@ function postToApp(message) {
 }
 
 function setStatus(status) {
+  bridgeStatus = { ...bridgeStatus, ...status };
   settings = { ...settings, ...(status.settings || {}), controlOrigin: status.controlOrigin || status.settings?.controlOrigin || settings.controlOrigin || configuredOrigin };
   connectionDot.className = `dot ${status.connected ? 'online' : status.paired ? 'offline' : ''}`;
   connectionLabel.textContent = status.connected
@@ -94,6 +96,16 @@ function setStatus(status) {
       ? 'CODE-AI פתוח · כלי הדפדפן מתחברים…'
       : 'CODE-AI פתוח · נדרש אישור מכשיר חד־פעמי';
   postToApp({ type: 'code-ai:extension-status', ...status });
+}
+
+function publishExtensionBootstrap() {
+  if (!bridgeStatus.extensionId || !bridgeStatus.installationId) return;
+  postToApp({
+    type: 'code-ai:extension-bootstrap',
+    extensionId: bridgeStatus.extensionId,
+    installationId: bridgeStatus.installationId,
+    paired: bridgeStatus.paired === true,
+  });
 }
 
 function renderApproval(nextApproval) {
@@ -144,6 +156,7 @@ async function enrollFromApp(message) {
 
 async function syncContext(context) {
   if (!context?.authenticated || !context?.deviceUnlocked || context.provider !== 'codex') return;
+  if (!bridgeStatus.paired) return;
   const contextKey = `${context.serverId || 'local'}:${context.profileId || ''}:${context.sessionKey || ''}`;
   if (!context.profileId || !context.sessionKey || contextKey === lastContextKey) return;
   lastContextKey = contextKey;
@@ -237,10 +250,14 @@ window.addEventListener('message', (event) => {
     flushPendingAppMessages();
   }
   if (message.type === 'code-ai:extension-ready') {
+    publishExtensionBootstrap();
     postToApp({ type: 'code-ai:extension-request-context' });
     return;
   }
   if (message.type === 'code-ai:extension-enrollment') void enrollFromApp(message);
+  if (message.type === 'code-ai:extension-enrollment-required') {
+    showNotice(message.error || 'יש לאשר את התקנת התוסף פעם אחת מתוך CODE-AI.', 'error');
+  }
   if (message.type === 'code-ai:extension-context') void syncContext(message);
 });
 

@@ -6,9 +6,14 @@ import { WebSocket } from 'ws';
 const baseUrl = String(process.env.CODE_AI_E2E_BASE_URL || 'http://127.0.0.1:4106').replace(/\/+$/, '');
 const storageRoot = process.env.CODEX_STORAGE_ROOT || '';
 const devicePassword = process.env.CODE_AI_E2E_DEVICE_PASSWORD || 'test-device-password';
+let sessionCookie = '';
 
 async function requestJson(pathname, init = {}, expectedStatus = 200) {
-  const response = await fetch(`${baseUrl}${pathname}`, init);
+  const headers = new Headers(init.headers || {});
+  if (sessionCookie && !headers.has('cookie')) headers.set('cookie', sessionCookie);
+  const response = await fetch(`${baseUrl}${pathname}`, { ...init, headers });
+  const setCookie = response.headers.get('set-cookie');
+  if (setCookie) sessionCookie = setCookie.split(';', 1)[0];
   const contentType = response.headers.get('content-type') || '';
   const payload = contentType.includes('application/json') ? await response.json() : await response.text();
   assert.equal(response.status, expectedStatus, `${pathname}: ${JSON.stringify(payload)}`);
@@ -47,6 +52,8 @@ function createMessageInbox(ws) {
 }
 
 async function main() {
+  const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
+  const installationId = 'e2e-installation-0001';
   const health = await requestJson('/api/codex/browser-extension/health');
   assert.equal(health.protocolVersion, 1);
 
@@ -56,14 +63,20 @@ async function main() {
   });
   assert.match(unlock.extensionEnrollmentToken, /^[A-Za-z0-9_-]{32,}$/);
 
-  const claim = await requestJson('/api/codex/browser-extension/enrollment/claim', {
+  const initialClaim = await requestJson('/api/codex/browser-extension/enrollment/claim', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ enrollmentToken: unlock.extensionEnrollmentToken, deviceName: 'E2E Chrome', extensionId: 'e2e-extension', platform: 'test' }),
+    body: JSON.stringify({
+      enrollmentToken: unlock.extensionEnrollmentToken,
+      deviceName: 'E2E Chrome',
+      extensionId,
+      installationId,
+      platform: 'test',
+    }),
   }, 201);
-  assert.ok(claim.deviceId && claim.deviceToken);
-  const extensionHeaders = {
-    'x-code-ai-extension-device': claim.deviceId,
-    'x-code-ai-extension-token': claim.deviceToken,
+  assert.ok(initialClaim.deviceId && initialClaim.deviceToken);
+  const initialExtensionHeaders = {
+    'x-code-ai-extension-device': initialClaim.deviceId,
+    'x-code-ai-extension-token': initialClaim.deviceToken,
   };
 
   await requestJson('/api/codex/browser-extension/enrollment/claim', {
@@ -71,13 +84,45 @@ async function main() {
     body: JSON.stringify({ enrollmentToken: unlock.extensionEnrollmentToken, deviceName: 'Replay attempt' }),
   }, 400);
 
+  await requestJson(`/api/codex/browser-extension/devices/${encodeURIComponent(initialClaim.deviceId)}?preserveTrust=1`, {
+    method: 'DELETE', headers: initialExtensionHeaders,
+  });
+  const resumedEnrollment = await requestJson('/api/codex/browser-extension/enrollment/resume', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ extensionId, installationId }),
+  });
+  assert.match(resumedEnrollment.extensionEnrollmentToken, /^[A-Za-z0-9_-]{32,}$/);
+  await requestJson('/api/codex/browser-extension/enrollment/claim', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      enrollmentToken: resumedEnrollment.extensionEnrollmentToken,
+      deviceName: 'Wrong extension',
+      extensionId: 'ponmlkjihgfedcbaponmlkjihgfedcba',
+      installationId,
+    }),
+  }, 400);
+  const claim = await requestJson('/api/codex/browser-extension/enrollment/claim', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      enrollmentToken: resumedEnrollment.extensionEnrollmentToken,
+      deviceName: 'Recovered E2E Chrome',
+      extensionId,
+      installationId,
+      platform: 'test',
+    }),
+  }, 201);
+  const extensionHeaders = {
+    'x-code-ai-extension-device': claim.deviceId,
+    'x-code-ai-extension-token': claim.deviceToken,
+  };
+
   const socketUrl = new URL(baseUrl);
   socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
   socketUrl.pathname = '/api/codex/browser-extension/socket';
   const ws = new WebSocket(socketUrl);
   const inbox = createMessageInbox(ws);
   await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
-  ws.send(JSON.stringify({ type: 'auth', version: 1, deviceId: claim.deviceId, token: claim.deviceToken, extensionId: 'e2e-extension' }));
+  ws.send(JSON.stringify({ type: 'auth', version: 1, deviceId: claim.deviceId, token: claim.deviceToken, extensionId }));
   assert.equal((await inbox.next((message) => message.type === 'auth_ok')).deviceId, claim.deviceId);
   ws.send(JSON.stringify({ type: 'event', version: 1, name: 'capabilities', payload: ['tabs', 'e2e'] }));
 
@@ -169,6 +214,10 @@ async function main() {
     method: 'POST', headers: bearer, body: JSON.stringify({ toolName: 'browser_status', arguments: {} }),
   }, 401);
   await requestJson(`/api/codex/browser-extension/devices/${encodeURIComponent(claim.deviceId)}`, { method: 'DELETE', headers: extensionHeaders });
+  await requestJson('/api/codex/browser-extension/enrollment/resume', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ extensionId, installationId }),
+  }, 403);
   ws.close(1000, 'E2E complete');
   console.log(JSON.stringify({ ok: true, deviceId: claim.deviceId, profileId: profile.id, testedTools: ['browser_status', 'browser_type', 'browser_network'] }));
 }

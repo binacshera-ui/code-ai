@@ -13571,6 +13571,10 @@ export function CodexMobileApp() {
   const latestSessionDesignModeLoadTokenRef = useRef(0);
   const latestSessionUxModeLoadTokenRef = useRef(0);
   const latestSessionPersonalChromeModeLoadTokenRef = useRef(0);
+  const extensionEnrollmentBootstrapRef = useRef<{
+    key: string;
+    state: 'pending' | 'completed' | 'failed';
+  } | null>(null);
   const latestProjectAnchorsLoadTokenRef = useRef(0);
   const latestUnifiedSkillsLoadTokenRef = useRef(0);
   const latestSessionRemindersLoadTokenRef = useRef(0);
@@ -14067,15 +14071,69 @@ export function CodexMobileApp() {
       });
     };
 
+    const resumeExtensionEnrollment = async (extensionId: string, installationId: string) => {
+      const key = `${extensionId}:${installationId}`;
+      if (extensionEnrollmentBootstrapRef.current?.key === key) return;
+      extensionEnrollmentBootstrapRef.current = { key, state: 'pending' };
+      try {
+        const response = await fetch('/api/codex/browser-extension/enrollment/resume', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ extensionId, installationId }),
+        });
+        const payload = await response.json().catch(() => ({})) as {
+          error?: string;
+          extensionEnrollmentToken?: string;
+          extensionEnrollmentExpiresAt?: string | null;
+        };
+        if (!response.ok || !payload.extensionEnrollmentToken) {
+          throw new Error(payload.error || `Extension enrollment recovery failed (${response.status})`);
+        }
+        extensionEnrollmentBootstrapRef.current = { key, state: 'completed' };
+        postExtensionPanelMessage({
+          type: 'code-ai:extension-enrollment',
+          enrollmentToken: payload.extensionEnrollmentToken,
+          expiresAt: payload.extensionEnrollmentExpiresAt || null,
+        });
+      } catch (enrollmentError: any) {
+        extensionEnrollmentBootstrapRef.current = { key, state: 'failed' };
+        postExtensionPanelMessage({
+          type: 'code-ai:extension-enrollment-required',
+          error: enrollmentError?.message || 'יש לאשר את התקנת התוסף פעם אחת מתוך CODE-AI.',
+        });
+      }
+    };
+
     const handleExtensionMessage = (event: MessageEvent) => {
       if (event.source !== window.parent || !event.origin.startsWith('chrome-extension://')) return;
       const message = event.data as {
         type?: string;
+        extensionId?: string;
+        installationId?: string;
+        paired?: boolean;
         serverId?: string;
         profileId?: string;
         sessionKey?: string;
         personalChromeMode?: Partial<CodexSessionPersonalChromeMode>;
       };
+      if (message?.type === 'code-ai:extension-bootstrap') {
+        const extensionId = String(message.extensionId || '').trim().toLowerCase();
+        const installationId = String(message.installationId || '').trim();
+        if (
+          event.origin !== `chrome-extension://${extensionId}`
+          || !/^[a-p]{32}$/.test(extensionId)
+          || !/^[A-Za-z0-9_-]{16,120}$/.test(installationId)
+        ) return;
+        if (message.paired === true) {
+          extensionEnrollmentBootstrapRef.current = { key: `${extensionId}:${installationId}`, state: 'completed' };
+          return;
+        }
+        if (authStatus?.authenticated === true && authStatus.deviceUnlocked !== false) {
+          void resumeExtensionEnrollment(extensionId, installationId);
+        }
+        return;
+      }
       if (message?.type === 'code-ai:extension-request-context') {
         publishContext();
         return;

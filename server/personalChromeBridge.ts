@@ -31,6 +31,7 @@ interface PersonalChromeDeviceRecord {
   name: string;
   tokenHash: string;
   extensionId: string | null;
+  installationId: string | null;
   platform: string | null;
   browserVersion: string | null;
   createdAt: string;
@@ -38,6 +39,15 @@ interface PersonalChromeDeviceRecord {
   lastSeenAt: string | null;
   revokedAt: string | null;
   capabilities: string[];
+}
+
+interface PersonalChromeTrustedExtensionRecord {
+  ownerId: string;
+  extensionId: string;
+  installationId: string;
+  createdAt: string;
+  updatedAt: string;
+  revokedAt: string | null;
 }
 
 interface PersonalChromeBindingRecord {
@@ -65,6 +75,8 @@ interface PairingCodeRecord {
 interface EnrollmentTokenRecord {
   tokenHash: string;
   ownerId: string;
+  expectedExtensionId: string | null;
+  expectedInstallationId: string | null;
   createdAt: string;
   expiresAt: string;
 }
@@ -78,6 +90,7 @@ interface BridgeState {
   version: 1;
   devices: PersonalChromeDeviceRecord[];
   bindings: PersonalChromeBindingRecord[];
+  trustedExtensions: PersonalChromeTrustedExtensionRecord[];
 }
 
 interface DeviceConnection {
@@ -125,7 +138,7 @@ let globalPairingAttempts: PairingAttemptWindow = { count: 0, resetAt: 0 };
 const deviceConnections = new Map<string, DeviceConnection>();
 const pendingCommands = new Map<string, PendingCommand>();
 const pendingApprovals = new Map<string, PendingApproval>();
-let state: BridgeState = { version: 1, devices: [], bindings: [] };
+let state: BridgeState = { version: 1, devices: [], bindings: [], trustedExtensions: [] };
 let loaded: Promise<void> | null = null;
 let persistTail: Promise<void> = Promise.resolve();
 let auditTail: Promise<void> = Promise.resolve();
@@ -146,6 +159,20 @@ function secureEqualHash(left: string, right: string): boolean {
   return leftBuffer.length === rightBuffer.length
     && leftBuffer.length > 0
     && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function normalizeExtensionId(value: unknown): string | null {
+  const extensionId = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return /^[a-p]{32}$/.test(extensionId) ? extensionId : null;
+}
+
+function isValidInstallationId(value: string): boolean {
+  return /^[A-Za-z0-9_-]{16,120}$/.test(value);
+}
+
+function normalizeInstallationId(value: unknown): string | null {
+  const installationId = typeof value === 'string' ? value.trim() : '';
+  return isValidInstallationId(installationId) ? installationId : null;
 }
 
 function readHeader(req: Request, name: string): string {
@@ -201,11 +228,28 @@ function normalizeDevice(value: unknown): PersonalChromeDeviceRecord | null {
   return {
     id: String(candidate.id), ownerId: String(candidate.ownerId), name: String(candidate.name).slice(0, 120),
     tokenHash: String(candidate.tokenHash), extensionId: candidate.extensionId ? String(candidate.extensionId) : null,
+    installationId: candidate.installationId ? String(candidate.installationId).slice(0, 120) : null,
     platform: candidate.platform ? String(candidate.platform).slice(0, 120) : null,
     browserVersion: candidate.browserVersion ? String(candidate.browserVersion).slice(0, 120) : null,
     createdAt: candidate.createdAt || nowIso(), updatedAt: candidate.updatedAt || nowIso(),
     lastSeenAt: candidate.lastSeenAt || null, revokedAt: candidate.revokedAt || null,
     capabilities: Array.isArray(candidate.capabilities) ? candidate.capabilities.map(String).slice(0, 100) : [],
+  };
+}
+
+function normalizeTrustedExtension(value: unknown): PersonalChromeTrustedExtensionRecord | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Partial<PersonalChromeTrustedExtensionRecord>;
+  const extensionId = String(candidate.extensionId || '').trim().toLowerCase();
+  const installationId = String(candidate.installationId || '').trim();
+  if (!candidate.ownerId || !/^[a-p]{32}$/.test(extensionId) || !isValidInstallationId(installationId)) return null;
+  return {
+    ownerId: String(candidate.ownerId),
+    extensionId,
+    installationId,
+    createdAt: candidate.createdAt || nowIso(),
+    updatedAt: candidate.updatedAt || nowIso(),
+    revokedAt: candidate.revokedAt || null,
   };
 }
 
@@ -235,10 +279,13 @@ async function ensureLoaded() {
         version: 1,
         devices: (Array.isArray(parsed.devices) ? parsed.devices : []).map(normalizeDevice).filter((value): value is PersonalChromeDeviceRecord => Boolean(value)),
         bindings: (Array.isArray(parsed.bindings) ? parsed.bindings : []).map(normalizeBinding).filter((value): value is PersonalChromeBindingRecord => Boolean(value)),
+        trustedExtensions: (Array.isArray(parsed.trustedExtensions) ? parsed.trustedExtensions : [])
+          .map(normalizeTrustedExtension)
+          .filter((value): value is PersonalChromeTrustedExtensionRecord => Boolean(value)),
       };
     } catch (error: any) {
       if (error?.code !== 'ENOENT') throw error;
-      state = { version: 1, devices: [], bindings: [] };
+      state = { version: 1, devices: [], bindings: [], trustedExtensions: [] };
     }
   })();
   return loaded;
@@ -300,6 +347,68 @@ function publicDevice(device: PersonalChromeDeviceRecord) {
     connectedAt: connection?.connectedAt || null,
     capabilities: device.capabilities,
   };
+}
+
+function findExtensionTrust(ownerId: string, extensionId: string, installationId: string) {
+  return state.trustedExtensions.find((entry) => (
+    entry.ownerId === ownerId
+    && entry.extensionId === extensionId
+    && entry.installationId === installationId
+  )) || null;
+}
+
+function mayResumeExtensionEnrollment(ownerId: string, extensionId: string, installationId: string): boolean {
+  const trust = findExtensionTrust(ownerId, extensionId, installationId);
+  if (trust?.revokedAt) return false;
+  if (trust) return true;
+
+  const matchingDevice = state.devices.find((device) => (
+    device.ownerId === ownerId
+    && !device.revokedAt
+    && device.extensionId === extensionId
+    && (!device.installationId || device.installationId === installationId)
+  ));
+  if (matchingDevice) return true;
+
+  return CODEX_APP_CONFIG.trustedPersonalChromeExtensionIds.includes(extensionId);
+}
+
+function trustExtension(ownerId: string, extensionId: string | null, installationId: string | null): void {
+  if (!extensionId || !installationId) return;
+  const timestamp = nowIso();
+  const existing = findExtensionTrust(ownerId, extensionId, installationId);
+  if (existing) {
+    existing.updatedAt = timestamp;
+    existing.revokedAt = null;
+    return;
+  }
+  state.trustedExtensions.push({
+    ownerId,
+    extensionId,
+    installationId,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    revokedAt: null,
+  });
+}
+
+function revokeExtensionTrust(ownerId: string, extensionId: string | null, installationId: string | null): void {
+  if (!extensionId || !installationId) return;
+  const timestamp = nowIso();
+  const existing = findExtensionTrust(ownerId, extensionId, installationId);
+  if (existing) {
+    existing.updatedAt = timestamp;
+    existing.revokedAt = timestamp;
+    return;
+  }
+  state.trustedExtensions.push({
+    ownerId,
+    extensionId,
+    installationId,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    revokedAt: timestamp,
+  });
 }
 
 function findBindingByToken(token: string): PersonalChromeBindingRecord | null {
@@ -592,7 +701,10 @@ export async function authenticatePersonalChromeUiToken(deviceId: string, token:
   };
 }
 
-export async function issuePersonalChromeEnrollmentToken(req: Request) {
+export async function issuePersonalChromeEnrollmentToken(
+  req: Request,
+  expectedIdentity: { extensionId?: string | null; installationId?: string | null } = {},
+) {
   await ensureLoaded();
   pruneEnrollmentTokens();
   const ownerId = ownerIdFromRequest(req);
@@ -603,8 +715,22 @@ export async function issuePersonalChromeEnrollmentToken(req: Request) {
   const tokenHash = sha256(token);
   const createdAt = nowIso();
   const expiresAt = new Date(Date.now() + ENROLLMENT_TTL_MS).toISOString();
-  enrollmentTokens.set(tokenHash, { tokenHash, ownerId, createdAt, expiresAt });
-  await audit({ event: 'extension_enrollment_issued', ownerId, expiresAt });
+  const expectedExtensionId = normalizeExtensionId(expectedIdentity.extensionId);
+  const expectedInstallationId = normalizeInstallationId(expectedIdentity.installationId);
+  enrollmentTokens.set(tokenHash, {
+    tokenHash,
+    ownerId,
+    expectedExtensionId,
+    expectedInstallationId,
+    createdAt,
+    expiresAt,
+  });
+  await audit({
+    event: 'extension_enrollment_issued',
+    ownerId,
+    extensionBound: Boolean(expectedExtensionId && expectedInstallationId),
+    expiresAt,
+  });
   return { token, expiresAt };
 }
 
@@ -655,21 +781,50 @@ export function createPersonalChromeBridgeRouter(requireAccess: AccessMiddleware
     }
     pairingCodes.delete(key);
     const token = randomBytes(32).toString('base64url');
+    const extensionId = typeof req.body?.extensionId === 'string' ? req.body.extensionId.trim().slice(0, 120) : null;
+    const installationId = normalizeInstallationId(req.body?.installationId);
     const device: PersonalChromeDeviceRecord = {
       id: randomUUID(), ownerId: pairing.ownerId,
       name: String(req.body?.deviceName || 'Chrome אישי').trim().slice(0, 120) || 'Chrome אישי',
       tokenHash: sha256(token),
-      extensionId: typeof req.body?.extensionId === 'string' ? req.body.extensionId.slice(0, 120) : null,
+      extensionId,
+      installationId,
       platform: typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 120) : null,
       browserVersion: typeof req.body?.browserVersion === 'string' ? req.body.browserVersion.slice(0, 120) : null,
       createdAt: nowIso(), updatedAt: nowIso(), lastSeenAt: null, revokedAt: null, capabilities: [],
     };
     state.devices.push(device);
+    trustExtension(device.ownerId, normalizeExtensionId(extensionId), installationId);
     await persist();
     await audit({ event: 'device_paired', deviceId: device.id, ownerId: device.ownerId, name: device.name });
     res.status(201).json({
       deviceId: device.id, deviceToken: token, device: publicDevice(device),
       controlUrl: getControlUrl(req), socketPath: SOCKET_PATH,
+    });
+  });
+
+  router.post('/enrollment/resume', requireAccess, async (req, res) => {
+    await ensureLoaded();
+    const ownerId = ownerIdFromRequest(req);
+    const extensionId = normalizeExtensionId(req.body?.extensionId);
+    const installationId = normalizeInstallationId(req.body?.installationId);
+    if (!extensionId || !installationId) {
+      res.status(400).json({ error: 'זהות התקנת התוסף אינה תקינה.' });
+      return;
+    }
+    if (!mayResumeExtensionEnrollment(ownerId, extensionId, installationId)) {
+      await audit({ event: 'extension_enrollment_resume_denied', ownerId, extensionId });
+      res.status(403).json({
+        error: 'התקנת התוסף הזאת טרם אושרה. יש להזין פעם אחת את סיסמת המכשיר בתוך CODE-AI.',
+        code: 'EXTENSION_INSTALLATION_NOT_TRUSTED',
+      });
+      return;
+    }
+    const enrollment = await issuePersonalChromeEnrollmentToken(req, { extensionId, installationId });
+    await audit({ event: 'extension_enrollment_resumed', ownerId, extensionId, expiresAt: enrollment.expiresAt });
+    res.json({
+      extensionEnrollmentToken: enrollment.token,
+      extensionEnrollmentExpiresAt: enrollment.expiresAt,
     });
   });
 
@@ -690,18 +845,30 @@ export function createPersonalChromeBridgeRouter(requireAccess: AccessMiddleware
       res.status(400).json({ error: 'אישור המכשיר אינו תקף או שפג תוקפו. הזן שוב את סיסמת המכשיר.' });
       return;
     }
+    const rawExtensionId = typeof req.body?.extensionId === 'string' ? req.body.extensionId.trim().slice(0, 120) : null;
+    const extensionId = normalizeExtensionId(rawExtensionId);
+    const installationId = normalizeInstallationId(req.body?.installationId);
+    if (
+      (enrollment.expectedExtensionId && extensionId !== enrollment.expectedExtensionId)
+      || (enrollment.expectedInstallationId && installationId !== enrollment.expectedInstallationId)
+    ) {
+      res.status(400).json({ error: 'אסימון האישור הונפק להתקנת תוסף אחרת.' });
+      return;
+    }
     enrollmentTokens.delete(tokenHash);
     const token = randomBytes(32).toString('base64url');
     const device: PersonalChromeDeviceRecord = {
       id: randomUUID(), ownerId: enrollment.ownerId,
       name: String(req.body?.deviceName || 'Chrome במחשב האישי').trim().slice(0, 120) || 'Chrome במחשב האישי',
       tokenHash: sha256(token),
-      extensionId: typeof req.body?.extensionId === 'string' ? req.body.extensionId.slice(0, 120) : null,
+      extensionId: rawExtensionId,
+      installationId,
       platform: typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 120) : null,
       browserVersion: typeof req.body?.browserVersion === 'string' ? req.body.browserVersion.slice(0, 120) : null,
       createdAt: nowIso(), updatedAt: nowIso(), lastSeenAt: null, revokedAt: null, capabilities: [],
     };
     state.devices.push(device);
+    trustExtension(device.ownerId, extensionId, installationId);
     await persist();
     await audit({ event: 'device_enrolled', deviceId: device.id, ownerId: device.ownerId, name: device.name });
     res.status(201).json({
@@ -724,6 +891,13 @@ export function createPersonalChromeBridgeRouter(requireAccess: AccessMiddleware
     device.revokedAt = nowIso();
     device.updatedAt = nowIso();
     for (const binding of state.bindings) if (binding.deviceId === device.id && !binding.revokedAt) binding.revokedAt = nowIso();
+    if (req.query.preserveTrust !== '1') {
+      revokeExtensionTrust(
+        ownerId,
+        normalizeExtensionId(device.extensionId),
+        normalizeInstallationId(device.installationId),
+      );
+    }
     deviceConnections.get(device.id)?.ws.close(4004, 'Device revoked');
     await persist();
     res.json({ revoked: true, deviceId: device.id });

@@ -1,5 +1,6 @@
 const PROTOCOL_VERSION = 1;
 const STORAGE_KEY = 'codeAiPersonalChromeSettings';
+const INSTALLATION_ID_KEY = 'codeAiPersonalChromeInstallationId';
 const AUTH_RULE_ID = 9001;
 const LEGACY_FRAME_RULE_ID = 9002;
 const consoleByTab = new Map();
@@ -10,6 +11,7 @@ const selections = new Map();
 const pendingPickers = new Map();
 const sessionSyncs = new Map();
 let settings = null;
+let installationId = null;
 let socket = null;
 let connected = false;
 let reconnectTimer = null;
@@ -47,6 +49,18 @@ async function loadSettings() {
   const stored = await chrome.storage.local.get(STORAGE_KEY);
   settings = stored[STORAGE_KEY] || null;
   return settings;
+}
+
+async function loadInstallationId() {
+  const stored = await chrome.storage.local.get(INSTALLATION_ID_KEY);
+  const current = stored[INSTALLATION_ID_KEY];
+  if (typeof current === 'string' && /^[A-Za-z0-9_-]{16,120}$/.test(current)) {
+    installationId = current;
+    return installationId;
+  }
+  installationId = crypto.randomUUID();
+  await chrome.storage.local.set({ [INSTALLATION_ID_KEY]: installationId });
+  return installationId;
 }
 
 async function storeSettings(next) {
@@ -102,6 +116,8 @@ function statusSnapshot() {
     deviceId: settings?.deviceId || null,
     deviceName: settings?.deviceName || null,
     controlOrigin: settings?.controlOrigin || null,
+    extensionId: chrome.runtime.id,
+    installationId,
   };
 }
 
@@ -400,7 +416,7 @@ async function pairDevice(input) {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       code: input.code, deviceName: String(input.deviceName || '').trim() || 'Chrome במחשב האישי',
-      extensionId: chrome.runtime.id, platform: navigator.platform, browserVersion: navigator.userAgent,
+      extensionId: chrome.runtime.id, installationId, platform: navigator.platform, browserVersion: navigator.userAgent,
     }),
   });
   const payload = await response.json().catch(() => ({}));
@@ -421,7 +437,7 @@ async function configureControlOrigin(rawOrigin) {
   if (previous?.deviceId && previous?.deviceToken && previous?.controlOrigin) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    await fetch(`${previous.controlOrigin}/api/codex/browser-extension/devices/${encodeURIComponent(previous.deviceId)}`, {
+    await fetch(`${previous.controlOrigin}/api/codex/browser-extension/devices/${encodeURIComponent(previous.deviceId)}?preserveTrust=1`, {
       method: 'DELETE',
       headers: {
         'x-code-ai-extension-device': previous.deviceId,
@@ -447,6 +463,7 @@ async function enrollDevice(input) {
       enrollmentToken: input.enrollmentToken,
       deviceName: String(input.deviceName || settings.deviceName || '').trim() || 'Chrome במחשב האישי',
       extensionId: chrome.runtime.id,
+      installationId,
       platform: navigator.platform,
       browserVersion: navigator.userAgent,
     }),
@@ -811,7 +828,7 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === 'code-ai-bridge-heartbeat') { if (!connected) connectBridge(); else try { sendSocket({ type: 'event', version: PROTOCOL_VERSION, name: 'heartbeat', payload: { at: new Date().toISOString() } }); } catch {} } });
 chrome.notifications.onClicked.addListener(() => void chrome.sidePanel.open({ windowId: chrome.windows.WINDOW_ID_CURRENT }).catch(() => undefined));
 
-const settingsReady = loadSettings().then(async () => {
+const settingsReady = Promise.all([loadSettings(), loadInstallationId()]).then(async () => {
   await installAuthRules(settings);
   if (settings?.deviceToken) connectBridge();
   return settings;

@@ -852,6 +852,12 @@ export function requireCodexAccess(req: Request, res: Response, next: NextFuncti
     void authenticatePersonalChromeUiToken(extensionCredentials.deviceId, extensionCredentials.token)
       .then((authState) => {
         if (!authState) {
+          const browserAuthState = readAuthenticatedUser(req);
+          if (browserAuthState.authenticated && browserAuthState.deviceUnlocked) {
+            (req as any).codexAuth = browserAuthState;
+            next();
+            return;
+          }
           res.status(401).json({ authenticated: false, error: 'תוסף CODE-AI אינו מזווג או שהגישה שלו בוטלה.' });
           return;
         }

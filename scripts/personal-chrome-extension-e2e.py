@@ -154,6 +154,62 @@ async def main():
                 or "Refused to display" in error
                 for error in browser_errors
             ), browser_errors
+
+            initial_device_id = device_id
+            await asyncio.to_thread(
+                request_json,
+                f"/api/codex/browser-extension/devices/{initial_device_id}?preserveTrust=1",
+                "DELETE",
+                None,
+                extension_headers,
+            )
+            device_id = None
+            extension_headers = None
+            await worker.evaluate(
+                """async () => {
+                  const key = 'codeAiPersonalChromeSettings';
+                  const current = (await chrome.storage.local.get(key))[key] || {};
+                  await chrome.storage.local.set({
+                    [key]: {
+                      controlOrigin: current.controlOrigin,
+                      deviceName: current.deviceName || 'Chrome במחשב האישי',
+                    },
+                  });
+                }"""
+            )
+            await context.close()
+            context = await launch_extension_context(playwright, profile_root, extension_root)
+            worker = await wait_for_service_worker(context)
+            assert worker.url.split("/")[2] == extension_id
+            panel = await context.new_page()
+            panel.on("pageerror", lambda error: browser_errors.append(str(error)))
+            panel.on(
+                "console",
+                lambda message: browser_errors.append(message.text)
+                if message.type == "error"
+                else None,
+            )
+            await panel.goto(f"chrome-extension://{extension_id}/panel.html")
+            await panel.locator("#connection-label").get_by_text(
+                "כלי דפדפן מחוברים", exact=False
+            ).wait_for(timeout=20_000)
+            frame_element = panel.locator("#code-ai-frame")
+            app = panel.frame_locator("#code-ai-frame")
+            assert not await app.locator('input[type="password"]').is_visible()
+            stored = await worker.evaluate(
+                "async () => (await chrome.storage.local.get('codeAiPersonalChromeSettings')).codeAiPersonalChromeSettings"
+            )
+            assert stored["deviceId"] != initial_device_id
+            device_id = stored["deviceId"]
+            extension_headers = {
+                "x-code-ai-extension-device": device_id,
+                "x-code-ai-extension-token": stored["deviceToken"],
+            }
+            recovered_devices = await asyncio.to_thread(
+                request_json, "/api/codex/browser-extension/devices", "GET", None, extension_headers
+            )
+            recovered_device = next(item for item in recovered_devices["devices"] if item["id"] == device_id)
+            assert recovered_device["online"] is True
             if PANEL_ONLY:
                 print(json.dumps({
                     "ok": True,
@@ -161,6 +217,7 @@ async def main():
                     "deviceId": device_id,
                     "panelLoaded": True,
                     "originMigrated": stored["controlOrigin"] == BASE_URL,
+                    "autoRecovered": True,
                     "webSocketOnline": True,
                 }))
                 return
@@ -262,6 +319,7 @@ async def main():
                 "ok": True,
                 "extensionId": extension_id,
                 "deviceId": device_id,
+                "autoRecovered": True,
                 "tools": ["browser_tabs", "browser_snapshot", "browser_screenshot"],
                 "picker": picker_result["selection"]["kind"],
             }))
