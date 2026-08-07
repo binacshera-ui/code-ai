@@ -1,7 +1,6 @@
 const PROTOCOL_VERSION = 1;
 const STORAGE_KEY = 'codeAiPersonalChromeSettings';
 const AUTH_RULE_ID = 9001;
-const FRAME_RULE_ID = 9002;
 const consoleByTab = new Map();
 const networkByTab = new Map();
 const requestByTab = new Map();
@@ -56,23 +55,11 @@ async function storeSettings(next) {
 }
 
 async function installAuthRules(next) {
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [AUTH_RULE_ID, FRAME_RULE_ID] });
+  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [AUTH_RULE_ID] });
   if (!next?.controlOrigin) return;
   const origin = new URL(next.controlOrigin);
   const requestDomains = [origin.hostname];
-  const addRules = [
-    {
-      id: FRAME_RULE_ID, priority: 10,
-      action: {
-        type: 'modifyHeaders',
-        responseHeaders: [
-          { header: 'x-frame-options', operation: 'remove' },
-          { header: 'content-security-policy', operation: 'remove' },
-        ],
-      },
-      condition: { requestDomains, initiatorDomains: [chrome.runtime.id], resourceTypes: ['sub_frame'] },
-    },
-  ];
+  const addRules = [];
   if (next.deviceId && next.deviceToken) {
     addRules.unshift({
       id: AUTH_RULE_ID, priority: 10,

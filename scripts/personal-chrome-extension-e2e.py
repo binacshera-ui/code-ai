@@ -122,13 +122,15 @@ async def main():
             )
             await panel.goto(f"chrome-extension://{extension_id}/panel.html")
             await panel.locator("#connected").wait_for(state="visible", timeout=15_000)
+            frame_element = panel.locator("#code-ai-frame")
+            assert (await frame_element.get_attribute("src") or "").endswith("/extension-panel")
             app = panel.frame_locator("#code-ai-frame")
             password_input = app.locator('input[type="password"]')
             await password_input.wait_for(state="visible", timeout=20_000)
             await password_input.fill(DEVICE_PASSWORD)
             await app.get_by_role("button", name="פתח מכשיר זה").click()
             await panel.locator("#connection-label").get_by_text("כלי דפדפן מחוברים", exact=False).wait_for(timeout=20_000)
-            frame = panel.locator("#code-ai-frame")
+            frame = frame_element
             await frame.wait_for(state="visible")
 
             stored = await worker.evaluate(
@@ -146,6 +148,12 @@ async def main():
             )
             device = next(item for item in devices["devices"] if item["id"] == device_id)
             assert device["online"] is True
+            assert not any(
+                "Failed to execute 'postMessage'" in error
+                or "X-Frame-Options" in error
+                or "Refused to display" in error
+                for error in browser_errors
+            ), browser_errors
             if PANEL_ONLY:
                 print(json.dumps({
                     "ok": True,

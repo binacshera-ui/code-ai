@@ -150,7 +150,10 @@ const IS_WORKBENCH_EMBED = typeof window !== 'undefined'
   && new URLSearchParams(window.location.search).get('embed') === 'workbench';
 const IS_EXTENSION_PANEL = typeof window !== 'undefined'
   && window.parent !== window
-  && new URLSearchParams(window.location.search).get('extensionPanel') === '1';
+  && (
+    new URLSearchParams(window.location.search).get('extensionPanel') === '1'
+    || window.location.pathname.replace(/\/+$/, '') === '/extension-panel'
+  );
 
 function postExtensionPanelMessage(message: Record<string, unknown>) {
   if (!IS_EXTENSION_PANEL) return;
@@ -14092,8 +14095,12 @@ export function CodexMobileApp() {
     };
 
     window.addEventListener('message', handleExtensionMessage);
+    postExtensionPanelMessage({ type: 'code-ai:extension-ready' });
     publishContext();
-    return () => window.removeEventListener('message', handleExtensionMessage);
+    return () => {
+      postExtensionPanelMessage({ type: 'code-ai:extension-unloading' });
+      window.removeEventListener('message', handleExtensionMessage);
+    };
   }, [
     authStatus?.authenticated,
     authStatus?.deviceUnlocked,

@@ -14,10 +14,16 @@ Codex session to the local browser tools.
 5. Enter the normal CODE-AI device password inside the application once. There
    is no separate pairing screen or session-by-session setup.
 
+The Side Panel loads CODE-AI through its dedicated `/extension-panel` route.
+That route is the only one configured for Chrome-extension framing; normal
+CODE-AI pages retain their usual frame protection. The panel waits for a
+verified ready message from that route before it posts context or status.
+
 When a packaged extension is updated to a different control origin, it revokes
 the old device credential on a best-effort basis, never forwards that credential
 to the new origin, and asks for the normal device password once. This also
-rebuilds the frame-header rules before the application iframe is opened.
+rebuilds the authenticated browser-tool connection before the application
+iframe is opened.
 
 Use `npm run extension:package -- --output <directory> --control-origin
 <origin>` to create a deployable copy with a pre-filled origin. Do not edit a

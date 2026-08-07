@@ -10,6 +10,8 @@ let settings = { controlOrigin: configuredOrigin };
 let currentApproval = null;
 let enrollmentInFlight = false;
 let lastContextKey = '';
+let frameReady = false;
+let pendingAppMessages = [];
 
 async function sendRuntimeMessage(message) {
   try {
@@ -28,17 +30,59 @@ function showNotice(text, tone = 'info') {
 }
 
 function appUrl() {
-  return `${String(settings.controlOrigin || configuredOrigin).replace(/\/+$/, '')}/chat?extensionPanel=1`;
+  return `${String(settings.controlOrigin || configuredOrigin).replace(/\/+$/, '')}/extension-panel`;
 }
 
 function openApp() {
   const nextUrl = appUrl();
-  if (frame.src !== nextUrl) frame.src = nextUrl;
+  if (frame.src !== nextUrl) {
+    frameReady = false;
+    frame.src = nextUrl;
+  }
+}
+
+function queueAppMessage(message) {
+  const messageType = typeof message?.type === 'string' ? message.type : null;
+  if (messageType) {
+    const existingIndex = pendingAppMessages.findIndex((item) => item?.type === messageType);
+    if (existingIndex >= 0) pendingAppMessages.splice(existingIndex, 1);
+  }
+  pendingAppMessages.push(message);
+  if (pendingAppMessages.length > 16) pendingAppMessages.shift();
+}
+
+function sendToReadyApp(message) {
+  if (!frame.contentWindow) return false;
+  frame.contentWindow.postMessage(message, settings.controlOrigin || configuredOrigin);
+  return true;
+}
+
+function flushPendingAppMessages() {
+  if (!frameReady || pendingAppMessages.length === 0) return;
+  const messages = pendingAppMessages;
+  pendingAppMessages = [];
+  try {
+    for (const message of messages) sendToReadyApp(message);
+  } catch {
+    frameReady = false;
+    pendingAppMessages = [...messages, ...pendingAppMessages].slice(-16);
+  }
 }
 
 function postToApp(message) {
-  if (!frame.contentWindow) return;
-  frame.contentWindow.postMessage(message, settings.controlOrigin || configuredOrigin);
+  if (!frameReady) {
+    queueAppMessage(message);
+    return;
+  }
+  try {
+    sendToReadyApp(message);
+  } catch {
+    // During a full navigation the iframe briefly points at an extension-owned
+    // about:blank document. Wait for the next signed ready message instead of
+    // leaking a console error or sending to the wrong document.
+    frameReady = false;
+    queueAppMessage(message);
+  }
 }
 
 function setStatus(status) {
@@ -89,6 +133,7 @@ async function enrollFromApp(message) {
     settings = response.settings || settings;
     setStatus({ ...response, paired: true });
     showNotice('המכשיר אושר. CODE-AI וכלי הדפדפן מוכנים.', 'success');
+    frameReady = false;
     frame.src = appUrl();
   } catch (error) {
     showNotice(error.message || String(error), 'error');
@@ -149,6 +194,7 @@ document.querySelector('#settings').addEventListener('click', async () => {
     lastContextKey = '';
     setStatus({ paired: false, connected: false, settings });
     showNotice('אישור המכשיר אופס. הזן שוב את הסיסמה בתוך CODE-AI.', 'info');
+    frameReady = false;
     frame.src = appUrl();
   } catch (error) {
     showNotice(error.message || String(error), 'error');
@@ -168,18 +214,34 @@ document.querySelector('#reject-approval').addEventListener('click', async () =>
 });
 
 frame.addEventListener('load', () => {
+  // The iframe must identify itself from the configured CODE-AI origin before
+  // the panel can post messages. openApp()/pagehide reset frameReady around
+  // real navigations; do not reset it here because React may send ready before
+  // the document's final load event fires.
   void sendRuntimeMessage({ type: 'PANEL_GET_STATE' })
     .then((response) => {
       setStatus(response);
-      postToApp({ type: 'code-ai:extension-request-context' });
     })
     .catch((error) => showNotice(error.message || String(error), 'error'));
 });
 
 window.addEventListener('message', (event) => {
   if (event.source !== frame.contentWindow || event.origin !== (settings.controlOrigin || configuredOrigin)) return;
-  if (event.data?.type === 'code-ai:extension-enrollment') void enrollFromApp(event.data);
-  if (event.data?.type === 'code-ai:extension-context') void syncContext(event.data);
+  const message = event.data || {};
+  if (message.type === 'code-ai:extension-unloading') {
+    frameReady = false;
+    return;
+  }
+  if (message.type === 'code-ai:extension-ready' || message.type === 'code-ai:extension-context' || message.type === 'code-ai:extension-enrollment') {
+    frameReady = true;
+    flushPendingAppMessages();
+  }
+  if (message.type === 'code-ai:extension-ready') {
+    postToApp({ type: 'code-ai:extension-request-context' });
+    return;
+  }
+  if (message.type === 'code-ai:extension-enrollment') void enrollFromApp(message);
+  if (message.type === 'code-ai:extension-context') void syncContext(message);
 });
 
 chrome.runtime.onMessage.addListener((message) => {
