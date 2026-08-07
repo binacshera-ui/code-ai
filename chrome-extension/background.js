@@ -1,6 +1,7 @@
 const PROTOCOL_VERSION = 1;
 const STORAGE_KEY = 'codeAiPersonalChromeSettings';
 const AUTH_RULE_ID = 9001;
+const LEGACY_FRAME_RULE_ID = 9002;
 const consoleByTab = new Map();
 const networkByTab = new Map();
 const requestByTab = new Map();
@@ -55,7 +56,7 @@ async function storeSettings(next) {
 }
 
 async function installAuthRules(next) {
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [AUTH_RULE_ID] });
+  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [AUTH_RULE_ID, LEGACY_FRAME_RULE_ID] });
   if (!next?.controlOrigin) return;
   const origin = new URL(next.controlOrigin);
   const requestDomains = [origin.hostname];

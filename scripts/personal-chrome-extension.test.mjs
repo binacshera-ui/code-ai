@@ -10,6 +10,7 @@ const extensionRoot = path.join(appRoot, 'chrome-extension');
 test('Chrome extension package is generic, complete, and load-unpacked compatible', async () => {
   const manifest = JSON.parse(await fs.readFile(path.join(extensionRoot, 'manifest.json'), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
+  assert.equal(manifest.version, '1.1.3');
   assert.equal(manifest.background.service_worker, 'background.js');
   assert.equal(manifest.side_panel.default_path, 'panel.html');
   for (const permission of ['debugger', 'declarativeNetRequest', 'scripting', 'sidePanel', 'tabs']) {
@@ -31,6 +32,7 @@ test('Chrome extension package is generic, complete, and load-unpacked compatibl
   assert.match(combined, /extension-panel/);
   assert.match(combined, /Control origin changed/);
   assert.match(combined, /settingsReady/);
+  assert.match(combined, /LEGACY_FRAME_RULE_ID/);
   assert.match(combined, /code-ai:extension-ready/);
   assert.match(combined, /frameReady/);
   assert.doesNotMatch(panel, /pairing-code|pair-button|קוד חד/);
