@@ -113,6 +113,7 @@ import {
 } from './UxModeDialog';
 import {
   PersonalChromeModeDialog,
+  getPersonalChromeApprovalPolicyLabel,
   type PersonalChromeDeviceValue,
   type PersonalChromeModeValue,
   type PersonalChromePairingValue,
@@ -11452,7 +11453,7 @@ function ModePickerDialog({
               <div className="mt-1 text-xs leading-6 text-slate-500">שליטה מאובטחת ב־Chrome שבמחשב שלך: DOM, בחירת אזורים, קונסול, רשת ופורטי פיתוח.</div>
               <div className="mt-2 text-[11px] leading-5 text-slate-400">
                 {selectedPersonalChromeMode.enabled
-                  ? `${selectedPersonalChromeMode.deviceName || 'מכשיר מזווג'} · אישורים: ${selectedPersonalChromeMode.approvalPolicy}`
+                  ? `${selectedPersonalChromeMode.deviceName || 'מכשיר מזווג'} · ${getPersonalChromeApprovalPolicyLabel(selectedPersonalChromeMode.approvalPolicy)}`
                   : currentProvider === 'codex' ? 'חבר תוסף ובחר מכשיר לסשן.' : 'זמין רק כאשר הפרופיל הפעיל הוא Codex.'}
               </div>
             </div>
@@ -19902,7 +19903,7 @@ export function CodexMobileApp() {
                     className="inline-flex max-w-full items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100"
                   >
                     <Chrome className="h-3.5 w-3.5" />
-                    <span className="truncate">Chrome אישי · {sessionPersonalChromeMode.deviceName || 'מכשיר מזווג'}</span>
+                    <span className="truncate">Chrome אישי · {sessionPersonalChromeMode.deviceName || 'מכשיר מזווג'} · {getPersonalChromeApprovalPolicyLabel(sessionPersonalChromeMode.approvalPolicy)}</span>
                   </button>
                 )}
                 {sessionDesignMode.enabled && (

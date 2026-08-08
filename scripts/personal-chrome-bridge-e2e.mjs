@@ -177,6 +177,35 @@ async function main() {
   ws.send(JSON.stringify({ type: 'result', version: 1, commandId: networkCommand.commandId, ok: true, result: { entries: [] } }));
   assert.deepEqual((await networkPromise).result.entries, []);
 
+  const freeAccessBinding = await requestJson('/api/codex/browser-extension/bindings', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...extensionHeaders },
+    body: JSON.stringify({
+      deviceId: claim.deviceId, profileId: profile.id, sessionKey: `${sessionKey}-free-access`,
+      scopes: ['read', 'write', 'javascript', 'upload', 'ports'], approvalPolicy: 'never',
+    }),
+  }, 201);
+  const freeAccessBearer = {
+    authorization: `Bearer ${freeAccessBinding.bindingToken}`,
+    'content-type': 'application/json',
+  };
+  const freeNetworkPromise = requestJson('/api/codex/browser-extension/tool-call', {
+    method: 'POST', headers: freeAccessBearer,
+    body: JSON.stringify({ toolName: 'browser_network', arguments: { includeBodies: true } }),
+  });
+  const freeNetworkMessage = await inbox.next((message) => (
+    (message.type === 'command' || message.type === 'approval_request')
+    && message.toolName === 'browser_network'
+  ));
+  assert.equal(freeNetworkMessage.type, 'command', 'free access must not emit an approval request');
+  ws.send(JSON.stringify({
+    type: 'result', version: 1, commandId: freeNetworkMessage.commandId,
+    ok: true, result: { entries: [], approvalBypassed: true },
+  }));
+  assert.equal((await freeNetworkPromise).result.approvalBypassed, true);
+  await requestJson(`/api/codex/browser-extension/bindings/${encodeURIComponent(freeAccessBinding.binding.id)}`, {
+    method: 'DELETE', headers: extensionHeaders,
+  });
+
   await requestJson('/api/codex/session-personal-chrome-mode', {
     method: 'POST', headers: { 'content-type': 'application/json', ...extensionHeaders },
     body: JSON.stringify({
@@ -219,7 +248,7 @@ async function main() {
     body: JSON.stringify({ extensionId, installationId }),
   }, 403);
   ws.close(1000, 'E2E complete');
-  console.log(JSON.stringify({ ok: true, deviceId: claim.deviceId, profileId: profile.id, testedTools: ['browser_status', 'browser_type', 'browser_network'] }));
+  console.log(JSON.stringify({ ok: true, deviceId: claim.deviceId, profileId: profile.id, testedTools: ['browser_status', 'browser_type', 'browser_network'], freeAccessApprovalBypassed: true }));
 }
 
 main().catch((error) => {

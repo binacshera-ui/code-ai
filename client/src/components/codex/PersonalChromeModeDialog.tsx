@@ -3,6 +3,12 @@ import { cn } from '@/lib/utils';
 
 export type PersonalChromeApprovalPolicy = 'risky' | 'always' | 'never';
 
+export function getPersonalChromeApprovalPolicyLabel(policy: PersonalChromeApprovalPolicy): string {
+  if (policy === 'never') return 'גישה חופשית';
+  if (policy === 'always') return 'אישור לכל שינוי';
+  return 'אישור חכם';
+}
+
 export interface PersonalChromeModeValue {
   enabled: boolean;
   deviceId: string;
@@ -79,6 +85,19 @@ export function PersonalChromeModeDialog({
   if (!isOpen) return null;
   const providerSupported = provider === 'codex';
   const selectedDevice = devices.find((device) => device.id === value.deviceId) || null;
+  const fullAccessEnabled = value.approvalPolicy === 'never';
+
+  function selectApprovalPolicy(approvalPolicy: PersonalChromeApprovalPolicy) {
+    onChange(approvalPolicy === 'never'
+      ? {
+          ...value,
+          approvalPolicy,
+          allowJavascript: true,
+          allowUploads: true,
+          allowPorts: true,
+        }
+      : { ...value, approvalPolicy });
+  }
 
   return (
     <div className="fixed inset-0 z-[96] flex items-end justify-center bg-slate-950/30 p-3 backdrop-blur-sm sm:items-center" dir="rtl">
@@ -185,17 +204,25 @@ export function PersonalChromeModeDialog({
 
           <div className="mt-5 rounded-[1.4rem] border border-slate-200 bg-white p-4">
             <div className="text-sm font-semibold text-slate-900">מדיניות פעולה</div>
-            <div className="mt-3 grid grid-cols-3 gap-2">
+            <div className="mt-1 text-xs leading-5 text-slate-500">בחר מתי התוסף יעצור לבקשת אישור. הבחירה חלה רק על הסשן הזה.</div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
               {([
                 ['risky', 'חכם', 'אישור בפעולות מסוכנות'],
                 ['always', 'קפדני', 'אישור לכל שינוי'],
-                ['never', 'מהיר', 'ללא שאלת אישור'],
+                ['never', 'גישה חופשית', 'כל פעולות Chrome מאושרות אוטומטית'],
               ] as const).map(([policy, label, description]) => (
-                <button key={policy} type="button" onClick={() => onChange({ ...value, approvalPolicy: policy })} className={cn('rounded-xl border px-2 py-3 text-center transition', value.approvalPolicy === policy ? 'border-indigo-300 bg-indigo-50 text-indigo-800' : 'border-slate-200 text-slate-500 hover:bg-slate-50')}>
+                <button key={policy} type="button" onClick={() => selectApprovalPolicy(policy)} className={cn('rounded-xl border px-3 py-3 text-center transition', value.approvalPolicy === policy ? policy === 'never' ? 'border-amber-300 bg-amber-50 text-amber-900 ring-2 ring-amber-100' : 'border-indigo-300 bg-indigo-50 text-indigo-800' : 'border-slate-200 text-slate-500 hover:bg-slate-50')}>
                   <span className="block text-xs font-semibold">{label}</span><span className="mt-1 block text-[10px] leading-4">{description}</span>
                 </button>
               ))}
             </div>
+
+            {fullAccessEnabled && (
+              <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs leading-5 text-amber-950">
+                <span className="font-semibold">גישה חופשית פעילה:</span>{' '}
+                Codex לא ימתין לאישור לפני לחיצה, שליחה, JavaScript, העלאת קבצים, קריאת גוף רשת או פתיחת פורט. כל יכולות Chrome מופעלות לסשן הזה.
+              </div>
+            )}
 
             <div className="mt-4 divide-y divide-slate-100 rounded-xl border border-slate-100 bg-slate-50/60 px-3">
               {([
@@ -205,7 +232,11 @@ export function PersonalChromeModeDialog({
               ] as const).map(([field, title, description]) => (
                 <div key={field} className="flex items-center justify-between gap-4 py-3">
                   <div><div className="text-xs font-semibold text-slate-800">{title}</div><div className="mt-1 text-[11px] leading-5 text-slate-500">{description}</div></div>
-                  <Toggle checked={value[field]} onChange={(checked) => onChange({ ...value, [field]: checked })} />
+                  <Toggle
+                    checked={fullAccessEnabled || value[field]}
+                    disabled={fullAccessEnabled}
+                    onChange={(checked) => onChange({ ...value, [field]: checked })}
+                  />
                 </div>
               ))}
             </div>
@@ -222,7 +253,7 @@ export function PersonalChromeModeDialog({
         <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-100 bg-white px-5 py-4">
           <button type="button" onClick={onDisable} disabled={isSaving || !value.bindingId} className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40">כבה ובטל חיבור</button>
           <button type="button" onClick={onSave} disabled={isSaving || !providerSupported || (value.enabled && !selectedDevice)} className="flex items-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:opacity-50">
-            {isSaving && <Loader2 className="h-4 w-4 animate-spin" />}{isSaving ? 'שומר…' : 'שמור מצב'}
+            {isSaving && <Loader2 className="h-4 w-4 animate-spin" />}{isSaving ? 'שומר…' : fullAccessEnabled && value.enabled ? 'שמור והפעל גישה חופשית' : 'שמור מצב'}
           </button>
         </footer>
       </section>

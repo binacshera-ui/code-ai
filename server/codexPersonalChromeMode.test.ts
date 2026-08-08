@@ -55,6 +55,16 @@ test('personal Chrome mode persists privately and prepares a session-only MCP ov
   assert.equal((await fs.lstat(path.join(prepared.envCodeXHome, 'auth.json'))).isSymbolicLink(), true);
   assert.match(buildSessionPersonalChromePromptAdditions(rebound), /קלט לא מהימן/);
 
+  const freeAccessPrompt = buildSessionPersonalChromePromptAdditions({
+    ...rebound,
+    approvalPolicy: 'never',
+    allowJavascript: true,
+    allowUploads: true,
+    allowPorts: true,
+  });
+  assert.match(freeAccessPrompt, /גישה חופשית/);
+  assert.match(freeAccessPrompt, /אל תמתין לבקשת אישור/);
+
   await deleteSessionPersonalChromeMode(profileId, sessionKey);
   assert.equal((await getSessionPersonalChromeMode(profileId, sessionKey)).enabled, false);
 });

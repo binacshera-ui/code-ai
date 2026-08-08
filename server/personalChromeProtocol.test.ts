@@ -53,3 +53,20 @@ test('approval policy protects consequential and sensitive reads', () => {
   assert.equal(shouldRequirePersonalChromeApproval(port, 'risky', {}), true);
   assert.equal(shouldRequirePersonalChromeApproval(port, 'never', {}), false);
 });
+
+test('free-access policy auto-approves every exposed Chrome operation', () => {
+  for (const tool of PERSONAL_CHROME_TOOLS) {
+    const sensitiveArguments = tool.name === 'browser_network'
+      ? { includeBodies: true }
+      : tool.name === 'browser_type'
+        ? { submit: true, secret: true }
+        : tool.name === 'browser_key'
+          ? { key: 'Enter', sensitive: true }
+          : { sensitive: true };
+    assert.equal(
+      shouldRequirePersonalChromeApproval(tool, 'never', sensitiveArguments),
+      false,
+      `${tool.name} unexpectedly requested approval in free-access mode`,
+    );
+  }
+});

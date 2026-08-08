@@ -518,14 +518,26 @@ async function syncActiveSession(context) {
       return { skipped: false, reused: true, serverId, profileId, sessionKey, personalChromeMode: current };
     }
 
+    const hasStoredPreference = current.deviceId === settings.deviceId;
+    const approvalPolicy = current.approvalPolicy === 'always' || current.approvalPolicy === 'never'
+      ? current.approvalPolicy
+      : 'risky';
+    const allowJavascript = approvalPolicy === 'never' || !hasStoredPreference || current.allowJavascript === true;
+    const allowUploads = approvalPolicy === 'never' || !hasStoredPreference || current.allowUploads !== false;
+    const allowPorts = approvalPolicy === 'never' || !hasStoredPreference || current.allowPorts !== false;
+    const scopes = ['read', 'write'];
+    if (allowJavascript) scopes.push('javascript');
+    if (allowUploads) scopes.push('upload');
+    if (allowPorts) scopes.push('ports');
+
     const bindingPayload = await controlRequest('/api/codex/browser-extension/bindings', {
       method: 'POST',
       body: JSON.stringify({
         deviceId: settings.deviceId,
         profileId,
         sessionKey,
-        scopes: ['read', 'write', 'javascript', 'upload', 'ports'],
-        approvalPolicy: 'risky',
+        scopes,
+        approvalPolicy,
       }),
     });
     const bindingId = bindingPayload.binding?.id;
@@ -540,10 +552,10 @@ async function syncActiveSession(context) {
             deviceId: settings.deviceId,
             deviceName: settings.deviceName || 'Chrome במחשב האישי',
             tabId: null,
-            approvalPolicy: 'risky',
-            allowJavascript: true,
-            allowUploads: true,
-            allowPorts: true,
+            approvalPolicy,
+            allowJavascript,
+            allowUploads,
+            allowPorts,
             bindingId,
             bindingToken: bindingPayload.bindingToken,
             controlUrl: bindingPayload.controlUrl || settings.controlOrigin,

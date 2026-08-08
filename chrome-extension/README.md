@@ -38,8 +38,12 @@ deployed copy as the source of truth.
 - Device credentials are generated after pairing and stored in Chrome local
   extension storage.
 - Each active Codex session receives a separate, revocable binding automatically,
-  with explicit scopes and a risk-based approval policy.
-- High-risk actions are surfaced in the Side Panel for human approval.
+  with explicit scopes and a session-specific approval policy.
+- The session UI offers smart, strict, and explicit **free-access** policies. Free
+  access enables every browser capability and auto-approves browser operations
+  for that session; switching away from it restores approval prompts.
+- High-risk actions are surfaced in the Side Panel for human approval unless the
+  user explicitly selected free access for that session.
 - Sensitive form values are redacted from previews and audit records.
 - Port forwards bind only to `127.0.0.1`, expire automatically, and can be
   closed from the session.
