@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from 'fs';
 import { mkdir, readFile, writeFile } from 'fs/promises';
+import os from 'os';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
@@ -200,10 +201,39 @@ function parseArgs(argv) {
   return options;
 }
 
+function cleanServiceEnvironment(source = process.env) {
+  const environment = { ...source };
+  for (const key of [
+    'CODEX_CI',
+    'CODEX_HOME',
+    'CODEX_MANAGED_BY_NPM',
+    'CODEX_MANAGED_PACKAGE_ROOT',
+    'CODEX_THREAD_ID',
+  ]) {
+    delete environment[key];
+  }
+  environment.HOME = os.homedir();
+  if (typeof environment.PATH === 'string') {
+    environment.PATH = environment.PATH
+      .split(path.delimiter)
+      .filter((entry) => (
+        entry
+        && !entry.includes(`${path.sep}.code-ai${path.sep}local${path.sep}browser-mode${path.sep}sessions${path.sep}`)
+        && !entry.includes(`${path.sep}tmp${path.sep}arg0${path.sep}`)
+        && !entry.endsWith(`${path.sep}codex-path`)
+      ))
+      .join(path.delimiter);
+  }
+  return environment;
+}
+
 function run(command, args, options = {}) {
+  const inheritedEnvironment = options.cleanServiceEnvironment
+    ? cleanServiceEnvironment()
+    : process.env;
   const result = spawnSync(command, args, {
     cwd: options.cwd || APP_ROOT,
-    env: { ...process.env, ...(options.env || {}) },
+    env: { ...inheritedEnvironment, ...(options.env || {}) },
     stdio: options.capture ? 'pipe' : 'inherit',
     encoding: 'utf8',
     shell: false,
@@ -410,16 +440,18 @@ async function main() {
       run(pm2Command, ['restart', options.appName, '--update-env'], {
         cwd: APP_ROOT,
         env: { PM2_APP_NAME: options.appName },
+        cleanServiceEnvironment: true,
       });
     } else {
       run(pm2Command, ['start', 'ecosystem.config.cjs', '--update-env'], {
         cwd: APP_ROOT,
         env: { PM2_APP_NAME: options.appName },
+        cleanServiceEnvironment: true,
       });
     }
 
     try {
-      run(pm2Command, ['save'], { cwd: APP_ROOT });
+      run(pm2Command, ['save'], { cwd: APP_ROOT, cleanServiceEnvironment: true });
     } catch {
       // PM2 save is best effort.
     }
