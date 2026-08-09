@@ -203,18 +203,19 @@ export async function getAvailableProfiles(): Promise<AgentProfile[]> {
 export async function listAgentSessions(
   profileId?: string,
   query?: string,
-  limit?: number
+  limit?: number,
+  options?: { allowExtendedLimit?: boolean },
 ): Promise<CodexSessionSummary[]> {
   const profile = resolveProfile(profileId);
   await prepareInternalProfileHome(profile);
   if (profile.provider === 'claude') {
-    return listClaudeSessions(profile.id, query, limit);
+    return listClaudeSessions(profile.id, query, limit, options?.allowExtendedLimit);
   }
   if (profile.provider === 'gemini') {
-    return listGeminiSessions(profile.id, query, limit);
+    return listGeminiSessions(profile.id, query, limit, options?.allowExtendedLimit);
   }
 
-  return listCodexSessions(profile.id, query, limit);
+  return listCodexSessions(profile.id, query, limit, options?.allowExtendedLimit);
 }
 
 export async function getAgentSessionDetail(

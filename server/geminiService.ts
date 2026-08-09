@@ -1437,7 +1437,8 @@ export async function getGeminiModelCatalog(profileId?: string): Promise<CodexMo
 export async function listGeminiSessions(
   profileId?: string,
   query = '',
-  limit = MAX_SESSIONS
+  limit = MAX_SESSIONS,
+  allowExtendedLimit = false,
 ): Promise<CodexSessionSummary[]> {
   const profile = resolveProfile(profileId);
   const sessionFiles = await scanGeminiSessionFiles(profile);
@@ -1511,7 +1512,7 @@ export async function listGeminiSessions(
 
   return summaries
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    .slice(0, Math.min(limit, MAX_SESSIONS));
+    .slice(0, allowExtendedLimit ? Math.max(0, limit) : Math.min(limit, MAX_SESSIONS));
 }
 
 export async function deleteGeminiSession(

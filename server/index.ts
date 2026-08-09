@@ -10,7 +10,7 @@ import codexWordExportRoutes from './codexWordExportRoutes.js';
 import codexFinalNotificationRoutes from './codexFinalNotificationRoutes.js';
 import { recordCodexServerCrash } from './codexCrashLogs.js';
 import { CODEX_APP_CONFIG } from './config.js';
-import { startCodexQueueWorker } from './codexQueue.js';
+import { shutdownCodexQueueWorker, startCodexQueueWorker } from './codexQueue.js';
 import { startCodexFinalNotificationWorker } from './codexFinalNotifications.js';
 import { repairAllProviderHomesOwnership } from './providerRuntimeOwnership.js';
 import {
@@ -241,8 +241,6 @@ function shutdownServer(signal: NodeJS.Signals): void {
   shutdownRemoteHostTunnels();
   shutdownPersonalChromeBridge();
   shutdownPersonalPortForwardBroker();
-  void shutdownCodexDesignModeBridge();
-  void shutdownCodexUxModeBridge();
 
   const forceExitTimer = setTimeout(() => {
     console.error('❌ Timed out while closing code-ai; forcing open connections to close');
@@ -251,15 +249,31 @@ function shutdownServer(signal: NodeJS.Signals): void {
   }, 10_000);
   forceExitTimer.unref();
 
-  server.close((error) => {
-    clearTimeout(forceExitTimer);
-    if (error) {
+  const closeServer = new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+
+  void Promise.all([
+    closeServer,
+    shutdownCodexQueueWorker(),
+    shutdownCodexDesignModeBridge(),
+    shutdownCodexUxModeBridge(),
+  ])
+    .then(() => {
+      clearTimeout(forceExitTimer);
+      process.exit(0);
+    })
+    .catch((error) => {
+      clearTimeout(forceExitTimer);
       console.error('❌ Failed to close code-ai cleanly:', error);
       process.exit(1);
-      return;
-    }
-    process.exit(0);
-  });
+    });
 }
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

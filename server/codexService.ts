@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'child_process';
 import { randomUUID } from 'crypto';
-import { createReadStream, promises as fs } from 'fs';
+import { createReadStream, promises as fs, watch as watchFileSystem, type FSWatcher } from 'fs';
 import path from 'path';
 import readline from 'readline';
 import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
@@ -206,12 +206,74 @@ interface SessionScanRecord {
     nickname: string | null;
     role: string | null;
   } | null;
+  sourceSignature?: string;
+}
+
+interface SessionScanCacheEntry {
+  rows: SessionScanRecord[];
+  byId: Map<string, SessionScanRecord>;
+  expiresAt: number;
+  inFlight: Promise<SessionScanRecord[]> | null;
+}
+
+interface SessionSummaryHintCacheRecord {
+  sourceSignature: string;
+  hints: SessionSummaryHints;
+}
+
+interface SessionCatalogCacheEntry {
+  summaries: CodexSessionSummary[];
+  loaded: boolean;
+  expiresAt: number;
+  inFlight: Promise<CodexSessionSummary[]> | null;
+}
+
+interface PersistedSessionCatalog {
+  version?: string;
+  profileId?: string;
+  generatedAt?: string;
+  summaries?: CodexSessionSummary[];
+  scanRows?: SessionScanRecord[];
+  summaryHints?: Array<{
+    sessionId: string;
+    sourceSignature: string;
+    hints: SessionSummaryHints;
+  }>;
+}
+
+interface SessionDetailCacheRecord {
+  sourceSignature: string;
+  sourceIdentity: string;
+  sourceSize: number;
+  detail: CodexSessionDetail;
+  lastAccessedAt: number;
+}
+
+interface PersistedSessionDetailRecord {
+  version?: string;
+  sourceSignature?: string;
+  sourceIdentity?: string;
+  sourceSize?: number;
+  detail?: CodexSessionDetail;
+}
+
+export interface CodexSessionRevision {
+  sessionId: string;
+  profileId: string;
+  size: number;
+  modifiedAt: string;
+  revision: string;
 }
 
 interface SessionIndexEntry {
   id: string;
   thread_name?: string;
   updated_at?: string;
+}
+
+interface SessionIndexCacheEntry {
+  signature: string;
+  entries: Map<string, SessionIndexEntry>;
 }
 
 interface PersistedRecoveredQueueState {
@@ -249,8 +311,30 @@ interface ParsedSession {
   messages: CodexSessionMessage[];
   preview: string;
   timeline: CodexTimelineEntry[];
+  messageCount?: number;
+  totalTimelineEntries?: number;
+  firstMessage?: CodexSessionMessage | null;
+  lastMessage?: CodexSessionMessage | null;
   isCompactClone?: boolean;
   compactSourceSessionId?: string | null;
+}
+
+interface ParseSessionFileOptions {
+  startByte?: number;
+  maxRetainedMessages?: number;
+  maxRetainedTimelineEntries?: number;
+  initial?: {
+    title: string;
+    preview: string;
+    messages: CodexSessionMessage[];
+    timeline: CodexTimelineEntry[];
+    messageCount: number;
+    totalTimelineEntries: number;
+    firstMessage: CodexSessionMessage | null;
+    lastMessage: CodexSessionMessage | null;
+    isCompactClone: boolean;
+    compactSourceSessionId: string | null;
+  };
 }
 
 interface SessionSummaryHints {
@@ -471,12 +555,46 @@ const CODEX_BIN = process.env.CODEX_BIN || 'codex';
 const DEFAULT_PROFILE_ID = CODEX_APP_CONFIG.defaultProfileId;
 const MAX_SESSIONS = 500;
 const MAX_TOOL_TEXT = 200_000;
+const MAX_CODEX_STDOUT_LINE = 4 * 1024 * 1024;
+const MAX_CODEX_DIAGNOSTIC_LINE = 64 * 1024;
+const MAX_CODEX_STDERR_TEXT = 2 * 1024 * 1024;
+const SESSION_SCAN_CACHE_TTL_MS = Math.max(
+  250,
+  Number(process.env.CODEX_SESSION_SCAN_CACHE_TTL_MS) || 15_000
+);
+const SESSION_CATALOG_CACHE_TTL_MS = Math.max(
+  250,
+  Number(process.env.CODEX_SESSION_CATALOG_CACHE_TTL_MS) || 15_000
+);
+const SESSION_CATALOG_CACHE_VERSION = 'v1';
+const SESSION_CATALOG_CACHE_ROOT = path.join(
+  CODEX_APP_CONFIG.storageRoot,
+  'session-catalog-cache',
+  SESSION_CATALOG_CACHE_VERSION
+);
+const SESSION_DETAIL_CACHE_LIMIT = Math.max(
+  8,
+  Number(process.env.CODEX_SESSION_DETAIL_CACHE_LIMIT) || 48
+);
+const SESSION_DETAIL_CACHE_VERSION = 'v2';
+const SESSION_DETAIL_CACHE_ROOT = path.join(
+  CODEX_APP_CONFIG.storageRoot,
+  'session-read-cache',
+  SESSION_DETAIL_CACHE_VERSION
+);
 export const CODEX_UPLOAD_ROOT = CODEX_APP_CONFIG.uploadRoot;
 const QUEUE_STATE_FILE = path.join(CODEX_APP_CONFIG.queueRoot, 'state.json');
 
 const CANDIDATE_PROFILES: CodexProfile[] = CODEX_APP_CONFIG.profiles.filter((profile) => profile.provider === 'codex');
 
 const queueTails = new Map<string, Promise<void>>();
+const sessionScanCache = new Map<string, SessionScanCacheEntry>();
+const sessionCatalogCache = new Map<string, SessionCatalogCacheEntry>();
+const sessionCatalogDiskLoads = new Map<string, Promise<CodexSessionSummary[] | null>>();
+const sessionSummaryHintCache = new Map<string, SessionSummaryHintCacheRecord>();
+const sessionIndexCache = new Map<string, SessionIndexCacheEntry>();
+const sessionDetailCache = new Map<string, SessionDetailCacheRecord>();
+const sessionDetailLoads = new Map<string, Promise<CodexSessionDetail>>();
 const activeCodexRuns = new Map<string, ActiveCodexRun>();
 const MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 const modelCatalogCache = new Map<string, {
@@ -1066,7 +1184,15 @@ async function loadSessionIndexMap(profile: CodexProfile): Promise<Map<string, S
   const indexMap = new Map<string, SessionIndexEntry>();
 
   if (!(await pathExists(indexPath))) {
+    sessionIndexCache.delete(profile.id);
     return indexMap;
+  }
+
+  const stats = await fs.stat(indexPath);
+  const signature = `${stats.dev}:${stats.ino}:${stats.size}:${Math.trunc(stats.mtimeMs * 1_000)}`;
+  const cached = sessionIndexCache.get(profile.id);
+  if (cached?.signature === signature) {
+    return cached.entries;
   }
 
   const content = await fs.readFile(indexPath, 'utf-8');
@@ -1078,6 +1204,10 @@ async function loadSessionIndexMap(profile: CodexProfile): Promise<Map<string, S
     indexMap.set(row.id, row);
   }
 
+  sessionIndexCache.set(profile.id, {
+    signature,
+    entries: indexMap,
+  });
   return indexMap;
 }
 
@@ -1315,7 +1445,7 @@ function buildRecoveredQueueParsedSession(
   };
 }
 
-async function scanSessionFiles(profile: CodexProfile): Promise<SessionScanRecord[]> {
+async function buildSessionScanRows(profile: CodexProfile): Promise<SessionScanRecord[]> {
   const roots = [
     path.join(profile.codexHome, 'sessions'),
     path.join(profile.codexHome, 'archived_sessions'),
@@ -1327,71 +1457,151 @@ async function scanSessionFiles(profile: CodexProfile): Promise<SessionScanRecor
   for (const rootDir of roots) {
     const files = await walkJsonlFiles(rootDir);
 
-    for (const filePath of files) {
-      const firstLine = await readFirstLine(filePath);
-      const metaRow = safeJsonParse<{
-        payload?: {
-          id?: string;
-          forked_from_id?: string;
-          timestamp?: string;
-          cwd?: string;
-          source?: RawSessionMetaPayload['source'];
-          model_provider?: string;
-        };
-      }>(firstLine);
+    // Session homes can contain hundreds of very large JSONL files. We only
+    // need the first line and stat here, so bounded parallel I/O avoids a
+    // multi-second serial waterfall without reading session bodies.
+    for (let offset = 0; offset < files.length; offset += 32) {
+      const batch = files.slice(offset, offset + 32);
+      const records = await Promise.all(batch.map(async (filePath): Promise<SessionScanRecord | null> => {
+        try {
+          const [firstLine, stats] = await Promise.all([
+            readFirstLine(filePath),
+            fs.stat(filePath),
+          ]);
+          const metaRow = safeJsonParse<{
+            payload?: {
+              id?: string;
+              forked_from_id?: string;
+              timestamp?: string;
+              cwd?: string;
+              source?: RawSessionMetaPayload['source'];
+              model_provider?: string;
+            };
+          }>(firstLine);
+          const sessionId = metaRow?.payload?.id;
+          if (!sessionId) return null;
 
-      const sessionId = metaRow?.payload?.id;
-      if (!sessionId || seen.has(sessionId)) {
-        continue;
-      }
+          const rawSource = metaRow?.payload?.source;
+          const threadSpawn = rawSource && typeof rawSource === 'object'
+            ? rawSource.subagent?.thread_spawn
+            : null;
+          const parentSessionId = typeof threadSpawn?.parent_thread_id === 'string'
+            ? threadSpawn.parent_thread_id.trim()
+            : '';
+          const nativeSubagent = parentSessionId
+            ? {
+              parentSessionId,
+              depth: typeof threadSpawn?.depth === 'number' && Number.isFinite(threadSpawn.depth)
+                ? Math.max(1, Math.trunc(threadSpawn.depth))
+                : 1,
+              agentPath: typeof threadSpawn?.agent_path === 'string' && threadSpawn.agent_path.trim()
+                ? threadSpawn.agent_path.trim()
+                : null,
+              nickname: typeof threadSpawn?.agent_nickname === 'string' && threadSpawn.agent_nickname.trim()
+                ? threadSpawn.agent_nickname.trim()
+                : null,
+              role: typeof threadSpawn?.agent_role === 'string' && threadSpawn.agent_role.trim()
+                ? threadSpawn.agent_role.trim()
+                : null,
+            }
+            : null;
 
-      seen.add(sessionId);
-      const stats = await fs.stat(filePath);
-      const rawSource = metaRow?.payload?.source;
-      const threadSpawn = rawSource && typeof rawSource === 'object'
-        ? rawSource.subagent?.thread_spawn
-        : null;
-      const parentSessionId = typeof threadSpawn?.parent_thread_id === 'string'
-        ? threadSpawn.parent_thread_id.trim()
-        : '';
-      const nativeSubagent = parentSessionId
-        ? {
-          parentSessionId,
-          depth: typeof threadSpawn?.depth === 'number' && Number.isFinite(threadSpawn.depth)
-            ? Math.max(1, Math.trunc(threadSpawn.depth))
-            : 1,
-          agentPath: typeof threadSpawn?.agent_path === 'string' && threadSpawn.agent_path.trim()
-            ? threadSpawn.agent_path.trim()
-            : null,
-          nickname: typeof threadSpawn?.agent_nickname === 'string' && threadSpawn.agent_nickname.trim()
-            ? threadSpawn.agent_nickname.trim()
-            : null,
-          role: typeof threadSpawn?.agent_role === 'string' && threadSpawn.agent_role.trim()
-            ? threadSpawn.agent_role.trim()
-            : null,
+          return {
+            id: sessionId,
+            path: filePath,
+            updatedAt: stats.mtime.toISOString(),
+            createdAt: metaRow?.payload?.timestamp || null,
+            cwd: metaRow?.payload?.cwd || null,
+            modelProvider: metaRow?.payload?.model_provider || null,
+            source: typeof rawSource === 'string'
+              ? rawSource
+              : nativeSubagent
+                ? 'subagent'
+                : 'unknown',
+            forkedFromId: metaRow?.payload?.forked_from_id || null,
+            nativeSubagent,
+            sourceSignature: `${stats.dev}:${stats.ino}:${stats.size}:${Math.trunc(stats.mtimeMs * 1_000)}`,
+          };
+        } catch (error: any) {
+          // Files may disappear while Codex rotates or deletes a session.
+          if (error?.code === 'ENOENT') return null;
+          throw error;
         }
-        : null;
+      }));
 
-      rows.push({
-        id: sessionId,
-        path: filePath,
-        updatedAt: stats.mtime.toISOString(),
-        createdAt: metaRow?.payload?.timestamp || null,
-        cwd: metaRow?.payload?.cwd || null,
-        modelProvider: metaRow?.payload?.model_provider || null,
-        source: typeof rawSource === 'string'
-          ? rawSource
-          : nativeSubagent
-            ? 'subagent'
-            : 'unknown',
-        forkedFromId: metaRow?.payload?.forked_from_id || null,
-        nativeSubagent,
-      });
+      for (const record of records) {
+        if (!record || seen.has(record.id)) continue;
+        seen.add(record.id);
+        rows.push(record);
+      }
     }
   }
 
   rows.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   return rows;
+}
+
+async function scanSessionFiles(
+  profile: CodexProfile,
+  options?: { force?: boolean }
+): Promise<SessionScanRecord[]> {
+  const cached = sessionScanCache.get(profile.id);
+  const now = Date.now();
+
+  if (!options?.force && cached?.rows.length) {
+    if (cached.expiresAt <= now && !cached.inFlight) {
+      const backgroundRefresh = buildSessionScanRows(profile)
+        .then((rows) => {
+          sessionScanCache.set(profile.id, {
+            rows,
+            byId: new Map(rows.map((row) => [row.id, row])),
+            expiresAt: Date.now() + SESSION_SCAN_CACHE_TTL_MS,
+            inFlight: null,
+          });
+          return rows;
+        })
+        .catch((error) => {
+          const current = sessionScanCache.get(profile.id);
+          if (current) current.inFlight = null;
+          console.error(`Failed to refresh session scan cache for ${profile.id}:`, error);
+          return cached.rows;
+        });
+      cached.inFlight = backgroundRefresh;
+    }
+    // Stale-while-revalidate: opening a known session or rendering the
+    // sidebar must never wait for a recursive filesystem scan.
+    return cached.rows;
+  }
+
+  if (cached?.inFlight) return cached.inFlight;
+
+  const inFlight = buildSessionScanRows(profile)
+    .then((rows) => {
+      sessionScanCache.set(profile.id, {
+        rows,
+        byId: new Map(rows.map((row) => [row.id, row])),
+        expiresAt: Date.now() + SESSION_SCAN_CACHE_TTL_MS,
+        inFlight: null,
+      });
+      return rows;
+    })
+    .catch((error) => {
+      if (cached) {
+        cached.inFlight = null;
+      } else {
+        sessionScanCache.delete(profile.id);
+      }
+      throw error;
+    });
+
+  sessionScanCache.set(profile.id, {
+    rows: cached?.rows || [],
+    byId: cached?.byId || new Map(),
+    expiresAt: cached?.expiresAt || 0,
+    inFlight,
+  });
+
+  return inFlight;
 }
 
 async function sessionFileContainsLegacyContextCompactionMarker(sessionPath: string): Promise<boolean> {
@@ -1558,8 +1768,18 @@ async function readRateLimitSnapshotFromSessionRecord(
 async function extractSessionSummaryHints(
   sessionPath: string,
   sessionId: string,
-  indexEntry?: SessionIndexEntry
+  indexEntry?: SessionIndexEntry,
+  cacheContext?: { profileId: string; sourceSignature: string }
 ): Promise<SessionSummaryHints> {
+  const cacheKey = cacheContext ? `${cacheContext.profileId}\u0000${sessionId}` : null;
+  const effectiveSourceSignature = cacheContext
+    ? `${cacheContext.sourceSignature}\u0000${indexEntry?.thread_name?.trim() || ''}`
+    : null;
+  const cachedHints = cacheKey ? sessionSummaryHintCache.get(cacheKey) : null;
+  if (cachedHints && cachedHints.sourceSignature === effectiveSourceSignature) {
+    return cachedHints.hints;
+  }
+
   let title = indexEntry?.thread_name?.trim() || '';
   let preview = '';
   let startPreview = '';
@@ -1669,7 +1889,7 @@ async function extractSessionSummaryHints(
 
   preview = endPreview || startPreview || title || sessionId;
 
-  return {
+  const hints: SessionSummaryHints = {
     title: title || trimPreview(startPreview || preview || `שיחת Codex ${sessionId.slice(0, 8)}`, 72),
     preview,
     startPreview: startPreview || title || sessionId,
@@ -1679,6 +1899,13 @@ async function extractSessionSummaryHints(
     compactSourceSessionId,
     terminalStatus,
   };
+  if (cacheKey && effectiveSourceSignature) {
+    sessionSummaryHintCache.set(cacheKey, {
+      sourceSignature: effectiveSourceSignature,
+      hints,
+    });
+  }
+  return hints;
 }
 
 function parseInjectedWorkspacePath(text: string): string | null {
@@ -1776,6 +2003,24 @@ function summarizeFunctionArguments(toolName: string, rawArguments: string | und
   }
 
   return clipLongText(JSON.stringify(parsed, null, 2), 1000);
+}
+
+function serializeToolPayload(value: unknown): { text: string; language: string | null } {
+  if (typeof value === 'string') {
+    return { text: clipLongText(value, MAX_TOOL_TEXT), language: null };
+  }
+  if (value === undefined || value === null) {
+    return { text: '', language: null };
+  }
+  try {
+    const serialized = JSON.stringify(value, null, 2);
+    return {
+      text: clipLongText(serialized === undefined ? String(value) : serialized, MAX_TOOL_TEXT),
+      language: 'json',
+    };
+  } catch {
+    return { text: clipLongText(String(value), MAX_TOOL_TEXT), language: null };
+  }
 }
 
 function formatPatchChanges(changes: unknown): string | null {
@@ -1884,7 +2129,11 @@ export async function buildCodexCompactionRecoveryContext(
   profileId?: string
 ): Promise<CodexCompactionRecoveryContext> {
   const profile = resolveProfile(profileId);
-  const sourceSession = await getCodexSessionDetail(sessionId, profile.id, { full: true });
+  // Recovery renders at most 120K characters from the newest entries. Loading
+  // an entire multi-hundred-megabyte JSONL transcript here can exhaust the
+  // control-plane process and trigger PM2's memory restart while a queue state
+  // write is in flight.
+  const sourceSession = await getCodexSessionDetail(sessionId, profile.id, { tail: 400 });
   const sourceProviderLabel = getProviderDisplayLabel(profile.provider);
   const transcript = buildCompactionRecoveryTranscript(sourceSession.timeline, sourceProviderLabel);
   const lastTimelineEntry = sourceSession.timeline.at(-1);
@@ -1957,8 +2206,9 @@ function applyForkSessionOverlay(
     return parsed;
   }
 
-  let firstPromptPatched = false;
-  const overlayMessages = parsed.messages.map((message) => {
+  const retainedEntireTimeline = (parsed.totalTimelineEntries ?? parsed.timeline.length) === parsed.timeline.length;
+  let firstPromptPatched = !retainedEntireTimeline;
+  const overlayMessages = parsed.messages.map<CodexSessionMessage>((message) => {
     if (!firstPromptPatched && message.role === 'user' && message.kind === 'prompt') {
       firstPromptPatched = true;
       if (isTransferForkMetadata(metadata)) {
@@ -1978,8 +2228,8 @@ function applyForkSessionOverlay(
     return message;
   });
 
-  let firstTimelinePromptPatched = false;
-  const overlayTimeline = parsed.timeline.map((entry) => {
+  let firstTimelinePromptPatched = !retainedEntireTimeline;
+  const overlayTimeline = parsed.timeline.map<CodexTimelineEntry>((entry) => {
     if (
       !firstTimelinePromptPatched
       && entry.entryType === 'message'
@@ -2018,6 +2268,10 @@ function applyForkSessionOverlay(
     preview: parsed.preview,
     messages: [...forkMessages, ...overlayMessages],
     timeline: [...metadata.timeline.map((entry) => ({ ...entry })), ...overlayTimeline],
+    messageCount: (parsed.messageCount ?? parsed.messages.length) + forkMessages.length,
+    totalTimelineEntries: (parsed.totalTimelineEntries ?? parsed.timeline.length) + metadata.timeline.length,
+    firstMessage: forkMessages[0] || parsed.firstMessage || parsed.messages[0] || null,
+    lastMessage: parsed.lastMessage || parsed.messages.at(-1) || forkMessages.at(-1) || null,
     isCompactClone: parsed.isCompactClone,
     compactSourceSessionId: parsed.compactSourceSessionId,
   };
@@ -2031,19 +2285,54 @@ function getFirstTimelineMessageText(timeline: CodexTimelineEntry[]): string | n
 async function parseSessionFile(
   sessionPath: string,
   sessionId: string,
-  indexEntry?: SessionIndexEntry
+  indexEntry?: SessionIndexEntry,
+  options?: ParseSessionFileOptions
 ): Promise<ParsedSession> {
-  const messages: CodexSessionMessage[] = [];
-  const timeline: CodexTimelineEntry[] = [];
+  const messages: CodexSessionMessage[] = options?.initial?.messages.map((message) => ({ ...message })) || [];
+  const timeline: CodexTimelineEntry[] = options?.initial?.timeline.map((entry) => ({ ...entry })) || [];
   const knownToolCalls = new Map<string, string>();
-  let derivedTitle = indexEntry?.thread_name?.trim() || '';
-  let preview = '';
-  let isCompactClone = false;
-  let compactSourceSessionId: string | null = null;
+  for (const entry of timeline) {
+    if (entry.entryType === 'tool' && entry.callId && entry.toolName) {
+      knownToolCalls.set(entry.callId, entry.toolName);
+    }
+  }
+  let messageCount = options?.initial?.messageCount || 0;
+  let timelineCount = options?.initial?.totalTimelineEntries || 0;
+  let firstMessage = options?.initial?.firstMessage ? { ...options.initial.firstMessage } : null;
+  let lastMessage = options?.initial?.lastMessage ? { ...options.initial.lastMessage } : null;
+  let derivedTitle = options?.initial?.title || indexEntry?.thread_name?.trim() || '';
+  let preview = options?.initial?.preview || '';
+  let isCompactClone = options?.initial?.isCompactClone || false;
+  let compactSourceSessionId: string | null = options?.initial?.compactSourceSessionId || null;
   let lastSummaryMode: string | null = null;
-  let autoSummaryRecorded = false;
+  let autoSummaryRecorded = timeline.some((entry) => entry.status === 'summary-auto');
 
-  const stream = createReadStream(sessionPath, { encoding: 'utf-8' });
+  const trimRetainedEntries = <T>(entries: T[], limit: number | undefined) => {
+    if (!limit || entries.length <= limit * 2) {
+      return;
+    }
+    entries.splice(0, entries.length - limit);
+  };
+
+  const pushMessage = (message: CodexSessionMessage) => {
+    messages.push(message);
+    trimRetainedEntries(messages, options?.maxRetainedMessages);
+    messageCount += 1;
+    firstMessage ||= message;
+    lastMessage = message;
+  };
+  const pushTimeline = (entry: CodexTimelineEntry) => {
+    timeline.push(entry);
+    trimRetainedEntries(timeline, options?.maxRetainedTimelineEntries);
+    timelineCount += 1;
+  };
+
+  const stream = createReadStream(sessionPath, {
+    encoding: 'utf-8',
+    ...(typeof options?.startByte === 'number' && options.startByte > 0
+      ? { start: options.startByte }
+      : {}),
+  });
   const lineReader = readline.createInterface({
     input: stream,
     crlfDelay: Infinity,
@@ -2064,8 +2353,8 @@ async function parseSessionFile(
 
         if (summaryMode) {
           if (summaryMode === 'auto' && !autoSummaryRecorded && lastSummaryMode !== 'auto') {
-            timeline.push({
-              id: `${sessionId}-status-auto-summary-${timeline.length}`,
+            pushTimeline({
+              id: `${sessionId}-status-auto-summary-${timelineCount}`,
               entryType: 'status',
               timestamp,
               title: 'סיכום שיחה אוטומטי הופעל',
@@ -2097,10 +2386,10 @@ async function parseSessionFile(
 
         if (eventType === 'user_message' && typeof payload.message === 'string') {
           const text = payload.message.trim();
-          const entryId = `${sessionId}-user-${messages.length}`;
+          const entryId = `${sessionId}-user-${messageCount}`;
           const compactClone = parseCompactClonePrompt(text);
 
-          messages.push({
+          pushMessage({
             id: entryId,
             role: 'user',
             kind: 'prompt',
@@ -2108,7 +2397,7 @@ async function parseSessionFile(
             timestamp,
           });
 
-          timeline.push({
+          pushTimeline({
             id: entryId,
             entryType: 'message',
             role: 'user',
@@ -2120,8 +2409,8 @@ async function parseSessionFile(
           if (compactClone) {
             isCompactClone = true;
             compactSourceSessionId = compactClone.sourceSessionId;
-            timeline.push({
-              id: `${sessionId}-status-compact-${timeline.length}`,
+            pushTimeline({
+              id: `${sessionId}-status-compact-${timelineCount}`,
               entryType: 'status',
               timestamp,
               title: 'Compact handoff נטען',
@@ -2142,9 +2431,9 @@ async function parseSessionFile(
         if (eventType === 'agent_message' && typeof payload.message === 'string') {
           const text = payload.message.trim();
           const kind = payload.phase === 'commentary' ? 'commentary' : 'final';
-          const entryId = `${sessionId}-assistant-${messages.length}`;
+          const entryId = `${sessionId}-assistant-${messageCount}`;
 
-          messages.push({
+          pushMessage({
             id: entryId,
             role: 'assistant',
             kind,
@@ -2152,7 +2441,7 @@ async function parseSessionFile(
             timestamp,
           });
 
-          timeline.push({
+          pushTimeline({
             id: entryId,
             entryType: 'message',
             role: 'assistant',
@@ -2165,16 +2454,15 @@ async function parseSessionFile(
 
         if (eventType === 'task_complete' && typeof payload.last_agent_message === 'string') {
           const text = payload.last_agent_message.trim();
-          const lastMessage = messages[messages.length - 1];
           if (
             !lastMessage
             || lastMessage.role !== 'assistant'
             || lastMessage.kind !== 'final'
             || lastMessage.text !== text
           ) {
-            const entryId = `${sessionId}-final-${messages.length}`;
+            const entryId = `${sessionId}-final-${messageCount}`;
 
-            messages.push({
+            pushMessage({
               id: entryId,
               role: 'assistant',
               kind: 'final',
@@ -2182,7 +2470,7 @@ async function parseSessionFile(
               timestamp,
             });
 
-            timeline.push({
+            pushTimeline({
               id: entryId,
               entryType: 'message',
               role: 'assistant',
@@ -2192,8 +2480,8 @@ async function parseSessionFile(
             });
           }
 
-          timeline.push({
-            id: `${sessionId}-status-complete-${timeline.length}`,
+          pushTimeline({
+            id: `${sessionId}-status-complete-${timelineCount}`,
             entryType: 'status',
             timestamp,
             title: 'המשימה הושלמה',
@@ -2207,8 +2495,8 @@ async function parseSessionFile(
         }
 
         if (eventType === 'task_started') {
-          timeline.push({
-            id: `${sessionId}-status-started-${timeline.length}`,
+          pushTimeline({
+            id: `${sessionId}-status-started-${timelineCount}`,
             entryType: 'status',
             timestamp,
             title: buildStartedTaskTitle('codex'),
@@ -2219,8 +2507,8 @@ async function parseSessionFile(
         }
 
         if (eventType === 'turn_aborted') {
-          timeline.push({
-            id: `${sessionId}-status-aborted-${timeline.length}`,
+          pushTimeline({
+            id: `${sessionId}-status-aborted-${timelineCount}`,
             entryType: 'status',
             timestamp,
             title: 'הסבב הופסק',
@@ -2253,8 +2541,8 @@ async function parseSessionFile(
             mergedEntry.status = payload.status || 'completed';
             mergedEntry.exitCode = exitCode;
           } else {
-            timeline.push({
-              id: `${sessionId}-tool-terminal-${timeline.length}`,
+            pushTimeline({
+              id: `${sessionId}-tool-terminal-${timelineCount}`,
               entryType: 'tool',
               timestamp,
               toolName: 'exec_command',
@@ -2296,8 +2584,8 @@ async function parseSessionFile(
             mergedEntry.status = payload.status || (payload.success ? 'completed' : 'failed');
             mergedEntry.exitCode = null;
           } else {
-            timeline.push({
-              id: `${sessionId}-tool-patch-${timeline.length}`,
+            pushTimeline({
+              id: `${sessionId}-tool-patch-${timelineCount}`,
               entryType: 'tool',
               timestamp,
               toolName: 'apply_patch',
@@ -2334,8 +2622,8 @@ async function parseSessionFile(
             mergedEntry.status = 'completed';
             mergedEntry.exitCode = null;
           } else {
-            timeline.push({
-              id: `${sessionId}-tool-web-${timeline.length}`,
+            pushTimeline({
+              id: `${sessionId}-tool-web-${timelineCount}`,
               entryType: 'tool',
               timestamp,
               toolName: 'web.search',
@@ -2368,21 +2656,25 @@ async function parseSessionFile(
         if (callId) {
           knownToolCalls.set(callId, toolName);
         }
-        const clippedInput = clipLongText(payload.arguments || '', MAX_TOOL_TEXT);
+        const serializedInput = serializeToolPayload(payload.arguments);
+        const clippedInput = serializedInput.text;
 
-        timeline.push({
-          id: `${sessionId}-tool-call-${timeline.length}`,
+        pushTimeline({
+          id: `${sessionId}-tool-call-${timelineCount}`,
           entryType: 'tool',
           timestamp,
           toolName,
           title: summarizeToolName(toolName),
-          subtitle: summarizeFunctionArguments(toolName, payload.arguments),
+          subtitle: summarizeFunctionArguments(
+            toolName,
+            typeof payload.arguments === 'string' ? payload.arguments : serializedInput.text
+          ),
           text: clippedInput,
           callId,
           status: 'queued',
           exitCode: null,
           toolInputText: clippedInput,
-          toolInputLanguage: 'json',
+          toolInputLanguage: serializedInput.language || 'json',
         });
         continue;
       }
@@ -2394,19 +2686,20 @@ async function parseSessionFile(
           knownToolCalls.set(callId, toolName);
         }
 
-        timeline.push({
-          id: `${sessionId}-custom-tool-call-${timeline.length}`,
+        const serializedInput = serializeToolPayload(payload.input);
+        pushTimeline({
+          id: `${sessionId}-custom-tool-call-${timelineCount}`,
           entryType: 'tool',
           timestamp,
           toolName,
           title: summarizeToolName(toolName),
           subtitle: clipLongText(String(payload.status || 'Custom tool call'), 200),
-          text: clipLongText(String(payload.input || ''), MAX_TOOL_TEXT),
+          text: serializedInput.text,
           callId,
           status: payload.status || null,
           exitCode: null,
-          toolInputText: clipLongText(String(payload.input || ''), MAX_TOOL_TEXT),
-          toolInputLanguage: 'json',
+          toolInputText: serializedInput.text,
+          toolInputLanguage: serializedInput.language,
         });
         continue;
       }
@@ -2414,7 +2707,8 @@ async function parseSessionFile(
       if (responseType === 'custom_tool_call_output') {
         const callId = payload.call_id || null;
         const toolName = callId ? knownToolCalls.get(callId) || 'custom_tool' : 'custom_tool';
-        const clippedOutput = clipLongText(String(payload.output || ''), MAX_TOOL_TEXT);
+        const serializedOutput = serializeToolPayload(payload.output);
+        const clippedOutput = serializedOutput.text;
         const mergedEntry = findLastToolTimelineEntry(
           timeline,
           (entry) => entry.callId === callId && entry.toolName === toolName
@@ -2423,13 +2717,13 @@ async function parseSessionFile(
         if (mergedEntry) {
           mergedEntry.timestamp = timestamp;
           mergedEntry.toolOutputText = clippedOutput;
-          mergedEntry.toolOutputLanguage = null;
+          mergedEntry.toolOutputLanguage = serializedOutput.language;
           mergedEntry.text = clippedOutput;
           mergedEntry.status = 'completed';
           mergedEntry.exitCode = null;
         } else {
-          timeline.push({
-            id: `${sessionId}-custom-tool-output-${timeline.length}`,
+          pushTimeline({
+            id: `${sessionId}-custom-tool-output-${timelineCount}`,
             entryType: 'tool',
             timestamp,
             toolName,
@@ -2440,7 +2734,7 @@ async function parseSessionFile(
             status: 'completed',
             exitCode: null,
             toolOutputText: clippedOutput,
-            toolOutputLanguage: null,
+            toolOutputLanguage: serializedOutput.language,
           });
         }
         continue;
@@ -2448,8 +2742,8 @@ async function parseSessionFile(
 
       if (responseType === 'web_search_call') {
         const actionText = payload.action ? JSON.stringify(payload.action, null, 2) : '';
-        timeline.push({
-          id: `${sessionId}-web-call-${timeline.length}`,
+        pushTimeline({
+          id: `${sessionId}-web-call-${timelineCount}`,
           entryType: 'tool',
           timestamp,
           toolName: 'web.search',
@@ -2473,7 +2767,8 @@ async function parseSessionFile(
           continue;
         }
 
-        const clippedOutput = clipLongText(String(payload.output || ''), MAX_TOOL_TEXT);
+        const serializedOutput = serializeToolPayload(payload.output);
+        const clippedOutput = serializedOutput.text;
         const mergedEntry = findLastToolTimelineEntry(
           timeline,
           (entry) => entry.callId === callId && entry.toolName === toolName
@@ -2482,13 +2777,13 @@ async function parseSessionFile(
         if (mergedEntry) {
           mergedEntry.timestamp = timestamp;
           mergedEntry.toolOutputText = clippedOutput;
-          mergedEntry.toolOutputLanguage = null;
+          mergedEntry.toolOutputLanguage = serializedOutput.language;
           mergedEntry.text = clippedOutput;
           mergedEntry.status = 'completed';
           mergedEntry.exitCode = null;
         } else {
-          timeline.push({
-            id: `${sessionId}-tool-output-${timeline.length}`,
+          pushTimeline({
+            id: `${sessionId}-tool-output-${timelineCount}`,
             entryType: 'tool',
             timestamp,
             toolName,
@@ -2499,7 +2794,7 @@ async function parseSessionFile(
             status: 'completed',
             exitCode: null,
             toolOutputText: clippedOutput,
-            toolOutputLanguage: null,
+            toolOutputLanguage: serializedOutput.language,
           });
         }
       }
@@ -2511,7 +2806,17 @@ async function parseSessionFile(
 
   if (!preview) {
     const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant');
-    preview = lastAssistant?.text || messages[messages.length - 1]?.text || '';
+    preview = lastAssistant?.text
+      || (lastMessage?.role === 'assistant' ? lastMessage.text : '')
+      || lastMessage?.text
+      || '';
+  }
+
+  if (options?.maxRetainedMessages && messages.length > options.maxRetainedMessages) {
+    messages.splice(0, messages.length - options.maxRetainedMessages);
+  }
+  if (options?.maxRetainedTimelineEntries && timeline.length > options.maxRetainedTimelineEntries) {
+    timeline.splice(0, timeline.length - options.maxRetainedTimelineEntries);
   }
 
   return {
@@ -2519,6 +2824,10 @@ async function parseSessionFile(
     messages,
     preview: trimPreview(preview || derivedTitle || sessionId),
     timeline,
+    messageCount,
+    totalTimelineEntries: timelineCount,
+    firstMessage,
+    lastMessage,
     isCompactClone,
     compactSourceSessionId,
   };
@@ -2540,8 +2849,531 @@ async function resolveSessionRecord(
   profile: CodexProfile,
   sessionId: string
 ): Promise<SessionScanRecord | null> {
-  const sessionFiles = await scanSessionFiles(profile);
-  return sessionFiles.find((row) => row.id === sessionId) || null;
+  await scanSessionFiles(profile);
+  const cached = sessionScanCache.get(profile.id);
+  const knownRecord = cached?.byId.get(sessionId) || null;
+  if (knownRecord) {
+    return knownRecord;
+  }
+
+  // A session can be created by the CLI between catalog refreshes. Only a
+  // genuine miss forces a fresh recursive scan; known sessions remain O(1).
+  await scanSessionFiles(profile, { force: true });
+  return sessionScanCache.get(profile.id)?.byId.get(sessionId) || null;
+}
+
+function sanitizeSessionCacheSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 180) || 'session';
+}
+
+function isPathInsideDirectory(rootPath: string, targetPath: string): boolean {
+  const relative = path.relative(rootPath, targetPath);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function buildSessionDetailVariant(options?: {
+  tail?: number;
+  before?: number;
+  full?: boolean;
+}): string | null {
+  if (options?.full) {
+    return null;
+  }
+  const tail = typeof options?.tail === 'number'
+    ? Math.max(1, Math.min(400, Math.trunc(options.tail)))
+    : 400;
+  const before = typeof options?.before === 'number' && Number.isFinite(options.before)
+    ? Math.max(0, Math.trunc(options.before))
+    : 'latest';
+  return `tail-${tail}-before-${before}`;
+}
+
+function buildSessionDetailMemoryKey(profileId: string, sessionId: string, variant: string): string {
+  return `${profileId}\u0000${sessionId}\u0000${variant}`;
+}
+
+function buildSessionDetailDiskPath(profileId: string, sessionId: string, variant: string): string {
+  return path.join(
+    buildSessionDetailDiskDirectory(profileId, sessionId),
+    `${sanitizeSessionCacheSegment(variant)}.json`
+  );
+}
+
+function buildSessionDetailDiskDirectory(profileId: string, sessionId: string): string {
+  return path.join(
+    SESSION_DETAIL_CACHE_ROOT,
+    sanitizeSessionCacheSegment(profileId),
+    sanitizeSessionCacheSegment(sessionId)
+  );
+}
+
+async function secureSessionDetailCacheDirectory(profileId: string, sessionId: string): Promise<string> {
+  const profileDirectory = path.join(
+    SESSION_DETAIL_CACHE_ROOT,
+    sanitizeSessionCacheSegment(profileId)
+  );
+  const sessionDirectory = buildSessionDetailDiskDirectory(profileId, sessionId);
+  await fs.mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
+  await Promise.all([
+    fs.chmod(SESSION_DETAIL_CACHE_ROOT, 0o700),
+    fs.chmod(profileDirectory, 0o700),
+    fs.chmod(sessionDirectory, 0o700),
+  ]);
+  return sessionDirectory;
+}
+
+function buildSessionSourceSignature(
+  stats: { dev: number; ino: number; size: number; mtimeMs: number },
+  forkMetadata: CodexForkSessionMetadata | null
+): string {
+  return [
+    stats.dev,
+    stats.ino,
+    stats.size,
+    Math.trunc(stats.mtimeMs * 1_000),
+    forkMetadata ? JSON.stringify(forkMetadata) : '',
+  ].join(':');
+}
+
+function buildSessionSourceIdentity(stats: { dev: number; ino: number }): string {
+  return `${stats.dev}:${stats.ino}`;
+}
+
+function cachedSessionOverlayMatches(
+  record: SessionDetailCacheRecord,
+  forkMetadata: CodexForkSessionMetadata | null
+): boolean {
+  const overlaySignature = forkMetadata ? JSON.stringify(forkMetadata) : '';
+  return record.sourceSignature.endsWith(`:${overlaySignature}`);
+}
+
+function pruneSessionDetailMemoryCache(): void {
+  if (sessionDetailCache.size <= SESSION_DETAIL_CACHE_LIMIT) {
+    return;
+  }
+
+  const oldest = [...sessionDetailCache.entries()]
+    .sort((left, right) => left[1].lastAccessedAt - right[1].lastAccessedAt)
+    .slice(0, sessionDetailCache.size - SESSION_DETAIL_CACHE_LIMIT);
+  for (const [key] of oldest) {
+    sessionDetailCache.delete(key);
+  }
+}
+
+function invalidateSessionDetailCache(profileId: string, sessionId: string): void {
+  const prefix = `${profileId}\u0000${sessionId}\u0000`;
+  for (const key of sessionDetailCache.keys()) {
+    if (key.startsWith(prefix)) {
+      sessionDetailCache.delete(key);
+    }
+  }
+}
+
+async function deletePersistedSessionDetailCache(profileId: string, sessionId: string): Promise<void> {
+  await fs.rm(buildSessionDetailDiskDirectory(profileId, sessionId), {
+    recursive: true,
+    force: true,
+  });
+}
+
+async function readPersistedSessionDetail(
+  profileId: string,
+  sessionId: string,
+  variant: string,
+  sourceSignature: string
+): Promise<CodexSessionDetail | null> {
+  const cachePath = buildSessionDetailDiskPath(profileId, sessionId, variant);
+  try {
+    const parsed = JSON.parse(await fs.readFile(cachePath, 'utf-8')) as PersistedSessionDetailRecord;
+    if (
+      parsed.version !== SESSION_DETAIL_CACHE_VERSION
+      || parsed.sourceSignature !== sourceSignature
+      || !parsed.detail
+      || parsed.detail.id !== sessionId
+    ) {
+      return null;
+    }
+    await Promise.all([
+      secureSessionDetailCacheDirectory(profileId, sessionId),
+      fs.chmod(cachePath, 0o600),
+    ]);
+    return parsed.detail;
+  } catch (error: any) {
+    if (error?.code === 'ENOENT' || error instanceof SyntaxError) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function resolveSessionRecordFromPersistedDetail(
+  profile: CodexProfile,
+  sessionId: string,
+  variant: string
+): Promise<SessionScanRecord | null> {
+  const cachePath = buildSessionDetailDiskPath(profile.id, sessionId, variant);
+  try {
+    const parsed = JSON.parse(await fs.readFile(cachePath, 'utf-8')) as PersistedSessionDetailRecord;
+    const detail = parsed.detail;
+    if (
+      parsed.version !== SESSION_DETAIL_CACHE_VERSION
+      || !detail
+      || detail.id !== sessionId
+      || detail.profileId !== profile.id
+      || !path.isAbsolute(detail.path)
+      || !isPathInsideDirectory(profile.codexHome, detail.path)
+    ) {
+      return null;
+    }
+    await Promise.all([
+      secureSessionDetailCacheDirectory(profile.id, sessionId),
+      fs.chmod(cachePath, 0o600),
+    ]);
+    const stats = await fs.stat(detail.path);
+    if (
+      typeof parsed.sourceSignature === 'string'
+      && typeof parsed.sourceIdentity === 'string'
+      && typeof parsed.sourceSize === 'number'
+      && Number.isFinite(parsed.sourceSize)
+    ) {
+      sessionDetailCache.set(
+        buildSessionDetailMemoryKey(profile.id, sessionId, variant),
+        {
+          sourceSignature: parsed.sourceSignature,
+          sourceIdentity: parsed.sourceIdentity,
+          sourceSize: parsed.sourceSize,
+          detail,
+          lastAccessedAt: Date.now(),
+        }
+      );
+      pruneSessionDetailMemoryCache();
+    }
+    const record: SessionScanRecord = {
+      id: sessionId,
+      path: detail.path,
+      updatedAt: stats.mtime.toISOString(),
+      createdAt: detail.createdAt,
+      cwd: detail.cwd,
+      modelProvider: detail.modelProvider,
+      source: detail.source,
+      forkedFromId: detail.forkSourceSessionId || null,
+      nativeSubagent: null,
+      sourceSignature: `${stats.dev}:${stats.ino}:${stats.size}:${Math.trunc(stats.mtimeMs * 1_000)}`,
+    };
+    const cachedCatalog = sessionScanCache.get(profile.id);
+    cachedCatalog?.byId.set(sessionId, record);
+    return record;
+  } catch (error: any) {
+    if (error?.code === 'ENOENT' || error instanceof SyntaxError) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function persistSessionDetail(
+  profileId: string,
+  sessionId: string,
+  variant: string,
+  sourceSignature: string,
+  sourceIdentity: string,
+  sourceSize: number,
+  detail: CodexSessionDetail
+): Promise<void> {
+  const cachePath = buildSessionDetailDiskPath(profileId, sessionId, variant);
+  const temporaryPath = `${cachePath}.${process.pid}.${randomUUID()}.tmp`;
+  await secureSessionDetailCacheDirectory(profileId, sessionId);
+  await fs.writeFile(temporaryPath, JSON.stringify({
+    version: SESSION_DETAIL_CACHE_VERSION,
+    sourceSignature,
+    sourceIdentity,
+    sourceSize,
+    detail,
+  }), { encoding: 'utf-8', mode: 0o600 });
+  await fs.rename(temporaryPath, cachePath);
+  await fs.chmod(cachePath, 0o600);
+}
+
+async function getCachedSessionDetail(
+  profileId: string,
+  sessionId: string,
+  variant: string,
+  sourceSignature: string,
+  sourceIdentity: string,
+  sourceSize: number
+): Promise<CodexSessionDetail | null> {
+  const key = buildSessionDetailMemoryKey(profileId, sessionId, variant);
+  const memoryRecord = sessionDetailCache.get(key);
+  if (memoryRecord?.sourceSignature === sourceSignature) {
+    memoryRecord.lastAccessedAt = Date.now();
+    return memoryRecord.detail;
+  }
+  const persisted = await readPersistedSessionDetail(profileId, sessionId, variant, sourceSignature);
+  if (!persisted) {
+    return null;
+  }
+  sessionDetailCache.set(key, {
+    sourceSignature,
+    sourceIdentity,
+    sourceSize,
+    detail: persisted,
+    lastAccessedAt: Date.now(),
+  });
+  pruneSessionDetailMemoryCache();
+  return persisted;
+}
+
+async function putCachedSessionDetail(
+  profileId: string,
+  sessionId: string,
+  variant: string,
+  sourceSignature: string,
+  sourceIdentity: string,
+  sourceSize: number,
+  detail: CodexSessionDetail
+): Promise<void> {
+  const key = buildSessionDetailMemoryKey(profileId, sessionId, variant);
+  sessionDetailCache.set(key, {
+    sourceSignature,
+    sourceIdentity,
+    sourceSize,
+    detail,
+    lastAccessedAt: Date.now(),
+  });
+  pruneSessionDetailMemoryCache();
+  await persistSessionDetail(
+    profileId,
+    sessionId,
+    variant,
+    sourceSignature,
+    sourceIdentity,
+    sourceSize,
+    detail
+  );
+}
+
+function timelineEntryToCachedMessage(entry: CodexTimelineEntry): CodexSessionMessage | null {
+  if (entry.entryType !== 'message' || !entry.role || !entry.kind || typeof entry.text !== 'string') {
+    return null;
+  }
+  return {
+    id: entry.id,
+    role: entry.role,
+    kind: entry.kind,
+    text: entry.text,
+    timestamp: entry.timestamp,
+  };
+}
+
+async function fileEndsWithNewline(filePath: string, size: number): Promise<boolean> {
+  if (size <= 0) return true;
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(1);
+    const { bytesRead } = await handle.read(buffer, 0, 1, size - 1);
+    return bytesRead === 1 && buffer[0] === 0x0a;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function buildIncrementalSessionDetail(
+  staleRecord: SessionDetailCacheRecord,
+  sessionFile: SessionScanRecord,
+  stats: { size: number; mtime: Date },
+  sessionId: string,
+  indexEntry: SessionIndexEntry | undefined,
+  options: { tail?: number; before?: number; full?: boolean } | undefined
+): Promise<CodexSessionDetail | null> {
+  if (
+    options?.full
+    || typeof options?.before === 'number'
+    || stats.size <= staleRecord.sourceSize
+  ) {
+    return null;
+  }
+  if (!(await fileEndsWithNewline(sessionFile.path, staleRecord.sourceSize))) {
+    return null;
+  }
+  if (!(await fileEndsWithNewline(sessionFile.path, stats.size))) {
+    // Do not advance the cache into a partially written JSONL row. fs.watch
+    // will emit again when Codex finishes the append.
+    return staleRecord.detail;
+  }
+
+  const cachedMessages = staleRecord.detail.timeline
+    .map(timelineEntryToCachedMessage)
+    .filter((message): message is CodexSessionMessage => Boolean(message));
+  const requestedTail = typeof options?.tail === 'number'
+    ? Math.max(1, Math.min(400, options.tail))
+    : 400;
+  const parsed = await parseSessionFile(
+    sessionFile.path,
+    sessionId,
+    indexEntry,
+    {
+      startByte: staleRecord.sourceSize,
+      initial: {
+        title: staleRecord.detail.title,
+        preview: staleRecord.detail.preview,
+        messages: cachedMessages,
+        timeline: staleRecord.detail.timeline,
+        messageCount: staleRecord.detail.messageCount,
+        totalTimelineEntries: staleRecord.detail.totalTimelineEntries,
+        firstMessage: null,
+        lastMessage: cachedMessages.at(-1) || null,
+        isCompactClone: Boolean(staleRecord.detail.isCompactClone),
+        compactSourceSessionId: staleRecord.detail.compactSourceSessionId || null,
+      },
+      maxRetainedMessages: requestedTail,
+      maxRetainedTimelineEntries: requestedTail,
+    }
+  );
+  const totalTimelineEntries = parsed.totalTimelineEntries ?? parsed.timeline.length;
+  const timelineWindowStart = Math.max(0, totalTimelineEntries - requestedTail);
+  const timeline = parsed.timeline.slice(-requestedTail);
+  const lastMessage = parsed.lastMessage || cachedMessages.at(-1) || null;
+
+  return {
+    ...staleRecord.detail,
+    title: parsed.title,
+    updatedAt: stats.mtime.toISOString(),
+    messageCount: parsed.messageCount ?? staleRecord.detail.messageCount,
+    preview: parsed.preview,
+    endPreview: lastMessage?.text ? trimPreview(lastMessage.text) : parsed.preview,
+    messages: [],
+    timeline,
+    totalTimelineEntries,
+    timelineWindowStart,
+    timelineWindowEnd: totalTimelineEntries,
+    hasEarlierTimeline: timelineWindowStart > 0,
+    isCompactClone: parsed.isCompactClone,
+    compactSourceSessionId: parsed.compactSourceSessionId,
+  };
+}
+
+function buildCodexSessionRevision(
+  profile: CodexProfile,
+  sessionId: string,
+  stats: { dev: number; ino: number; size: number; mtimeMs: number; mtime: Date }
+): CodexSessionRevision {
+  return {
+    sessionId,
+    profileId: profile.id,
+    size: stats.size,
+    modifiedAt: stats.mtime.toISOString(),
+    revision: `${stats.dev}:${stats.ino}:${stats.size}:${Math.trunc(stats.mtimeMs * 1_000)}`,
+  };
+}
+
+export async function subscribeCodexSessionChanges(
+  sessionId: string,
+  profileId: string | undefined,
+  onChange: (revision: CodexSessionRevision) => void
+): Promise<{ initialRevision: CodexSessionRevision; close: () => void }> {
+  const profile = resolveProfile(profileId);
+  const sessionRecord = await resolveSessionRecord(profile, sessionId);
+  if (!sessionRecord) {
+    throw new Error(`Session ${sessionId} was not found`);
+  }
+
+  const initialStats = await fs.stat(sessionRecord.path);
+  let lastRevision = buildCodexSessionRevision(profile, sessionId, initialStats);
+  let watcher: FSWatcher | null = null;
+  let debounceTimer: NodeJS.Timeout | null = null;
+  let trailingCheckTimer: NodeJS.Timeout | null = null;
+  let checking = false;
+  let checkQueued = false;
+  let closed = false;
+
+  const checkForChange = async () => {
+    if (closed) return;
+    if (checking) {
+      checkQueued = true;
+      return;
+    }
+    checking = true;
+    try {
+      const stats = await fs.stat(sessionRecord.path);
+      const nextRevision = buildCodexSessionRevision(profile, sessionId, stats);
+      if (nextRevision.revision === lastRevision.revision) {
+        return;
+      }
+      lastRevision = nextRevision;
+      sessionRecord.updatedAt = nextRevision.modifiedAt;
+      onChange(nextRevision);
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') {
+        console.error(`Failed to inspect live session ${sessionId}:`, error);
+      }
+    } finally {
+      checking = false;
+      if (checkQueued) {
+        checkQueued = false;
+        void checkForChange();
+      }
+    }
+  };
+
+  const scheduleCheck = () => {
+    if (closed) return;
+    if (!debounceTimer) {
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        void checkForChange();
+      }, 2);
+      debounceTimer.unref?.();
+    }
+
+    // Some filesystems notify while an append is still in progress and do
+    // not always emit a second event after the final bytes land. Keep one
+    // short trailing stat so a partially observed JSONL write is surfaced
+    // without waiting for the one-second correctness fallback.
+    if (trailingCheckTimer) {
+      clearTimeout(trailingCheckTimer);
+    }
+    trailingCheckTimer = setTimeout(() => {
+      trailingCheckTimer = null;
+      void checkForChange();
+    }, 24);
+    trailingCheckTimer.unref?.();
+  };
+
+  try {
+    watcher = watchFileSystem(sessionRecord.path, { persistent: false }, scheduleCheck);
+    watcher.on('error', () => {
+      watcher?.close();
+      watcher = null;
+    });
+  } catch {
+    watcher = null;
+  }
+
+  // fs.watch is fast but not guaranteed on every filesystem. The unref'ed
+  // stat probe is a correctness fallback and does no JSONL parsing.
+  const fallbackInterval = setInterval(() => {
+    void checkForChange();
+  }, 1_000);
+  fallbackInterval.unref?.();
+
+  return {
+    initialRevision: lastRevision,
+    close() {
+      if (closed) return;
+      closed = true;
+      watcher?.close();
+      watcher = null;
+      clearInterval(fallbackInterval);
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+      if (trailingCheckTimer) {
+        clearTimeout(trailingCheckTimer);
+        trailingCheckTimer = null;
+      }
+    },
+  };
 }
 
 async function resolveRunCwd(profile: CodexProfile, sessionId?: string): Promise<string> {
@@ -2777,18 +3609,13 @@ export async function getAvailableProfiles(): Promise<CodexProfile[]> {
   return available;
 }
 
-export async function listCodexSessions(
-  profileId?: string,
-  query = '',
-  limit = MAX_SESSIONS
-): Promise<CodexSessionSummary[]> {
-  const profile = resolveProfile(profileId);
+async function buildCodexSessionCatalog(profile: CodexProfile): Promise<CodexSessionSummary[]> {
   const indexMap = await loadSessionIndexMap(profile);
-  const sessionFiles = await scanSessionFiles(profile);
+  const sessionFiles = await scanSessionFiles(profile, { force: true });
   const draftSessions = await listForkDraftSessions(profile.id);
   const recoveredQueueSessions = await loadRecoveredQueueSessions(profile);
 
-  const normalizedQuery = query.trim().toLowerCase();
+  const normalizedQuery = '';
   const summaries: CodexSessionSummary[] = [];
   const summaryMatchHaystacks = new Map<string, string>();
   const nativeSubagentsByParent = new Map<string, CodexNativeSubagentSummary[]>();
@@ -2812,7 +3639,11 @@ export async function listCodexSessions(
     const hints = await extractSessionSummaryHints(
       sessionFile.path,
       sessionFile.id,
-      indexMap.get(sessionFile.id)
+      indexMap.get(sessionFile.id),
+      {
+        profileId: profile.id,
+        sourceSignature: sessionFile.sourceSignature || sessionFile.updatedAt,
+      }
     );
     const forkMetadata = await getForkSessionMetadata(sessionFile.id);
     const isRealForkSession = Boolean(sessionFile.forkedFromId);
@@ -2984,9 +3815,239 @@ export async function listCodexSessions(
     });
   }
 
-  return summaries
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    .slice(0, Math.min(limit, MAX_SESSIONS));
+  return summaries.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+function buildSessionCatalogDiskPath(profileId: string): string {
+  return path.join(
+    SESSION_CATALOG_CACHE_ROOT,
+    `${sanitizeSessionCacheSegment(profileId)}.json`
+  );
+}
+
+function buildSessionSummarySearchText(summary: CodexSessionSummary): string {
+  const nativeAgentText = summary.nativeSubagents?.agents
+    .flatMap((agent) => [agent.id, agent.nickname, agent.role, agent.agentPath, agent.title, agent.preview])
+    .filter(Boolean)
+    .join('\n') || '';
+  return [
+    summary.id,
+    summary.title,
+    summary.preview,
+    summary.startPreview,
+    summary.endPreview,
+    summary.cwd,
+    summary.forkSourceSessionId,
+    summary.compactSourceSessionId,
+    nativeAgentText,
+  ].filter(Boolean).join('\n').toLowerCase();
+}
+
+async function persistSessionCatalog(
+  profile: CodexProfile,
+  summaries: CodexSessionSummary[]
+): Promise<void> {
+  const cachePath = buildSessionCatalogDiskPath(profile.id);
+  const temporaryPath = `${cachePath}.${process.pid}.${randomUUID()}.tmp`;
+  const scanRows = sessionScanCache.get(profile.id)?.rows || [];
+  const hintPrefix = `${profile.id}\u0000`;
+  const summaryHints = [...sessionSummaryHintCache.entries()]
+    .filter(([key]) => key.startsWith(hintPrefix))
+    .map(([key, record]) => ({
+      sessionId: key.slice(hintPrefix.length),
+      sourceSignature: record.sourceSignature,
+      hints: record.hints,
+    }));
+
+  await fs.mkdir(SESSION_CATALOG_CACHE_ROOT, { recursive: true, mode: 0o700 });
+  await fs.chmod(SESSION_CATALOG_CACHE_ROOT, 0o700);
+  await fs.writeFile(temporaryPath, JSON.stringify({
+    version: SESSION_CATALOG_CACHE_VERSION,
+    profileId: profile.id,
+    generatedAt: new Date().toISOString(),
+    summaries,
+    scanRows,
+    summaryHints,
+  } satisfies PersistedSessionCatalog), { encoding: 'utf-8', mode: 0o600 });
+  await fs.rename(temporaryPath, cachePath);
+  await fs.chmod(cachePath, 0o600);
+}
+
+async function readPersistedSessionCatalog(
+  profile: CodexProfile
+): Promise<CodexSessionSummary[] | null> {
+  const cachePath = buildSessionCatalogDiskPath(profile.id);
+  try {
+    const parsed = JSON.parse(await fs.readFile(cachePath, 'utf-8')) as PersistedSessionCatalog;
+    if (
+      parsed.version !== SESSION_CATALOG_CACHE_VERSION
+      || parsed.profileId !== profile.id
+      || !Array.isArray(parsed.summaries)
+      || !Array.isArray(parsed.scanRows)
+    ) {
+      return null;
+    }
+
+    const scanRows = parsed.scanRows.filter((row): row is SessionScanRecord => (
+      Boolean(row)
+      && typeof row.id === 'string'
+      && typeof row.path === 'string'
+      && path.isAbsolute(row.path)
+      && isPathInsideDirectory(profile.codexHome, row.path)
+    ));
+    if (scanRows.length) {
+      sessionScanCache.set(profile.id, {
+        rows: scanRows,
+        byId: new Map(scanRows.map((row) => [row.id, row])),
+        expiresAt: 0,
+        inFlight: null,
+      });
+    }
+
+    for (const record of parsed.summaryHints || []) {
+      if (
+        typeof record?.sessionId !== 'string'
+        || typeof record?.sourceSignature !== 'string'
+        || !record.hints
+      ) continue;
+      sessionSummaryHintCache.set(`${profile.id}\u0000${record.sessionId}`, {
+        sourceSignature: record.sourceSignature,
+        hints: record.hints,
+      });
+    }
+
+    await Promise.all([
+      fs.mkdir(SESSION_CATALOG_CACHE_ROOT, { recursive: true, mode: 0o700 }),
+      fs.chmod(cachePath, 0o600),
+    ]);
+    await fs.chmod(SESSION_CATALOG_CACHE_ROOT, 0o700);
+    return parsed.summaries.filter((summary): summary is CodexSessionSummary => (
+      Boolean(summary)
+      && typeof summary.id === 'string'
+      && typeof summary.title === 'string'
+      && summary.profileId === profile.id
+    ));
+  } catch (error: any) {
+    if (error?.code === 'ENOENT' || error instanceof SyntaxError) return null;
+    throw error;
+  }
+}
+
+function refreshSessionCatalog(profile: CodexProfile): Promise<CodexSessionSummary[]> {
+  const cached = sessionCatalogCache.get(profile.id);
+  if (cached?.inFlight) return cached.inFlight;
+
+  const inFlight = buildCodexSessionCatalog(profile)
+    .then(async (summaries) => {
+      sessionCatalogCache.set(profile.id, {
+        summaries,
+        loaded: true,
+        expiresAt: Date.now() + SESSION_CATALOG_CACHE_TTL_MS,
+        inFlight: null,
+      });
+      await persistSessionCatalog(profile, summaries);
+      return summaries;
+    })
+    .catch((error) => {
+      const current = sessionCatalogCache.get(profile.id);
+      if (current) {
+        current.inFlight = null;
+        current.expiresAt = Date.now() + 1_000;
+      } else {
+        sessionCatalogCache.delete(profile.id);
+      }
+      throw error;
+    });
+
+  sessionCatalogCache.set(profile.id, {
+    summaries: cached?.summaries || [],
+    loaded: cached?.loaded || false,
+    expiresAt: cached?.expiresAt || 0,
+    inFlight,
+  });
+  return inFlight;
+}
+
+async function getSessionCatalog(profile: CodexProfile): Promise<CodexSessionSummary[]> {
+  const cached = sessionCatalogCache.get(profile.id);
+  if (cached) {
+    if (cached.expiresAt <= Date.now() && !cached.inFlight) {
+      void refreshSessionCatalog(profile).catch((error) => {
+        console.error(`Failed to refresh session catalog for ${profile.id}:`, error);
+      });
+    }
+    if (cached.loaded) return cached.summaries;
+    if (cached.inFlight) return cached.inFlight;
+  }
+
+  let diskLoad = sessionCatalogDiskLoads.get(profile.id);
+  if (!diskLoad) {
+    diskLoad = readPersistedSessionCatalog(profile).finally(() => {
+      sessionCatalogDiskLoads.delete(profile.id);
+    });
+    sessionCatalogDiskLoads.set(profile.id, diskLoad);
+  }
+  const persisted = await diskLoad;
+  if (persisted) {
+    sessionCatalogCache.set(profile.id, {
+      summaries: persisted,
+      loaded: true,
+      expiresAt: 0,
+      inFlight: null,
+    });
+    void refreshSessionCatalog(profile).catch((error) => {
+      console.error(`Failed to refresh persisted session catalog for ${profile.id}:`, error);
+    });
+    return persisted;
+  }
+
+  return refreshSessionCatalog(profile);
+}
+
+async function invalidateSessionCatalog(
+  profileId: string,
+  options?: { removeSessionId?: string; deletePersisted?: boolean }
+): Promise<void> {
+  const removeSessionId = options?.removeSessionId;
+  const catalog = sessionCatalogCache.get(profileId);
+  if (catalog) {
+    if (removeSessionId) {
+      catalog.summaries = catalog.summaries.filter((summary) => summary.id !== removeSessionId);
+    }
+    catalog.expiresAt = 0;
+  }
+  const scan = sessionScanCache.get(profileId);
+  if (scan) {
+    if (removeSessionId) {
+      scan.rows = scan.rows.filter((row) => row.id !== removeSessionId);
+      scan.byId.delete(removeSessionId);
+    }
+    scan.expiresAt = 0;
+  }
+  if (removeSessionId) {
+    sessionSummaryHintCache.delete(`${profileId}\u0000${removeSessionId}`);
+  }
+  if (options?.deletePersisted !== false) {
+    await fs.rm(buildSessionCatalogDiskPath(profileId), { force: true });
+  }
+}
+
+export async function listCodexSessions(
+  profileId?: string,
+  query = '',
+  limit = MAX_SESSIONS,
+  allowExtendedLimit = false,
+): Promise<CodexSessionSummary[]> {
+  const profile = resolveProfile(profileId);
+  const catalog = await getSessionCatalog(profile);
+  const normalizedQuery = query.trim().toLowerCase();
+  const matching = normalizedQuery
+    ? catalog.filter((summary) => buildSessionSummarySearchText(summary).includes(normalizedQuery))
+    : catalog;
+  return matching.slice(
+    0,
+    allowExtendedLimit ? Math.max(0, limit) : Math.min(limit, MAX_SESSIONS)
+  );
 }
 
 export async function deleteCodexSession(
@@ -3000,6 +4061,9 @@ export async function deleteCodexSession(
   }
 
   await fs.rm(sessionRecord.path, { force: true });
+  await invalidateSessionCatalog(profile.id, { removeSessionId: sessionId });
+  invalidateSessionDetailCache(profile.id, sessionId);
+  await deletePersistedSessionDetailCache(profile.id, sessionId);
 }
 
 async function appendSessionIndexEntryIfMissing(
@@ -3089,6 +4153,7 @@ export async function copyCodexSessionToProfile(
   );
 
   const stats = await fs.stat(targetPath);
+  await invalidateSessionCatalog(targetProfile.id);
   return {
     id: targetSessionId,
     path: targetPath,
@@ -3098,6 +4163,8 @@ export async function copyCodexSessionToProfile(
     modelProvider: sourceSessionRecord.modelProvider,
     source: sourceSessionRecord.source,
     forkedFromId: sourceSessionRecord.forkedFromId,
+    nativeSubagent: sourceSessionRecord.nativeSubagent,
+    sourceSignature: `${stats.dev}:${stats.ino}:${stats.size}:${Math.trunc(stats.mtimeMs * 1_000)}`,
   };
 }
 
@@ -3203,6 +4270,9 @@ export async function deleteCodexTurn(
   const remainingLines = rawLines.filter((_, index) => index < targetTurn.startLine || index > targetTurn.endLine);
   await fs.writeFile(sessionRecord.path, `${remainingLines.join('\n')}\n`, 'utf-8');
   alignPathOwnershipToProfile(profile, sessionRecord.path);
+  await invalidateSessionCatalog(profile.id);
+  invalidateSessionDetailCache(profile.id, sessionId);
+  await deletePersistedSessionDetailCache(profile.id, sessionId);
 }
 
 export async function getCodexSessionDetail(
@@ -3215,9 +4285,13 @@ export async function getCodexSessionDetail(
   }
 ): Promise<CodexSessionDetail> {
   const profile = resolveProfile(profileId);
+  const variant = buildSessionDetailVariant(options);
   const indexMap = await loadSessionIndexMap(profile);
-  const sessionFiles = await scanSessionFiles(profile);
-  const sessionFile = sessionFiles.find((row) => row.id === sessionId);
+  const sessionFile = (
+    variant
+      ? await resolveSessionRecordFromPersistedDetail(profile, sessionId, variant)
+      : null
+  ) || await resolveSessionRecord(profile, sessionId);
 
   if (!sessionFile) {
     const forkDraft = await getForkDraftSession(sessionId);
@@ -3290,7 +4364,7 @@ export async function getCodexSessionDetail(
       ? totalTimelineEntries
       : typeof options?.tail === 'number'
         ? Math.max(1, Math.min(400, options.tail))
-        : totalTimelineEntries;
+        : Math.min(400, totalTimelineEntries);
     const timelineWindowStart = Math.max(0, requestedBefore - requestedTail);
     const timelineWindowEnd = requestedBefore;
     const timeline = parsedDraft.timeline.slice(timelineWindowStart, timelineWindowEnd);
@@ -3326,51 +4400,157 @@ export async function getCodexSessionDetail(
     };
   }
 
-  const parsedBase = await parseSessionFile(sessionFile.path, sessionId, indexMap.get(sessionId));
   const forkMetadata = await getForkSessionMetadata(sessionId);
-  const parsed = sessionFile.forkedFromId
-    ? parsedBase
-    : applyForkSessionOverlay(parsedBase, forkMetadata);
-  const totalTimelineEntries = parsed.timeline.length;
-  const requestedBefore = typeof options?.before === 'number'
-    ? Math.max(0, Math.min(totalTimelineEntries, options.before))
-    : totalTimelineEntries;
-  const requestedTail = options?.full
-    ? totalTimelineEntries
-    : typeof options?.tail === 'number'
-      ? Math.max(1, Math.min(400, options.tail))
-      : totalTimelineEntries;
-  const timelineWindowStart = Math.max(0, requestedBefore - requestedTail);
-  const timelineWindowEnd = requestedBefore;
-  const timeline = parsed.timeline.slice(timelineWindowStart, timelineWindowEnd);
-  const shouldReturnFullMessages = requestedTail >= totalTimelineEntries && timelineWindowStart === 0;
+  const stats = await fs.stat(sessionFile.path);
+  const sourceSignature = buildSessionSourceSignature(stats, forkMetadata);
+  const sourceIdentity = buildSessionSourceIdentity(stats);
+  const memoryKey = variant
+    ? buildSessionDetailMemoryKey(profile.id, sessionId, variant)
+    : null;
+  const staleRecord = memoryKey ? sessionDetailCache.get(memoryKey) || null : null;
 
-  return {
-    id: sessionId,
-    title: parsed.title,
-    updatedAt: sessionFile.updatedAt,
-    createdAt: sessionFile.createdAt,
-    profileId: profile.id,
-    messageCount: parsed.messages.length,
-    preview: parsed.preview,
-    startPreview: parsed.messages[0]?.text ? trimPreview(parsed.messages[0].text) : parsed.title,
-    endPreview: parsed.messages.at(-1)?.text ? trimPreview(parsed.messages.at(-1)!.text) : parsed.preview,
-    path: sessionFile.path,
-    source: sessionFile.source,
-    cwd: sessionFile.cwd,
-    forkSourceSessionId: sessionFile.forkedFromId || forkMetadata?.sourceSessionId || null,
-    forkEntryId: forkMetadata?.forkEntryId || null,
-    modelProvider: sessionFile.modelProvider,
-    messages: shouldReturnFullMessages ? parsed.messages : [],
-    timeline,
-    totalTimelineEntries,
-    timelineWindowStart,
-    timelineWindowEnd,
-    hasEarlierTimeline: timelineWindowStart > 0,
-    isCompactClone: parsed.isCompactClone,
-    compactSourceSessionId: parsed.compactSourceSessionId,
-    forkDraftContext: null,
+  if (variant) {
+    const cached = await getCachedSessionDetail(
+      profile.id,
+      sessionId,
+      variant,
+      sourceSignature,
+      sourceIdentity,
+      stats.size
+    );
+    if (cached) {
+      return cached;
+    }
+
+    if (
+      staleRecord
+      && staleRecord.sourceIdentity === sourceIdentity
+      && cachedSessionOverlayMatches(staleRecord, forkMetadata)
+    ) {
+      const incremental = await buildIncrementalSessionDetail(
+        staleRecord,
+        sessionFile,
+        stats,
+        sessionId,
+        indexMap.get(sessionId),
+        options
+      );
+      if (incremental) {
+        if (incremental === staleRecord.detail) {
+          return incremental;
+        }
+        void putCachedSessionDetail(
+          profile.id,
+          sessionId,
+          variant,
+          sourceSignature,
+          sourceIdentity,
+          stats.size,
+          incremental
+        ).catch((error) => {
+          console.error(`Failed to persist incremental session cache for ${sessionId}:`, error);
+        });
+        return incremental;
+      }
+    }
+
+    const existingLoad = sessionDetailLoads.get(`${memoryKey}\u0000${sourceSignature}`);
+    if (existingLoad) {
+      return existingLoad;
+    }
+  }
+
+  const loadDetail = async (): Promise<CodexSessionDetail> => {
+    const requestedTailLimit = !options?.full && typeof options?.before !== 'number'
+      ? typeof options?.tail === 'number'
+        ? Math.max(1, Math.min(400, options.tail))
+        : 400
+      : undefined;
+    const parsedBase = await parseSessionFile(sessionFile.path, sessionId, indexMap.get(sessionId), {
+      maxRetainedMessages: requestedTailLimit,
+      maxRetainedTimelineEntries: requestedTailLimit,
+    });
+    const parsed = sessionFile.forkedFromId
+      ? parsedBase
+      : applyForkSessionOverlay(parsedBase, forkMetadata);
+    const totalTimelineEntries = parsed.totalTimelineEntries ?? parsed.timeline.length;
+    const requestedBefore = typeof options?.before === 'number'
+      ? Math.max(0, Math.min(totalTimelineEntries, options.before))
+      : totalTimelineEntries;
+    const requestedTail = options?.full
+      ? totalTimelineEntries
+      : typeof options?.tail === 'number'
+        ? Math.max(1, Math.min(400, options.tail))
+        : totalTimelineEntries;
+    const timelineWindowStart = Math.max(0, requestedBefore - requestedTail);
+    const timelineWindowEnd = requestedBefore;
+    const parsedContainsEntireTimeline = parsed.timeline.length >= totalTimelineEntries;
+    const timeline = parsedContainsEntireTimeline
+      ? parsed.timeline.slice(timelineWindowStart, timelineWindowEnd)
+      : parsed.timeline.slice(-requestedTail);
+    const shouldReturnFullMessages = requestedTail >= totalTimelineEntries && timelineWindowStart === 0;
+
+    return {
+      id: sessionId,
+      title: parsed.title,
+      updatedAt: stats.mtime.toISOString(),
+      createdAt: sessionFile.createdAt,
+      profileId: profile.id,
+      messageCount: parsed.messageCount ?? parsed.messages.length,
+      preview: parsed.preview,
+      startPreview: parsed.firstMessage?.text
+        ? trimPreview(parsed.firstMessage.text)
+        : parsed.messages[0]?.text
+          ? trimPreview(parsed.messages[0].text)
+          : parsed.title,
+      endPreview: parsed.lastMessage?.text
+        ? trimPreview(parsed.lastMessage.text)
+        : parsed.messages.at(-1)?.text
+          ? trimPreview(parsed.messages.at(-1)!.text)
+          : parsed.preview,
+      path: sessionFile.path,
+      source: sessionFile.source,
+      cwd: sessionFile.cwd,
+      forkSourceSessionId: sessionFile.forkedFromId || forkMetadata?.sourceSessionId || null,
+      forkEntryId: forkMetadata?.forkEntryId || null,
+      modelProvider: sessionFile.modelProvider,
+      messages: shouldReturnFullMessages ? parsed.messages : [],
+      timeline,
+      totalTimelineEntries,
+      timelineWindowStart,
+      timelineWindowEnd,
+      hasEarlierTimeline: timelineWindowStart > 0,
+      isCompactClone: parsed.isCompactClone,
+      compactSourceSessionId: parsed.compactSourceSessionId,
+      forkDraftContext: null,
+    };
   };
+
+  if (!variant || !memoryKey) {
+    return loadDetail();
+  }
+
+  const loadKey = `${memoryKey}\u0000${sourceSignature}`;
+  const loadPromise = loadDetail()
+    .then((detail) => {
+      void putCachedSessionDetail(
+        profile.id,
+        sessionId,
+        variant,
+        sourceSignature,
+        sourceIdentity,
+        stats.size,
+        detail
+      ).catch((error) => {
+        console.error(`Failed to persist fast session cache for ${sessionId}:`, error);
+      });
+      return detail;
+    })
+    .finally(() => {
+      sessionDetailLoads.delete(loadKey);
+    });
+  sessionDetailLoads.set(loadKey, loadPromise);
+  return loadPromise;
 }
 
 async function waitForSessionReady(
@@ -3384,7 +4564,9 @@ async function waitForSessionReady(
   while (Date.now() - start < timeoutMs) {
     const sessionRecord = await resolveSessionRecord(profile, sessionId);
     if (sessionRecord) {
-      if (!previousUpdatedAt || sessionRecord.updatedAt > previousUpdatedAt) {
+      const stats = await fs.stat(sessionRecord.path).catch(() => null);
+      const currentUpdatedAt = stats?.mtime.toISOString() || sessionRecord.updatedAt;
+      if (!previousUpdatedAt || currentUpdatedAt > previousUpdatedAt) {
         return;
       }
     }
@@ -4115,6 +5297,7 @@ export async function runCodexPrompt(
 
       let stdoutBuffer = '';
       let stderrBuffer = '';
+      let stdoutLineTruncated = false;
       let finalMessage = '';
       let createdSessionId = sessionId || '';
       const stdoutLines: string[] = [];
@@ -4142,8 +5325,12 @@ export async function runCodexPrompt(
           const line = stdoutBuffer.slice(0, newlineIndex).trim();
           stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
 
+          if (stdoutLineTruncated) {
+            stdoutLineTruncated = false;
+            continue;
+          }
           if (!line) continue;
-          stdoutLines.push(line);
+          stdoutLines.push(clipLongText(line, MAX_CODEX_DIAGNOSTIC_LINE));
           if (stdoutLines.length > 120) {
             stdoutLines.splice(0, stdoutLines.length - 120);
           }
@@ -4170,10 +5357,21 @@ export async function runCodexPrompt(
             finalMessage = row.item.text.trim();
           }
         }
+
+        if (stdoutBuffer.length > MAX_CODEX_STDOUT_LINE) {
+          // Tool payloads can contain multi-megabyte single-line JSON. They
+          // are persisted in the Codex JSONL transcript, so the control plane
+          // must not retain an unbounded duplicate while waiting for "\n".
+          stdoutBuffer = '';
+          stdoutLineTruncated = true;
+        }
       });
 
       child.stderr.on('data', (chunk: string) => {
         stderrBuffer += chunk;
+        if (stderrBuffer.length > MAX_CODEX_STDERR_TEXT) {
+          stderrBuffer = stderrBuffer.slice(-MAX_CODEX_STDERR_TEXT);
+        }
       });
 
       child.on('error', (error) => {
@@ -4263,6 +5461,12 @@ export async function runCodexPrompt(
         }
 
         await waitForSessionReady(profile, createdSessionId, previousSession?.updatedAt || null);
+
+        void invalidateSessionCatalog(profile.id, { deletePersisted: false })
+          .then(() => refreshSessionCatalog(profile))
+          .catch((error) => {
+            console.error(`Failed to refresh session catalog after ${createdSessionId}:`, error);
+          });
 
         resolve({
           sessionId: createdSessionId,

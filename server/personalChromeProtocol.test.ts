@@ -10,7 +10,7 @@ import {
 
 test('personal Chrome protocol exposes one typed definition per tool', () => {
   assert.equal(PERSONAL_CHROME_PROTOCOL_VERSION, 1);
-  assert.equal(PERSONAL_CHROME_TOOLS.length, 19);
+  assert.equal(PERSONAL_CHROME_TOOLS.length, 21);
   const names = PERSONAL_CHROME_TOOLS.map((tool) => tool.name);
   assert.equal(new Set(names).size, names.length);
   assert.deepEqual(names.slice(-3), ['dev_port_list', 'dev_port_open', 'dev_port_close']);
@@ -21,18 +21,23 @@ test('personal Chrome protocol exposes one typed definition per tool', () => {
     assert.ok(tool.description.length > 12);
   }
   assert.equal(findPersonalChromeTool('not_a_tool'), null);
+  assert.equal(findPersonalChromeTool('browser_selection_context')?.scope, 'read');
+  assert.equal(findPersonalChromeTool('browser_selection_clear')?.scope, 'write');
 });
 
 test('tool argument validation rejects unknown, malformed, and out-of-range fields', () => {
   const navigate = findPersonalChromeTool('browser_navigate');
   const key = findPersonalChromeTool('browser_key');
   const port = findPersonalChromeTool('dev_port_open');
-  assert.ok(navigate && key && port);
+  const selectionContext = findPersonalChromeTool('browser_selection_context');
+  assert.ok(navigate && key && port && selectionContext);
   assert.equal(validatePersonalChromeToolArguments(navigate, { url: 'https://example.com' }), null);
   assert.match(validatePersonalChromeToolArguments(navigate, {}) || '', /url is required/);
   assert.match(validatePersonalChromeToolArguments(navigate, { url: 'https://example.com', surprise: true }) || '', /surprise is not supported/);
   assert.match(validatePersonalChromeToolArguments(key, { key: 'Enter', repeat: 21 }) || '', /at most 20/);
   assert.match(validatePersonalChromeToolArguments(port, { sourceServerId: 'local', sourcePort: 70000 }) || '', /at most 65535/);
+  assert.equal(validatePersonalChromeToolArguments(selectionContext, { maxSelections: 12, includeHtml: false }), null);
+  assert.match(validatePersonalChromeToolArguments(selectionContext, { maxSelections: 13 }) || '', /at most 12/);
 });
 
 test('approval policy protects consequential and sensitive reads', () => {

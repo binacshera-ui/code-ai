@@ -180,6 +180,7 @@ interface EnqueueCodexQueueInput {
 
 const QUEUE_ROOT = CODEX_APP_CONFIG.queueRoot;
 const STATE_FILE = path.join(QUEUE_ROOT, 'state.json');
+const STATE_BACKUP_FILE = `${STATE_FILE}.bak`;
 const WORKER_POLL_MS = 1500;
 const MAX_PARALLEL_QUEUE_ITEMS = 6;
 const QUEUE_RETENTION_MS = 21 * 24 * 60 * 60 * 1000;
@@ -196,6 +197,7 @@ let state: CodexQueueState = {
 };
 let workerStarted = false;
 let workerTickInFlight = false;
+let workerInterval: NodeJS.Timeout | null = null;
 let stopPolicyRefreshPromise: Promise<void> | null = null;
 let activeWorkerItemIds = new Set<string>();
 let activeWorkerQueueKeys = new Set<string>();
@@ -886,27 +888,202 @@ async function ensureQueueRoot() {
   await fs.mkdir(QUEUE_ROOT, { recursive: true });
 }
 
+function parseQueueState(raw: string): CodexQueueState {
+  const parsed = JSON.parse(raw) as Partial<CodexQueueState> | null;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new SyntaxError('Codex queue state must be a JSON object');
+  }
+
+  return {
+    items: Array.isArray(parsed.items) ? parsed.items : [],
+    sessionBindings: parsed.sessionBindings && typeof parsed.sessionBindings === 'object'
+      ? parsed.sessionBindings as Record<string, string>
+      : {},
+  };
+}
+
+function recoverCompleteQueueItems(raw: string): CodexQueueItem[] | null {
+  const itemsMatch = /"items"\s*:\s*\[/.exec(raw);
+  if (!itemsMatch) {
+    return null;
+  }
+
+  const recovered: CodexQueueItem[] = [];
+  let objectStart = -1;
+  let objectDepth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = itemsMatch.index + itemsMatch[0].length; index < raw.length; index += 1) {
+    const character = raw[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === '\\') {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === '{') {
+      if (objectDepth === 0) {
+        objectStart = index;
+      }
+      objectDepth += 1;
+      continue;
+    }
+    if (character !== '}' || objectDepth === 0) {
+      continue;
+    }
+
+    objectDepth -= 1;
+    if (objectDepth !== 0 || objectStart < 0) {
+      continue;
+    }
+
+    try {
+      const item = JSON.parse(raw.slice(objectStart, index + 1)) as CodexQueueItem;
+      if (item && typeof item === 'object' && typeof item.id === 'string') {
+        recovered.push(item);
+      }
+    } catch {
+      break;
+    }
+    objectStart = -1;
+  }
+
+  return recovered;
+}
+
+function rebuildSessionBindings(
+  items: CodexQueueItem[],
+  base: Record<string, string> = {}
+): Record<string, string> {
+  const bindings = { ...base };
+  for (const item of items) {
+    const queueKey = normalizeSessionBindingKey(item.queueKey);
+    const sessionId = normalizeSessionBindingKey(item.sessionId);
+    if (!queueKey || !sessionId) {
+      continue;
+    }
+    bindings[queueKey] = sessionId;
+    bindings[sessionId] = sessionId;
+  }
+  return bindings;
+}
+
+async function syncQueueDirectory(): Promise<void> {
+  let directoryHandle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    directoryHandle = await fs.open(QUEUE_ROOT, 'r');
+    await directoryHandle.sync();
+  } catch (error: any) {
+    if (error?.code !== 'EINVAL' && error?.code !== 'ENOTSUP' && error?.code !== 'EPERM') {
+      throw error;
+    }
+  } finally {
+    await directoryHandle?.close().catch(() => undefined);
+  }
+}
+
+async function preserveCurrentStateAsBackup(): Promise<void> {
+  const temporaryBackup = `${STATE_BACKUP_FILE}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.link(STATE_FILE, temporaryBackup);
+    try {
+      await fs.rename(temporaryBackup, STATE_BACKUP_FILE);
+    } catch (error: any) {
+      if (error?.code !== 'EEXIST' && error?.code !== 'EPERM') {
+        throw error;
+      }
+      await fs.rm(STATE_BACKUP_FILE, { force: true });
+      await fs.rename(temporaryBackup, STATE_BACKUP_FILE);
+    }
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
+  } finally {
+    await fs.rm(temporaryBackup, { force: true }).catch(() => undefined);
+  }
+}
+
+async function writeStateSnapshot(snapshot: string): Promise<void> {
+  await ensureQueueRoot();
+  const temporaryState = `${STATE_FILE}.${process.pid}.${randomUUID()}.tmp`;
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+
+  try {
+    handle = await fs.open(temporaryState, 'wx', 0o660);
+    await handle.writeFile(snapshot, 'utf-8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+
+    await preserveCurrentStateAsBackup();
+    await fs.rename(temporaryState, STATE_FILE);
+    await syncQueueDirectory();
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await fs.rm(temporaryState, { force: true }).catch(() => undefined);
+  }
+}
+
 async function persistState() {
   const snapshot = JSON.stringify(state, null, 2);
-  persistTail = persistTail.then(async () => {
-    await ensureQueueRoot();
-    await fs.writeFile(STATE_FILE, snapshot, 'utf-8');
-  });
-  await persistTail;
+  const operation = persistTail
+    .catch(() => undefined)
+    .then(() => writeStateSnapshot(snapshot));
+  persistTail = operation;
+  await operation;
 }
 
 async function loadState() {
   await ensureQueueRoot();
-
+  let recoveredFromCorruption = false;
   try {
     const raw = await fs.readFile(STATE_FILE, 'utf-8');
-    const parsed = JSON.parse(raw) as Partial<CodexQueueState>;
-    state = {
-      items: Array.isArray(parsed.items) ? parsed.items : [],
-      sessionBindings: parsed.sessionBindings && typeof parsed.sessionBindings === 'object'
-        ? parsed.sessionBindings as Record<string, string>
-        : {},
-    };
+    try {
+      state = parseQueueState(raw);
+    } catch (primaryError: any) {
+      let backupState: CodexQueueState | null = null;
+      try {
+        backupState = parseQueueState(await fs.readFile(STATE_BACKUP_FILE, 'utf-8'));
+      } catch {
+        backupState = null;
+      }
+
+      const recoveredItems = recoverCompleteQueueItems(raw);
+      if (backupState) {
+        state = {
+          items: backupState.items,
+          sessionBindings: rebuildSessionBindings(backupState.items, backupState.sessionBindings),
+        };
+      } else if (recoveredItems) {
+        state = {
+          items: recoveredItems,
+          sessionBindings: rebuildSessionBindings(recoveredItems),
+        };
+      } else {
+        throw primaryError;
+      }
+
+      const corruptPath = `${STATE_FILE}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`;
+      await fs.rename(STATE_FILE, corruptPath);
+      recoveredFromCorruption = true;
+      console.error('[codex-queue] Recovered invalid queue state', {
+        source: backupState ? STATE_BACKUP_FILE : 'complete-items-prefix',
+        recoveredItems: state.items.length,
+        corruptPath,
+        error: primaryError?.message || String(primaryError),
+      });
+    }
   } catch (error: any) {
     if (error?.code !== 'ENOENT') {
       throw error;
@@ -918,7 +1095,7 @@ async function loadState() {
   }
 
   const now = Date.now();
-  let changed = false;
+  let changed = recoveredFromCorruption;
 
   state.items = state.items
     .filter((item) => {
@@ -1995,10 +2172,20 @@ export async function startCodexQueueWorker() {
   }
 
   workerStarted = true;
-  setInterval(() => {
+  workerInterval = setInterval(() => {
     void tickWorker();
   }, WORKER_POLL_MS);
+  workerInterval.unref?.();
   scheduleImmediateTick();
+}
+
+export async function shutdownCodexQueueWorker(): Promise<void> {
+  if (workerInterval) {
+    clearInterval(workerInterval);
+    workerInterval = null;
+  }
+  workerStarted = false;
+  await persistTail.catch(() => undefined);
 }
 
 export async function listCodexQueueItems(profileId?: string): Promise<CodexQueueItem[]> {

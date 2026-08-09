@@ -64,8 +64,10 @@ test('stdio MCP lists tools and forwards authenticated calls', async (t) => {
   assert.equal((await waitForId(1)).result.serverInfo.name, 'code-ai-personal-chrome');
   request({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
   const tools = (await waitForId(2)).result.tools;
-  assert.equal(tools.length, 19);
+  assert.equal(tools.length, 21);
   assert.ok(tools.some((tool) => tool.name === 'browser_key'));
+  assert.ok(tools.some((tool) => tool.name === 'browser_selection_context'));
+  assert.ok(tools.some((tool) => tool.name === 'browser_selection_clear'));
   request({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'browser_status', arguments: {} } });
   const call = await waitForId(3);
   assert.equal(call.result.isError, false);

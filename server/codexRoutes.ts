@@ -14,6 +14,7 @@ import {
   CodexSessionSummary,
   CodexUploadedAttachment,
   CODEX_UPLOAD_ROOT,
+  subscribeCodexSessionChanges,
 } from './codexService.js';
 import {
   createAgentForkSession,
@@ -25,6 +26,7 @@ import {
   getAgentRateLimitSnapshot,
   getAgentSessionDetail,
   getAvailableProfiles,
+  getProviderForProfile,
   listAgentSessions,
   runAgentPrompt,
   updateAgentExecutionDefaults,
@@ -201,6 +203,10 @@ import {
   deleteSessionFinalNotificationPreference,
   rebindSessionFinalNotificationPreference,
 } from './codexFinalNotifications.js';
+import {
+  exportSharedConversations,
+  MAX_SHARED_CONVERSATIONS,
+} from './codexConversationShare.js';
 import {
   buildSupportPromptEnvelope,
   deleteSupportSessionRecord,
@@ -519,7 +525,8 @@ async function resolveEffectiveSessionId(sessionId: string): Promise<string> {
 async function loadAgentLinkedSessionSummaries(
   sourceProfileId: string,
   query: string,
-  limit?: number
+  limit?: number,
+  options?: { allowExtendedLimit?: boolean },
 ): Promise<CodexSessionSummary[]> {
   const links = await listAgentSessionLinksForSourceProfile(sourceProfileId);
   if (links.length === 0) {
@@ -539,7 +546,12 @@ async function loadAgentLinkedSessionSummaries(
   }));
 
   const results = await Promise.all(profileIds.map(async (profileId) => (
-    listAgentSessions(profileId, query, limit ? Math.max(limit * 4, 80) : 160)
+    listAgentSessions(
+      profileId,
+      query,
+      limit ? Math.max(limit * 4, 80) : 160,
+      options,
+    )
   )));
 
   return results
@@ -2196,6 +2208,63 @@ router.get('/sessions', requireCodexAccess, async (req, res) => {
   }
 });
 
+router.get('/sessions/share-candidates', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : undefined;
+    const query = typeof req.query.query === 'string' ? req.query.query.trim().slice(0, 500) : '';
+    const requestedOffset = typeof req.query.offset === 'string'
+      ? Number.parseInt(req.query.offset, 10)
+      : 0;
+    const requestedLimit = typeof req.query.limit === 'string'
+      ? Number.parseInt(req.query.limit, 10)
+      : 60;
+    const offset = Number.isFinite(requestedOffset) ? Math.max(0, requestedOffset) : 0;
+    const pageSize = Number.isFinite(requestedLimit)
+      ? Math.min(100, Math.max(1, requestedLimit))
+      : 60;
+
+    if (!profileId || !findConfiguredProfile(profileId)) {
+      res.status(404).json({ error: 'הפרופיל שנבחר לא קיים.' });
+      return;
+    }
+
+    const requestedCount = offset + pageSize + 1;
+    const [primarySessions, linkedSessions] = await Promise.all([
+      listAgentSessions(profileId, query, requestedCount, { allowExtendedLimit: true }),
+      loadAgentLinkedSessionSummaries(profileId, query, requestedCount, { allowExtendedLimit: true }),
+    ]);
+    const mergedSessionMap = new Map<string, CodexSessionSummary>();
+    for (const session of [...primarySessions, ...linkedSessions]) {
+      mergedSessionMap.set(session.id, session);
+    }
+    const sortedSessions = [...mergedSessionMap.values()]
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    const pageRows = sortedSessions.slice(offset, offset + pageSize);
+    const sessions = await decorateSessionSummaryListForClient(profileId, pageRows);
+    const [hiddenIds, topicMap, titleMap] = await Promise.all([
+      listHiddenSessionIds(profileId),
+      getSessionTopicMap(profileId),
+      getSessionTitleMap(profileId),
+    ]);
+    const hasMore = sortedSessions.length > offset + pageSize;
+
+    res.json({
+      sessions: sessions.map((session) => ({
+        ...session,
+        title: titleMap[session.id] || session.title,
+        hidden: hiddenIds.has(session.id),
+        topic: topicMap[session.id] || null,
+      })),
+      hasMore,
+      nextOffset: hasMore ? offset + pageRows.length : null,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load conversation share candidates' });
+  }
+});
+
 router.post('/sessions/copy', requireCodexAccess, async (req, res) => {
   try {
     const sourceProfileId = typeof req.body?.sourceProfileId === 'string' && req.body.sourceProfileId.trim()
@@ -2290,6 +2359,64 @@ router.post('/sessions/copy', requireCodexAccess, async (req, res) => {
     });
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to copy sessions between users' });
+  }
+});
+
+router.post('/sessions/share-as-markdown', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionIds = Array.isArray(req.body?.sessionIds)
+      ? req.body.sessionIds
+        .filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+        .map((value: string) => value.trim())
+      : [];
+    const targetSessionId = typeof req.body?.targetSessionId === 'string' && req.body.targetSessionId.trim()
+      ? req.body.targetSessionId.trim()
+      : null;
+
+    if (!profileId || sessionIds.length === 0) {
+      res.status(400).json({ error: 'Profile id and at least one session id are required' });
+      return;
+    }
+    if (!findConfiguredProfile(profileId)) {
+      res.status(404).json({ error: 'הפרופיל שנבחר לא קיים.' });
+      return;
+    }
+    if (sessionIds.length > MAX_SHARED_CONVERSATIONS) {
+      res.status(400).json({ error: `אפשר לשתף עד ${MAX_SHARED_CONVERSATIONS} שיחות בכל פעולה.` });
+      return;
+    }
+    if (targetSessionId) {
+      const [resolvedTargetSessionId, ...resolvedSourceSessionIds] = await Promise.all([
+        resolveEffectiveSessionId(targetSessionId),
+        ...sessionIds.map((sessionId) => resolveEffectiveSessionId(sessionId)),
+      ]);
+      if (resolvedSourceSessionIds.includes(resolvedTargetSessionId)) {
+        res.status(400).json({ error: 'אי אפשר לצרף שיחה לעצמה. בחר שיחה אחרת.' });
+        return;
+      }
+    }
+
+    const exports = await exportSharedConversations(profileId, sessionIds, targetSessionId, {
+      loadSessionDetail: async (sessionId, visibleProfileId) => {
+        const effectiveProfileId = await resolveEffectiveProfileIdForSession(visibleProfileId, sessionId);
+        const resolvedSessionId = await resolveEffectiveSessionId(sessionId);
+        const session = await getAgentSessionDetail(resolvedSessionId, effectiveProfileId, { full: true });
+        return {
+          ...session,
+          profileId: visibleProfileId,
+        };
+      },
+    });
+
+    res.status(201).json({
+      files: exports.map((item) => item.attachment),
+      exports,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to export shared conversations' });
   }
 });
 
@@ -2416,6 +2543,105 @@ router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
     res.json(await deleteSessionPermanently(requestedProfileId || profileId, sessionId));
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to delete session permanently' });
+  }
+});
+
+router.get('/sessions/:sessionId/events', requireCodexAccess, async (req, res) => {
+  let closeSubscription: (() => void) | null = null;
+  let heartbeat: NodeJS.Timeout | null = null;
+
+  try {
+    const requestedSessionId = readRouteParam(req.params.sessionId);
+    const sessionId = await resolveEffectiveSessionId(requestedSessionId);
+    const requestedProfileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const requestedKnownTimelineEntries = typeof req.query.knownTimelineEntries === 'string'
+      ? Number.parseInt(req.query.knownTimelineEntries, 10)
+      : 0;
+    let streamKnownTimelineEntries = Number.isFinite(requestedKnownTimelineEntries)
+      ? Math.max(0, requestedKnownTimelineEntries)
+      : 0;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+    if (!profileId || getProviderForProfile(profileId) !== 'codex') {
+      res.status(409).json({ error: 'Live session streaming is currently available for Codex sessions' });
+      return;
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const sendEvent = (event: string, payload: unknown) => {
+      if (res.writableEnded || res.destroyed) return;
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    let snapshotGeneration = 0;
+    const sendLatestSnapshot = (revision: unknown) => {
+      const generation = ++snapshotGeneration;
+      sendEvent('session-changed', revision);
+      void getAgentSessionDetail(sessionId, profileId, { tail: 120 })
+        .then((session) => {
+          if (generation === snapshotGeneration) {
+            const growth = session.totalTimelineEntries - streamKnownTimelineEntries;
+            const canSendTailPatch = streamKnownTimelineEntries > 0 && growth >= 0;
+            const streamedTailSize = Math.min(120, Math.max(16, growth + 8));
+            const streamedSession = canSendTailPatch && session.timeline.length > streamedTailSize
+              ? {
+                ...session,
+                messages: [],
+                timeline: session.timeline.slice(-streamedTailSize),
+                timelineWindowStart: Math.max(0, session.totalTimelineEntries - streamedTailSize),
+                timelineWindowEnd: session.totalTimelineEntries,
+                hasEarlierTimeline: session.totalTimelineEntries > streamedTailSize,
+              }
+              : session;
+            streamKnownTimelineEntries = session.totalTimelineEntries;
+            sendEvent('session-snapshot', {
+              mode: streamedSession === session ? 'full' : 'tail',
+              session: streamedSession,
+            });
+          }
+        })
+        .catch((error) => {
+          console.error(`Failed to stream live session snapshot for ${sessionId}:`, error);
+        });
+    };
+
+    const subscription = await subscribeCodexSessionChanges(
+      sessionId,
+      profileId,
+      sendLatestSnapshot
+    );
+    closeSubscription = subscription.close;
+    sendEvent('ready', subscription.initialRevision);
+
+    heartbeat = setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(': keep-alive\n\n');
+      }
+    }, 15_000);
+    heartbeat.unref?.();
+
+    req.once('close', () => {
+      if (heartbeat) clearInterval(heartbeat);
+      closeSubscription?.();
+      heartbeat = null;
+      closeSubscription = null;
+    });
+  } catch (error: any) {
+    if (heartbeat) clearInterval(heartbeat);
+    closeSubscription?.();
+    if (!res.headersSent) {
+      res.status(404).json({ error: error.message || 'Session was not found' });
+      return;
+    }
+    if (!res.writableEnded) {
+      res.end();
+    }
   }
 });
 

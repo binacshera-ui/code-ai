@@ -8,12 +8,18 @@ module.exports = {
       instances: 1,
       autorestart: true,
       watch: false,
-      // The code-ai process can legitimately spike above 500M while loading
-      // profiles, sessions, and queue state. Keep PM2 from killing active
-      // requests during normal workload bursts.
-      max_memory_restart: '2G',
+      // code-ai is the central development workspace and legitimately handles
+      // several concurrent agents plus very large session histories. Keep a
+      // generous host-safety ceiling instead of the former 2G tripwire, which
+      // was low enough to interrupt normal work.
+      max_memory_restart: '12G',
+      // Give the HTTP server and durable queue writer time to drain before
+      // PM2 escalates a memory restart from SIGINT to SIGKILL.
+      kill_timeout: 15_000,
       interpreter: 'node',
-      interpreter_args: '--env-file=.env',
+      // Allow V8 to use a large heap when required. PM2's 12G RSS ceiling still
+      // protects the rest of the host from a runaway parent process.
+      interpreter_args: '--env-file=.env --max-old-space-size=8192',
       env: {
         NODE_ENV: process.env.NODE_ENV || 'production',
         PORT: process.env.PORT || 4000,

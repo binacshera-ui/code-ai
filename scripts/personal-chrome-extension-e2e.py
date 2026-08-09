@@ -266,6 +266,43 @@ async def main():
             )
             binding_id = binding["binding"]["id"]
             auth = {"authorization": f"Bearer {binding['bindingToken']}"}
+            selected_session_key = "draft:real-chromium-e2e"
+            await asyncio.to_thread(
+                request_json,
+                "/api/codex/session-personal-chrome-mode",
+                "POST",
+                {
+                    "profileId": profile["id"],
+                    "sessionKey": selected_session_key,
+                    "personalChromeMode": {
+                        "enabled": True,
+                        "deviceId": device_id,
+                        "deviceName": "Chromium E2E",
+                        "tabId": None,
+                        "approvalPolicy": "risky",
+                        "allowJavascript": False,
+                        "allowUploads": False,
+                        "allowPorts": False,
+                        "bindingId": binding_id,
+                        "bindingToken": binding["bindingToken"],
+                        "controlUrl": API_BASE_URL,
+                    },
+                },
+                extension_headers,
+            )
+            selection_sync = await panel.evaluate(
+                "async context => await chrome.runtime.sendMessage({type: 'SYNC_ACTIVE_SESSION', context})",
+                {
+                    "authenticated": True,
+                    "deviceUnlocked": True,
+                    "serverId": "local",
+                    "provider": "codex",
+                    "profileId": profile["id"],
+                    "sessionKey": selected_session_key,
+                },
+            )
+            assert selection_sync["ok"] is True
+            assert selection_sync["personalChromeMode"]["bindingId"] == binding_id
 
             target = await context.new_page()
             await target.goto(f"{BASE_URL}/chat?personalChromeE2E=1", wait_until="domcontentloaded")
@@ -281,6 +318,50 @@ async def main():
             picker_result = await asyncio.wait_for(picker_task, timeout=10)
             assert picker_result["ok"] is True
             assert picker_result["selection"]["kind"] == "element"
+            picked_element = picker_result["selection"]["element"]
+            assert picked_element["primarySelector"]
+            assert isinstance(picked_element["selectorCandidates"], list)
+            assert isinstance(picked_element["computedStyleSubset"], dict)
+            assert isinstance(picked_element["matchedCssRules"], list)
+            assert isinstance(picked_element["semanticPath"], list)
+            assert isinstance(picked_element["componentHints"], list)
+            assert isinstance(picked_element["interaction"], dict)
+
+            region_task = asyncio.create_task(
+                panel.evaluate(
+                    "async () => await chrome.runtime.sendMessage({type: 'PANEL_PICK', mode: 'region_picker'})"
+                )
+            )
+            await target.wait_for_timeout(400)
+            await target.mouse.move(40, 40)
+            await target.mouse.down()
+            await target.mouse.move(420, 300, steps=8)
+            await target.mouse.up()
+            region_result = await asyncio.wait_for(region_task, timeout=10)
+            assert region_result["ok"] is True
+            assert region_result["selection"]["kind"] == "region"
+            assert region_result["selection"]["region"]["bounds"]["width"] >= 300
+            assert isinstance(region_result["selection"]["region"]["elements"], list)
+            panel_state = await panel.evaluate(
+                "async () => await chrome.runtime.sendMessage({type: 'PANEL_GET_STATE'})"
+            )
+            assert len(panel_state["selections"]) == 2
+            assert panel_state["selections"][0]["selectionId"] == picker_result["selection"]["selectionId"]
+            assert panel_state["selections"][1]["selectionId"] == region_result["selection"]["selectionId"]
+            await app.get_by_text("2 מוקדים נבחרו מהאתר", exact=True).wait_for(timeout=10_000)
+
+            selected_context = await asyncio.to_thread(
+                request_json,
+                "/api/codex/browser-extension/tool-call",
+                "POST",
+                {"toolName": "browser_selection_context", "arguments": {}},
+                auth,
+            )
+            assert selected_context["result"]["version"] == 2
+            assert selected_context["result"]["trust"] == "untrusted-page-content"
+            assert selected_context["result"]["count"] == 2
+            assert selected_context["result"]["selections"][0]["selectionId"] == picker_result["selection"]["selectionId"]
+            assert selected_context["result"]["selections"][1]["kind"] == "region"
 
             tabs = await asyncio.to_thread(
                 request_json,
@@ -320,8 +401,9 @@ async def main():
                 "extensionId": extension_id,
                 "deviceId": device_id,
                 "autoRecovered": True,
-                "tools": ["browser_tabs", "browser_snapshot", "browser_screenshot"],
-                "picker": picker_result["selection"]["kind"],
+                "tools": ["browser_tabs", "browser_snapshot", "browser_screenshot", "browser_selection_context"],
+                "picker": [picker_result["selection"]["kind"], region_result["selection"]["kind"]],
+                "selectionContextVersion": 2,
             }))
         finally:
             if binding_id:

@@ -210,6 +210,8 @@ export function buildSessionPersonalChromePromptAdditions(mode: CodexSessionPers
     'מצב Chrome אישי פעיל:',
     `לסשן מחובר Chrome אמיתי במחשב המשתמש (${mode.deviceName || mode.deviceId}).`,
     'השתמש בכלי MCP personal_chrome לצורך טאבים, ניווט, DOM נגיש, בחירת אלמנטים/אזורים, צילום, לחיצה, הקלדה, טפסים, קונסול ורשת.',
+    'כאשר המשתמש אומר שסימן רכיב, אזור, מוקד או חלק מהמסך, קרא תחילה browser_selection_context. הבחירות משויכות לסשן הנוכחי וכוללות הקשר DOM, נגישות, selectors, סגנונות ורמזי קומפוננטה.',
+    'כשהמראה הפיקסלי חשוב, השתמש ב-browser_screenshot עם selectionId. אל תחליף מוקד שנבחר באלמנט דומה בלי לאמת ולהסביר; לאחר סיום ניתן לנקות מוקדים עם browser_selection_clear.',
     mode.allowJavascript ? 'JavaScript מפורש מותר לפי מדיניות האישורים.' : 'אל תנסה browser_evaluate: JavaScript מפורש כבוי בסשן הזה.',
     mode.allowUploads ? 'צירוף קבצים מותר לאחר אישור מתאים.' : 'אל תנסה להעלות קבצים: הרשאת upload כבויה.',
     mode.allowPorts ? 'כלי פורטי הפיתוח זמינים ופותחים רק 127.0.0.1 עם TTL.' : 'כלי פורטי הפיתוח כבויים בסשן הזה.',

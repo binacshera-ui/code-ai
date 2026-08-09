@@ -96,6 +96,7 @@ function setStatus(status) {
       ? 'CODE-AI פתוח · כלי הדפדפן מתחברים…'
       : 'CODE-AI פתוח · נדרש אישור מכשיר חד־פעמי';
   postToApp({ type: 'code-ai:extension-status', ...status });
+  if (status.connected) postToApp({ type: 'code-ai:extension-request-context' });
 }
 
 function publishExtensionBootstrap() {
@@ -128,6 +129,9 @@ async function initialize() {
   settings = response.settings || settings;
   setStatus(response);
   renderApproval(response.pendingApproval || null);
+  if (Array.isArray(response.selections)) {
+    postToApp({ type: 'code-ai:extension-selections', selections: response.selections });
+  }
 }
 
 async function enrollFromApp(message) {
@@ -158,7 +162,7 @@ async function syncContext(context) {
   if (!context?.authenticated || !context?.deviceUnlocked || context.provider !== 'codex') return;
   if (!bridgeStatus.paired) return;
   const contextKey = `${context.serverId || 'local'}:${context.profileId || ''}:${context.sessionKey || ''}`;
-  if (!context.profileId || !context.sessionKey || contextKey === lastContextKey) return;
+  if (!context.profileId || !context.sessionKey) return;
   lastContextKey = contextKey;
   try {
     const response = await sendRuntimeMessage({ type: 'SYNC_ACTIVE_SESSION', context });
@@ -172,6 +176,9 @@ async function syncContext(context) {
         personalChromeMode: response.personalChromeMode,
       });
     }
+    if (Array.isArray(response.selections)) {
+      postToApp({ type: 'code-ai:extension-selections', selections: response.selections });
+    }
   } catch (error) {
     lastContextKey = '';
     showNotice(error.message || String(error), 'error');
@@ -181,7 +188,10 @@ async function syncContext(context) {
 document.querySelector('#pick-element').addEventListener('click', async () => {
   try {
     const response = await sendRuntimeMessage({ type: 'PANEL_PICK', mode: 'element_picker' });
-    showNotice(response?.ok ? `נבחר רכיב: ${response.selection?.name || response.selection?.selector || 'רכיב בדף'}` : response?.error || 'הבחירה בוטלה', response?.ok ? 'success' : 'error');
+    if (response?.ok && Array.isArray(response.selections)) {
+      postToApp({ type: 'code-ai:extension-selections', selections: response.selections });
+    }
+    showNotice(response?.ok ? `נבחר מוקד: ${response.selection?.element?.accessibleName || response.selection?.element?.primarySelector || 'רכיב בדף'}` : response?.error || 'הבחירה בוטלה', response?.ok ? 'success' : 'error');
   } catch (error) {
     showNotice(error.message || String(error), 'error');
   }
@@ -190,6 +200,9 @@ document.querySelector('#pick-element').addEventListener('click', async () => {
 document.querySelector('#pick-region').addEventListener('click', async () => {
   try {
     const response = await sendRuntimeMessage({ type: 'PANEL_PICK', mode: 'region_picker' });
+    if (response?.ok && Array.isArray(response.selections)) {
+      postToApp({ type: 'code-ai:extension-selections', selections: response.selections });
+    }
     showNotice(response?.ok ? 'האזור נבחר ונשמר לסשן הדפדפן.' : response?.error || 'הבחירה בוטלה', response?.ok ? 'success' : 'error');
   } catch (error) {
     showNotice(error.message || String(error), 'error');
@@ -259,13 +272,27 @@ window.addEventListener('message', (event) => {
     showNotice(message.error || 'יש לאשר את התקנת התוסף פעם אחת מתוך CODE-AI.', 'error');
   }
   if (message.type === 'code-ai:extension-context') void syncContext(message);
+  if (message.type === 'code-ai:extension-clear-selections') {
+    void sendRuntimeMessage({ type: 'PANEL_CLEAR_SELECTIONS' })
+      .then((response) => postToApp({ type: 'code-ai:extension-selections', selections: response.selections || [] }))
+      .catch((error) => showNotice(error.message || String(error), 'error'));
+  }
+  if (message.type === 'code-ai:extension-remove-selection') {
+    void sendRuntimeMessage({ type: 'PANEL_REMOVE_SELECTION', selectionId: message.selectionId })
+      .then((response) => postToApp({ type: 'code-ai:extension-selections', selections: response.selections || [] }))
+      .catch((error) => showNotice(error.message || String(error), 'error'));
+  }
 });
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'BRIDGE_STATUS') setStatus(message.status);
   if (message?.type === 'APPROVAL_REQUEST') renderApproval(message.approval);
   if (message?.type === 'SELECTION_COMPLETE') {
-    showNotice(message.selection?.kind === 'region' ? 'האזור נבחר ונשמר.' : `נבחר רכיב: ${message.selection?.name || message.selection?.selector || 'רכיב בדף'}`, 'success');
+    showNotice(message.selection?.kind === 'region' ? 'האזור נבחר ונשמר.' : `נבחר מוקד: ${message.selection?.element?.accessibleName || message.selection?.element?.primarySelector || 'רכיב בדף'}`, 'success');
+    postToApp({ type: 'code-ai:extension-selections', selections: message.selections || (message.selection ? [message.selection] : []) });
+  }
+  if (message?.type === 'SELECTIONS_CHANGED') {
+    postToApp({ type: 'code-ai:extension-selections', selections: message.selections || [] });
   }
 });
 
