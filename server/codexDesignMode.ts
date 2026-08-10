@@ -813,7 +813,7 @@ async function prepareCanvasReference(
     '--output', target,
     '--x', String(values[0]), '--y', String(values[1]),
     '--width', String(values[2]), '--height', String(values[3]),
-  ], { timeout: 30_000, maxBuffer: 512 * 1024 });
+  ], { timeout: 30_000, maxBuffer: 512 * 1024, windowsHide: true });
   return { path: target, label: `cropped user canvas (${values.join(', ')})` };
 }
 

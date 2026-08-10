@@ -793,6 +793,7 @@ class BrowserViewerBridge {
           ...this.launch.env,
         },
         stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
       });
       this.process = child;
 

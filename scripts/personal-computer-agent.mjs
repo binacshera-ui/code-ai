@@ -133,6 +133,7 @@ function runBuild() {
     cwd: APP_ROOT,
     stdio: 'inherit',
     shell: process.platform === 'win32',
+    windowsHide: true,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`Build failed with status ${result.status}`);

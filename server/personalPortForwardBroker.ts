@@ -191,7 +191,7 @@ async function startRecord(record: PersonalPortForwardRecord): Promise<void> {
       '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
       '-L', `127.0.0.1:${relayPort}:127.0.0.1:${record.sourcePort}`,
       source.sshTarget,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     try {
       await waitForSshReady(relay, `Relay for ${record.sourceServerId}:${record.sourcePort}`);
     } catch (error) {
@@ -206,7 +206,7 @@ async function startRecord(record: PersonalPortForwardRecord): Promise<void> {
     '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
     '-R', `127.0.0.1:${record.personalPort}:127.0.0.1:${relayPort}`,
     PERSONAL_SSH_TARGET,
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
 
   try {
     await waitForSshReady(reverse, `Personal port ${record.personalPort}`);

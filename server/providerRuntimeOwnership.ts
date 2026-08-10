@@ -105,6 +105,7 @@ function recursivelyChown(targetPath: string, uid: number, gid: number): void {
   const result = spawnSync('chown', args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf-8',
+    windowsHide: true,
   });
 
   if (result.error || result.status !== 0) {

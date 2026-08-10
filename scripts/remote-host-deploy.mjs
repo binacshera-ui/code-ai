@@ -12,6 +12,14 @@ const DEFAULT_REGISTRY = path.join(APP_ROOT, '.code-ai', 'remote-hosts.json');
 const SAFE_ID = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 const SAFE_SSH_TARGET = /^[a-zA-Z0-9_.:@-]+$/;
 const SAFE_REMOTE_PATH = /^\/[a-zA-Z0-9_./-]+$/;
+const REMOTE_RUNTIME_ASSETS = [
+  'server/browser-mode',
+  'server/design-mode',
+  'server/personal-chrome',
+  'server/ux-mode',
+  'skills/gemini-design-partner',
+  'skills/gemini-ux-partner',
+];
 
 function printUsage() {
   console.log(`Usage:
@@ -200,6 +208,23 @@ async function main() {
     `${path.join(APP_ROOT, 'dist')}/`,
     `${options.sshTarget}:${options.remoteDir}/dist/`,
   ]);
+  for (const relativePath of REMOTE_RUNTIME_ASSETS) {
+    const sourcePath = path.join(APP_ROOT, relativePath);
+    if (!existsSync(sourcePath)) {
+      throw new Error(`Required remote runtime asset is missing: ${relativePath}`);
+    }
+    const remotePath = `${options.remoteDir}/${relativePath}`;
+    run('ssh', [
+      options.sshTarget,
+      `install -d -m 755 ${shellQuote(remotePath)}`,
+    ]);
+    run('rsync', [
+      '-az',
+      '--delete',
+      `${sourcePath}/`,
+      `${options.sshTarget}:${remotePath}/`,
+    ]);
+  }
   run('rsync', [
     '-az',
     path.join(APP_ROOT, 'package.json'),

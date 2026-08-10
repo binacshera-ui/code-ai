@@ -368,6 +368,7 @@ async function startSshTunnel(host: RemoteHostConfig, state: HostRuntimeState): 
     host.sshTarget,
   ], {
     stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
   });
   child.stdin.end();
 

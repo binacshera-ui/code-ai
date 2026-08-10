@@ -1855,6 +1855,7 @@ export async function runGeminiEphemeralDesignPrompt(
       cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
       ...getProfileSpawnIdentity(profile),
     });
     let stdoutBuffer = '';
@@ -2035,6 +2036,7 @@ export async function runGeminiPrompt(
           cwd: runCwd,
           env,
           stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
           ...getProfileSpawnIdentity(profile),
         });
 

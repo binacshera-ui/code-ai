@@ -823,6 +823,7 @@ async function readClaudeAuthStatus(profile: CodexProfile): Promise<ClaudeAuthSt
     maxBuffer: 1024 * 1024,
     timeout: 10_000,
     killSignal: 'SIGKILL',
+    windowsHide: true,
     ...getProfileSpawnIdentity(profile),
   });
 
@@ -2195,6 +2196,7 @@ export async function runClaudePrompt(
         cwd: runCwd,
         env: buildClaudeProcessEnv(profile),
         stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
         ...getProfileSpawnIdentity(profile),
       });
       const activeRunId = options.runId;

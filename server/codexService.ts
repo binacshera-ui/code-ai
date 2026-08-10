@@ -4711,6 +4711,7 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
     env,
     encoding: 'utf-8',
     maxBuffer: 12 * 1024 * 1024,
+    windowsHide: true,
     ...getProfileSpawnIdentity(profile),
   });
 
@@ -5279,6 +5280,7 @@ export async function runCodexPrompt(
             preparedPersonalChromeMode?.envCodeXHome || preparedBrowserMode?.envCodeXHome || preparedUxMode?.envCodeXHome || preparedDesignMode?.envCodeXHome || null,
           ),
           stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
           ...getProfileSpawnIdentity(profile),
         });
       } catch (spawnError) {

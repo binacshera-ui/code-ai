@@ -1700,6 +1700,7 @@ router.get('/remote-agent/health', requireCodexAccess, async (_req, res) => {
       const result = await execFileAsync(process.env.CODEX_BIN?.trim() || 'codex', ['--version'], {
         timeout: 3_000,
         maxBuffer: 256 * 1024,
+        windowsHide: true,
       });
       codexVersion = String(result.stdout || result.stderr || '').trim() || null;
     } catch {

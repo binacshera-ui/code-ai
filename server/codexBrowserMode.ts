@@ -322,6 +322,7 @@ function canRunPython(candidate: string): boolean {
   ], {
     encoding: 'utf-8',
     timeout: 15000,
+    windowsHide: true,
   });
 
   return probe.status === 0;
