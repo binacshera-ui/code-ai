@@ -152,6 +152,10 @@ import {
   replaceCurrentSessionRoute,
   type SessionRoute,
 } from '@/sessionRoute';
+import {
+  buildTimelineRenderBlocks,
+  flattenTimelineRenderBlocks,
+} from './timelinePresentation';
 
 const IS_WORKBENCH_EMBED = typeof window !== 'undefined'
   && window.parent !== window
@@ -4434,41 +4438,6 @@ function isTextualPreviewKind(preview: Pick<CodexFilePreview, 'previewKind'>) {
   return preview.previewKind === 'markdown'
     || preview.previewKind === 'code'
     || preview.previewKind === 'text';
-}
-
-type TimelineRenderBlock =
-  | { type: 'entry'; entry: CodexTimelineEntry }
-  | { type: 'tool-row'; id: string; entries: CodexTimelineEntry[] };
-
-function buildTimelineRenderBlocks(timeline: CodexTimelineEntry[]): TimelineRenderBlock[] {
-  const blocks: TimelineRenderBlock[] = [];
-  let pendingTools: CodexTimelineEntry[] = [];
-
-  const flushPendingTools = () => {
-    if (pendingTools.length === 0) {
-      return;
-    }
-
-    blocks.push({
-      type: 'tool-row',
-      id: `${pendingTools[0]?.id || 'tool'}-${pendingTools[pendingTools.length - 1]?.id || pendingTools.length}`,
-      entries: pendingTools,
-    });
-    pendingTools = [];
-  };
-
-  for (const entry of timeline) {
-    if (entry.entryType === 'tool') {
-      pendingTools.push(entry);
-      continue;
-    }
-
-    flushPendingTools();
-    blocks.push({ type: 'entry', entry });
-  }
-
-  flushPendingTools();
-  return blocks;
 }
 
 function collapseTimelineForDisplay(timeline: CodexTimelineEntry[]): CodexTimelineEntry[] {
@@ -13950,8 +13919,12 @@ export function CodexMobileApp() {
     () => buildTimelineRenderBlocks(displayTimeline),
     [displayTimeline]
   );
+  const visibleTimelineEntries = useMemo(
+    () => flattenTimelineRenderBlocks(timelineBlocks),
+    [timelineBlocks]
+  );
   const transcriptSignature = useMemo(() => {
-    const timelineTail = renderedTimeline
+    const timelineTail = visibleTimelineEntries
       .slice(-8)
       .map((entry) => `${entry.id}:${entry.entryType}:${entry.timestamp}`)
       .join('|');
@@ -13960,11 +13933,11 @@ export function CodexMobileApp() {
       selectedSessionId || draftConversationKey,
       forkDraftContext?.sourceSessionId || '',
       forkDraftContext?.forkEntryId || '',
-      totalTimelineLength,
+      visibleTimelineEntries.length,
       timelineTail,
       isSending ? 'sending' : 'idle',
     ].join('::');
-  }, [draftConversationKey, forkDraftContext?.forkEntryId, forkDraftContext?.sourceSessionId, isSending, renderedTimeline, selectedSessionId, totalTimelineLength]);
+  }, [draftConversationKey, forkDraftContext?.forkEntryId, forkDraftContext?.sourceSessionId, isSending, selectedSessionId, visibleTimelineEntries]);
 
   useEffect(() => {
     setQueuePanelStage('closed');
