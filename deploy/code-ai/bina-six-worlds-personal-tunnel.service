@@ -1,0 +1,16 @@
+[Unit]
+Description=Bina Cshera six worlds persistent personal-computer tunnel
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ClearAllForwardings=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -R 127.0.0.1:4177:127.0.0.1:4177 -R 127.0.0.1:4178:127.0.0.1:4178 -R 127.0.0.1:4179:127.0.0.1:4179 -R 127.0.0.1:4180:127.0.0.1:4180 -R 127.0.0.1:4181:127.0.0.1:4181 -R 127.0.0.1:4182:127.0.0.1:4182 personal-windows-ssh
+Restart=always
+RestartSec=5s
+TimeoutStopSec=10s
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

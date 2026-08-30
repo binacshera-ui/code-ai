@@ -1,0 +1,6726 @@
+import { createHmac, timingSafeEqual, randomUUID } from 'crypto';
+import { execFile } from 'child_process';
+import { promises as fs } from 'fs';
+import { hostname } from 'os';
+import path from 'path';
+import { promisify } from 'util';
+import { Router, Request, Response, NextFunction } from 'express';
+import multer from 'multer';
+import type { AppMode, AppProvider } from './config.js';
+import {
+  copyCodexSessionToProfile,
+  CodexExecutionConfig,
+  CodexSessionDetail,
+  CodexSessionSummary,
+  CodexUploadedAttachment,
+  CODEX_UPLOAD_ROOT,
+  subscribeCodexSessionChanges,
+} from './codexService.js';
+import {
+  createAgentForkSession,
+  deleteAgentTurn,
+  deleteAgentSession,
+  getAgentSessionChangeRecord,
+  getAgentModelCatalog,
+  getAgentMultiAgentSnapshot,
+  getAgentRateLimitSnapshot,
+  getAgentSessionDetail,
+  getAvailableProfiles,
+  getProviderForProfile,
+  listAgentSessions,
+  runAgentPrompt,
+  updateAgentExecutionDefaults,
+  updateAgentMultiAgentMode,
+  updateAgentPermissionMode,
+  updateAgentResponseSpeed,
+} from './agentService.js';
+import { CLIENT_CRASH_LOG } from './codexCrashLogs.js';
+import {
+  cancelCodexQueueItem,
+  clearCodexQueueItemStopSchedule,
+  deleteCodexQueueItem,
+  enqueueCodexQueueItem,
+  getCodexQueueItem,
+  getCodexQueueItemSession,
+  listCodexQueueItems,
+  listCodexQueueWorkspaceItems,
+  resolveCodexQueueSessionId,
+  retryCodexQueueItem,
+  setCodexQueueItemStopSchedule,
+} from './codexQueue.js';
+import { CODEX_APP_CONFIG } from './config.js';
+import { appendCodexFileLog, readRecentCodexFileLogs } from './codexFileLogs.js';
+import { MAX_PREVIEW_FILE_BYTES, resolveCodexFileTarget } from './codexFileResolver.js';
+import { browseCodexFileTree } from './codexFileTree.js';
+import { browseCodexFolders, resolveCodexFolderPath } from './codexFolderBrowser.js';
+import {
+  closeCodexTerminal,
+  createCodexTerminalSession,
+  readCodexTerminalOutput,
+  resizeCodexTerminal,
+  writeCodexTerminalInput,
+} from './codexTerminal.js';
+import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
+import { deleteSessionVisibility } from './codexSessionVisibility.js';
+import { prepareSessionDetailForClient } from './codexSessionTransport.js';
+import {
+  createSessionTopic,
+  deleteSessionTopic,
+  deleteSessionTopicAssignment,
+  getSessionTopicMap,
+  listTopicAssignmentSessionIds,
+  listSessionTopics,
+  setSessionTopic,
+} from './codexSessionTopics.js';
+import {
+  deleteSessionTrigger,
+  getSessionTrigger,
+  recordSessionTriggerInvocation,
+  resolveTriggerInvocation,
+  upsertSessionTrigger,
+} from './codexSessionTriggers.js';
+import {
+  buildSessionTriggerClientRequestId,
+  enqueueSessionTriggerInvocation,
+} from './codexSessionTriggerRuntime.js';
+import { deleteSessionCustomTitle, getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
+import {
+  deleteSessionInstruction,
+  getSessionInstruction,
+  getSessionInstructionRecord,
+  rebindSessionInstruction,
+  setSessionInstruction,
+} from './codexSessionInstructions.js';
+import {
+  createForkDraftSession,
+  deleteForkDraftSession,
+  deleteForkSessionMetadata,
+  getForkDraftSession,
+  recordForkSessionMetadata,
+  updateForkDraftSession,
+} from './codexForkSessions.js';
+import { createProjectAnchor, deleteProjectAnchor, listProjectAnchors } from './codexProjectAnchors.js';
+import {
+  approveAgentSession,
+  buildAgentExecutionPrompt,
+  buildAgentPlanPrompt,
+  createAgentSessionDraft,
+  deleteAgentSessionRecord,
+  getAgentSessionLinkForSession,
+  getAgentSessionRecord,
+  listAgentSessionLinksForSourceProfile,
+  listAgentSessionRecords,
+  markAgentSessionLaunched,
+  recordAgentSessionLinkedSession,
+  resolveAgentProviderProfileId,
+  saveAgentSessionPlan,
+  updateAgentRuntimeStatus,
+  updateAgentSessionGoal,
+  type AgentSessionAgentPlan,
+  type AgentSessionLinkRecord,
+  type AgentSessionRecord,
+} from './codexAgentSessions.js';
+import {
+  clearSessionContextSelection,
+  type CodexSessionActionRestriction,
+  deleteSessionContextSelection,
+  getSessionContextSelection,
+  rebindSessionContextSelection,
+  setSessionContextSelection,
+} from './codexSessionContextSelections.js';
+import {
+  buildSessionBrowserModePromptAdditions,
+  consumeSessionBrowserModeAfterDispatch,
+  deleteSessionBrowserMode,
+  getSessionBrowserMode,
+  getSessionBrowserModeRecord,
+  rebindSessionBrowserMode,
+  setSessionBrowserMode,
+  validateSessionBrowserMode,
+} from './codexBrowserMode.js';
+import {
+  buildSessionDesignModePromptAdditions,
+  consumeSessionDesignModeAfterDispatch,
+  deleteSessionDesignMode,
+  getSessionDesignCanvasPath,
+  getSessionDesignMode,
+  getSessionDesignModeRecord,
+  rebindSessionDesignMode,
+  setSessionDesignMode,
+  validateSessionDesignMode,
+} from './codexDesignMode.js';
+import {
+  buildSessionUxModePromptAdditions,
+  consumeSessionUxModeAfterDispatch,
+  deleteSessionUxMode,
+  getSessionUxMode,
+  getSessionUxModeRecord,
+  rebindSessionUxMode,
+  setSessionUxMode,
+  validateSessionUxMode,
+} from './codexUxMode.js';
+import {
+  buildSessionPersonalChromePromptAdditions,
+  consumeSessionPersonalChromeModeAfterDispatch,
+  deleteSessionPersonalChromeMode,
+  getSessionPersonalChromeMode,
+  getSessionPersonalChromeModeRecord,
+  rebindSessionPersonalChromeMode,
+  setSessionPersonalChromeMode,
+} from './codexPersonalChromeMode.js';
+import {
+  assertSessionProjectModeReady,
+  buildProjectModeQueueSpecs,
+  deleteSessionProjectMode,
+  getSessionProjectMode,
+  getSessionProjectModeRecord,
+  rebindSessionProjectMode,
+  setSessionProjectMode,
+  validateSessionProjectMode,
+} from './codexProjectMode.js';
+import {
+  deleteSessionConversationSearchMode,
+  getSessionConversationSearchMode,
+  getSessionConversationSearchModeRecord,
+  rebindSessionConversationSearchMode,
+  setSessionConversationSearchMode,
+  validateSessionConversationSearchMode,
+} from './codexConversationSearchMode.js';
+import {
+  closeSessionBrowserViewer,
+  inspectSessionBrowserViewerPoint,
+  openSessionBrowserViewerLiveFrameReader,
+  openSessionBrowserViewer,
+  performSessionBrowserViewerAction,
+  queueSessionBrowserViewerInput,
+  resolveSessionBrowserViewerFramePath,
+  // standalone-strip:start private-runtime-integration
+  syncSessionBrowserViewerBinaAuth,
+  // standalone-strip:end private-runtime-integration
+} from './codexBrowserViewer.js';
+import {
+  copySessionReminders,
+  createSessionReminder,
+  deleteSessionReminder,
+  deleteSessionReminders,
+  listSessionReminders,
+  rebindSessionReminders,
+} from './codexSessionReminders.js';
+import {
+  createSessionTask,
+  deleteSessionTask,
+  listSessionTasks,
+  removeSessionFromTasks,
+  setTaskSessionAssignment,
+  setTaskSessionCompletion,
+  updateSessionTask,
+} from './codexSessionTasks.js';
+import {
+  createSessionSubtask,
+  deleteSessionSubtask,
+  listSessionSubtasks,
+  removeSessionSubtasks,
+  setSessionSubtaskCompletion,
+} from './codexSessionSubtasks.js';
+import { buildSessionPromptAdditionsContext } from './sessionPromptAdditions.js';
+import { listUnifiedSkills } from './skillCatalogService.js';
+import { getSelectedPermissionModeId } from './providerPermissions.js';
+import {
+  copySessionFinalNotificationPreference,
+  deleteSessionFinalNotificationPreference,
+  rebindSessionFinalNotificationPreference,
+} from './codexFinalNotifications.js';
+import {
+  exportSharedConversations,
+  MAX_SHARED_CONVERSATIONS,
+} from './codexConversationShare.js';
+import {
+  buildSupportPromptEnvelope,
+  deleteSupportSessionRecord,
+  decorateSupportSessionDetail,
+  decorateSupportSessionSummary,
+  filterProfilesByMode,
+  isSupportProfile,
+  normalizeSupportSessionForOperations,
+  recordSupportTurnRequest,
+  rebindSupportSessionRecord,
+  resolveDefaultProfileForMode,
+  resolveSupportProfileSelection,
+  type SupportPromptEnvelope,
+} from './supportAgentService.js';
+// standalone-strip:start private-incident-center
+import {
+  buildIncidentDecisionCenterHtml,
+  createIncidentDecisionCenterService,
+  type IncidentCaseMessageAuthor,
+} from './incidentDecisionCenter.js';
+// standalone-strip:end private-incident-center
+import { deleteSessionChangeRecords } from './sessionChangeTracker.js';
+// standalone-strip:start private-runtime-integration
+import {
+  isSafeForumSessionCookie,
+  readRawCookieValue,
+  validateBinaForumSession,
+} from './binaSso.js';
+import { issueBinaRuntimeWorkbenchSession } from './binaRuntimeSso.js';
+// standalone-strip:end private-runtime-integration
+import { decodeMultipartFileName, normalizeCanonicalFileName } from './fileNameNormalizer.js';
+import {
+  listCodeAiServers,
+  refreshRemoteHostHealth,
+} from './remoteHostRegistry.js';
+import {
+  authenticatePersonalChromeUiToken,
+  issuePersonalChromeEnrollmentToken,
+  readPersonalChromeUiCredentials,
+} from './personalChromeBridge.js';
+
+const router = Router();
+// standalone-strip:start private-incident-center
+const incidentDecisionCenter = createIncidentDecisionCenterService();
+// standalone-strip:end private-incident-center
+const MAX_UPLOAD_SIZE = 15 * 1024 * 1024;
+const MAX_UPLOAD_FILES = 8;
+const RECURRING_FREQUENCIES = new Set(['daily', 'weekly']);
+const CODEX_CLIENT_LOG_ROOT = path.dirname(CLIENT_CRASH_LOG);
+const CODEX_CLIENT_LOG_FILE = CLIENT_CRASH_LOG;
+const DEVICE_UNLOCK_COOKIE = 'code_ai_device_unlock';
+const FORUM_SESSION_COOKIE = 'forum.session';
+const SUPPORT_WEBHOOK_TOKEN = process.env.CODEX_SUPPORT_WEBHOOK_TOKEN?.trim() || '';
+const execFileAsync = promisify(execFile);
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function sanitizeFileName(fileName: string): string {
+  return normalizeCanonicalFileName(fileName, {
+    fallbackName: 'attachment',
+  });
+}
+
+function isPathInside(rootPath: string, targetPath: string): boolean {
+  const relative = path.relative(rootPath, targetPath);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function requireSupportWebhookAccess(req: Request, res: Response, next: NextFunction) {
+  if (SUPPORT_WEBHOOK_TOKEN) {
+    const incoming = typeof req.headers['x-code-ai-support-token'] === 'string'
+      ? req.headers['x-code-ai-support-token']
+      : Array.isArray(req.headers['x-code-ai-support-token'])
+        ? req.headers['x-code-ai-support-token'][0]
+        : '';
+
+    if (incoming === SUPPORT_WEBHOOK_TOKEN) {
+      next();
+      return;
+    }
+
+    res.status(401).json({ error: 'Support webhook token is invalid' });
+    return;
+  }
+
+  requireCodexAccess(req, res, next);
+}
+
+async function appendClientCrashLog(entry: Record<string, unknown>) {
+  await fs.mkdir(CODEX_CLIENT_LOG_ROOT, { recursive: true });
+  await fs.appendFile(CODEX_CLIENT_LOG_FILE, `${JSON.stringify(entry)}\n`, 'utf-8');
+}
+
+async function readRecentClientCrashLogs(limit = 20) {
+  try {
+    const raw = await fs.readFile(CODEX_CLIENT_LOG_FILE, 'utf-8');
+    const lines = raw
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(-Math.max(1, Math.min(limit, 200)));
+
+    return lines
+      .map((line) => {
+        try {
+          return JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .filter((value): value is Record<string, unknown> => Boolean(value))
+      .reverse();
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+function readRecurringConfig(body: any): { frequency: 'daily' | 'weekly'; timeZone: string } | undefined {
+  const recurrence = body?.recurrence;
+
+  if (!recurrence || typeof recurrence !== 'object') {
+    return undefined;
+  }
+
+  const frequency = typeof recurrence.frequency === 'string' ? recurrence.frequency.trim() : '';
+  const timeZone = typeof recurrence.timeZone === 'string' ? recurrence.timeZone.trim() : '';
+
+  if (!RECURRING_FREQUENCIES.has(frequency)) {
+    throw new Error('Recurring frequency is invalid');
+  }
+
+  if (!timeZone) {
+    throw new Error('Recurring timezone is required');
+  }
+
+  return {
+    frequency: frequency as 'daily' | 'weekly',
+    timeZone,
+  };
+}
+
+function readExecutionConfig(body: any): CodexExecutionConfig {
+  const model = typeof body?.model === 'string' && body.model.trim()
+    ? body.model.trim()
+    : null;
+  const reasoningEffort = typeof body?.reasoningEffort === 'string' && body.reasoningEffort.trim()
+    ? body.reasoningEffort.trim()
+    : null;
+  const permissionModeId = typeof body?.permissionModeId === 'string' && body.permissionModeId.trim()
+    ? body.permissionModeId.trim()
+    : null;
+
+  return {
+    model,
+    reasoningEffort,
+    permissionModeId,
+  };
+}
+
+type SupportExecutionLevel = 'fast' | 'balanced' | 'deep';
+
+function readSupportExecutionLevel(value: unknown): SupportExecutionLevel | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'fast' || normalized === 'balanced' || normalized === 'deep') {
+    return normalized;
+  }
+
+  return null;
+}
+
+function resolveSupportExecutionConfig(
+  provider: AppProvider,
+  requestedLevel: SupportExecutionLevel | null,
+  explicitConfig: CodexExecutionConfig
+): {
+  level: SupportExecutionLevel;
+  executionConfig: CodexExecutionConfig;
+} {
+  const level = requestedLevel || 'balanced';
+
+  const presetByProvider: Record<AppProvider, Record<SupportExecutionLevel, { model: string; reasoningEffort: string }>> = {
+    codex: {
+      fast: { model: 'gpt-5.4-mini', reasoningEffort: 'low' },
+      balanced: { model: 'gpt-5.4', reasoningEffort: 'medium' },
+      deep: { model: 'gpt-5.5', reasoningEffort: 'xhigh' },
+    },
+    claude: {
+      fast: { model: 'claude-sonnet-4-6', reasoningEffort: 'low' },
+      balanced: { model: 'claude-sonnet-4-6', reasoningEffort: 'medium' },
+      deep: { model: 'claude-opus-4-6', reasoningEffort: 'max' },
+    },
+    gemini: {
+      fast: { model: 'gemini-2.5-flash-lite', reasoningEffort: 'low' },
+      balanced: { model: 'gemini-2.5-flash', reasoningEffort: 'medium' },
+      deep: { model: 'gemini-2.5-pro', reasoningEffort: 'high' },
+    },
+  };
+
+  const preset = presetByProvider[provider][level];
+
+  return {
+    level,
+    executionConfig: {
+      model: explicitConfig.model || preset.model,
+      reasoningEffort: explicitConfig.reasoningEffort || preset.reasoningEffort,
+      permissionModeId: explicitConfig.permissionModeId || null,
+    },
+  };
+}
+
+function readRequestedMode(value: unknown): AppMode | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  return value.trim() === 'support' ? 'support' : value.trim() === 'standard' ? 'standard' : undefined;
+}
+
+function findConfiguredProfile(profileId: string | undefined) {
+  return CODEX_APP_CONFIG.profiles.find((candidate) => candidate.id === profileId) || null;
+}
+
+function normalizeBrowserViewerNavigationUrl(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(normalized)) {
+    return normalized;
+  }
+
+  if (normalized.startsWith('//')) {
+    return `https:${normalized}`;
+  }
+
+  if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0)([:/]|$)/.test(normalized)) {
+    return `http://${normalized}`;
+  }
+
+  return `https://${normalized}`;
+}
+
+function resolveVisibleSourceProfile(profileId: string | undefined) {
+  const configuredProfile = findConfiguredProfile(profileId);
+  if (!configuredProfile) {
+    return null;
+  }
+
+  if (configuredProfile.mode === 'standard' || !configuredProfile.sourceProfileId) {
+    return configuredProfile;
+  }
+
+  return findConfiguredProfile(configuredProfile.sourceProfileId);
+}
+
+function buildAgentSessionMeta(
+  record: AgentSessionRecord,
+  link: AgentSessionLinkRecord
+): CodexSessionSummary['agentSession'] {
+  const linkedAgent = link.agentId
+    ? record.plan?.agents.find((agent) => agent.id === link.agentId) || null
+    : null;
+
+  return {
+    id: record.id,
+    title: record.title,
+    goal: record.goal,
+    status: record.status,
+    kind: link.kind,
+    sourceProfileId: record.sourceProfileId,
+    linkedProfileId: link.profileId,
+    plannerProvider: record.plannerProvider || null,
+    topicId: record.topicId,
+    agentId: link.agentId,
+    agentName: linkedAgent?.name || null,
+    approvedAt: record.approvedAt,
+    launchedAt: record.launchedAt,
+    plannerSessionId: record.plannerSessionId,
+    sharedStatusPath: record.plan?.sharedStatusPath || record.sharedStatusPath || null,
+    eventsPath: record.plan?.eventsPath || record.eventsPath || null,
+    plan: record.plan ? {
+      title: record.plan.title,
+      goal: record.plan.goal,
+      sharedStatusPath: record.plan.sharedStatusPath,
+      eventsPath: record.plan.eventsPath,
+      coordinationRules: [...record.plan.coordinationRules],
+      agents: record.plan.agents.map((agent) => ({
+        ...agent,
+        scopePaths: [...agent.scopePaths],
+        dependsOn: [...agent.dependsOn],
+        runtimeStatus: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.runtimeStatus || null,
+        linkedSessionId: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.linkedSessionId || null,
+        queueItemId: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.queueItemId || null,
+        updatedAt: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.updatedAt || null,
+        lastMessage: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.lastMessage || null,
+        lastError: record.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.lastError || null,
+      })),
+    } : null,
+  };
+}
+
+async function resolveEffectiveProfileIdForSession(
+  requestedProfileId: string | undefined,
+  sessionId: string
+): Promise<string | undefined> {
+  const resolvedSessionId = await resolveCodexQueueSessionId(sessionId) || sessionId;
+  const linked = await getAgentSessionLinkForSession(resolvedSessionId);
+  if (!linked) {
+    return requestedProfileId;
+  }
+
+  return linked.profileId;
+}
+
+async function resolveEffectiveSessionId(sessionId: string): Promise<string> {
+  return await resolveCodexQueueSessionId(sessionId) || sessionId;
+}
+
+async function loadAgentLinkedSessionSummaries(
+  sourceProfileId: string,
+  query: string,
+  limit?: number,
+  options?: { allowExtendedLimit?: boolean },
+): Promise<CodexSessionSummary[]> {
+  const links = await listAgentSessionLinksForSourceProfile(sourceProfileId);
+  if (links.length === 0) {
+    return [];
+  }
+
+  const profileIds = [...new Set(links.map((link) => link.profileId))];
+  const linkedIds = new Set(links.map((link) => link.sessionId));
+  const linksBySessionId = new Map(links.map((link) => [link.sessionId, link]));
+  const recordsById = new Map<string, AgentSessionRecord>();
+  const agentSessionIds = [...new Set(links.map((link) => link.agentSessionId))];
+  await Promise.all(agentSessionIds.map(async (agentSessionId) => {
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (record) {
+      recordsById.set(agentSessionId, record);
+    }
+  }));
+
+  const results = await Promise.all(profileIds.map(async (profileId) => (
+    listAgentSessions(
+      profileId,
+      query,
+      limit ? Math.max(limit * 4, 80) : 160,
+      options,
+    )
+  )));
+
+  return results
+    .flat()
+    .filter((session) => linkedIds.has(session.id))
+    .map((session) => {
+      const link = linksBySessionId.get(session.id);
+      const record = link ? recordsById.get(link.agentSessionId) || null : null;
+      return {
+        ...session,
+        profileId: sourceProfileId,
+        agentSession: link && record ? buildAgentSessionMeta(record, link) : null,
+      };
+    });
+}
+
+async function decorateSessionSummaryListForClient(
+  profileId: string | undefined,
+  sessions: CodexSessionSummary[]
+) {
+  if (!profileId) {
+    return sessions;
+  }
+
+  const profile = findConfiguredProfile(profileId);
+  const links = await listAgentSessionLinksForSourceProfile(profileId);
+  const recordsById = new Map<string, AgentSessionRecord>();
+  await Promise.all([...new Set(links.map((link) => link.agentSessionId))].map(async (agentSessionId) => {
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (record) {
+      recordsById.set(agentSessionId, record);
+    }
+  }));
+  const linksBySessionId = new Map(links.map((link) => [link.sessionId, link]));
+  const enriched = sessions.map((session) => {
+    const link = linksBySessionId.get(session.id);
+    const record = link ? recordsById.get(link.agentSessionId) || null : null;
+    return {
+      ...session,
+      agentSession: link && record ? buildAgentSessionMeta(record, link) : null,
+    };
+  });
+
+  if (!profile || !isSupportProfile(profile)) {
+    return enriched;
+  }
+
+  return Promise.all(enriched.map((session) => decorateSupportSessionSummary(profile, session)));
+}
+
+async function decorateSessionDetailForClient(
+  profileId: string | undefined,
+  session: CodexSessionDetail
+) {
+  if (!profileId) {
+    return prepareSessionDetailForClient(session);
+  }
+
+  const linked = await getAgentSessionLinkForSession(session.id);
+  const linkedRecord = linked ? await getAgentSessionRecord(linked.agentSessionId) : null;
+  const enriched = {
+    ...session,
+    agentSession: linked && linkedRecord ? buildAgentSessionMeta(linkedRecord, linked) : null,
+  };
+
+  const profile = findConfiguredProfile(profileId);
+  if (!profile || !isSupportProfile(profile)) {
+    return prepareSessionDetailForClient(enriched);
+  }
+
+  return prepareSessionDetailForClient(await decorateSupportSessionDetail(profile, enriched));
+}
+
+async function normalizeSessionDetailForOperations(
+  profileId: string | undefined,
+  session: CodexSessionDetail
+) {
+  if (!profileId) {
+    return session;
+  }
+
+  const profile = findConfiguredProfile(profileId);
+  if (!profile || !isSupportProfile(profile)) {
+    return session;
+  }
+
+  return normalizeSupportSessionForOperations(profile, session);
+}
+
+function buildSupportSessionInstruction(
+  baseInstruction: string | undefined,
+  supportEnvelope: SupportPromptEnvelope | null
+): string | undefined {
+  const sections = [
+    supportEnvelope?.compiledPrompt?.trim() || '',
+    typeof baseInstruction === 'string' && baseInstruction.trim() ? baseInstruction : '',
+  ].filter(Boolean);
+
+  if (sections.length === 0) {
+    return undefined;
+  }
+
+  return sections.join('\n\n');
+}
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, callback) => {
+      fs.mkdir(CODEX_UPLOAD_ROOT, { recursive: true })
+        .then(() => callback(null, CODEX_UPLOAD_ROOT))
+        .catch((error) => callback(error as Error, CODEX_UPLOAD_ROOT));
+    },
+    filename: (_req, file, callback) => {
+      const originalName = decodeMultipartFileName(file.originalname);
+      file.originalname = originalName;
+      callback(null, `${Date.now()}-${randomUUID()}-${sanitizeFileName(originalName)}`);
+    },
+  }),
+  limits: {
+    fileSize: MAX_UPLOAD_SIZE,
+    files: MAX_UPLOAD_FILES,
+  },
+});
+
+function readRequestHost(req: Request): string {
+  const forwardedHost = req.headers['x-forwarded-host'];
+  const rawHost = Array.isArray(forwardedHost)
+    ? forwardedHost[0]
+    : forwardedHost || req.headers.host || '';
+
+  return rawHost.split(',')[0]?.trim().toLowerCase() || '';
+}
+
+function stripPort(host: string): string {
+  return host.replace(/:\d+$/, '');
+}
+
+function readRouteParam(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) {
+    return value[0] || '';
+  }
+
+  return value || '';
+}
+
+function parseCookies(req: Request): Record<string, string> {
+  const header = req.headers.cookie || '';
+  return header.split(';').reduce<Record<string, string>>((accumulator, part) => {
+    const [rawKey, ...rawValue] = part.split('=');
+    const key = rawKey?.trim();
+    if (!key) {
+      return accumulator;
+    }
+
+    accumulator[key] = decodeURIComponent(rawValue.join('=').trim());
+    return accumulator;
+  }, {});
+}
+
+function isPublicCodexHost(req: Request): boolean {
+  if (CODEX_APP_CONFIG.openAccess) {
+    return true;
+  }
+
+  const host = stripPort(readRequestHost(req));
+  return CODEX_APP_CONFIG.publicHosts.includes(host);
+}
+
+function isLoopbackIp(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.replace(/^::ffff:/, '');
+  return normalized === '127.0.0.1' || normalized === '::1';
+}
+
+function createDeviceUnlockToken(req: Request): string {
+  const host = stripPort(readRequestHost(req)) || 'codex-device';
+  return createHmac('sha256', CODEX_APP_CONFIG.sessionSecret)
+    .update(`${host}|codex-device-unlock`)
+    .digest('hex');
+}
+
+function hasUnlockedDevice(req: Request): boolean {
+  const cookies = parseCookies(req);
+  const current = cookies[DEVICE_UNLOCK_COOKIE];
+  if (!current) {
+    return false;
+  }
+
+  const expected = createDeviceUnlockToken(req);
+  try {
+    return timingSafeEqual(Buffer.from(current), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+function clearCodexAuthCookies(res: Response) {
+  const deviceCookieOptions = {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax' as const,
+    domain: CODEX_APP_CONFIG.sessionCookieDomain || undefined,
+    path: '/',
+  };
+
+  res.clearCookie(DEVICE_UNLOCK_COOKIE, deviceCookieOptions);
+  res.clearCookie(FORUM_SESSION_COOKIE, {
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    domain: process.env.NODE_ENV === 'production' && CODEX_APP_CONFIG.sessionCookieDomain
+      ? CODEX_APP_CONFIG.sessionCookieDomain
+      : undefined,
+    path: '/',
+  });
+}
+
+export function readAuthenticatedUser(req: Request) {
+  const deviceUnlocked = hasUnlockedDevice(req);
+
+  if (isPublicCodexHost(req)) {
+    return {
+      authenticated: true,
+      localBypass: false,
+      publicAccess: true,
+      deviceUnlocked,
+      user: {
+        id: 'public-codex-access',
+        email: '',
+        name: 'Codex Open Access',
+      },
+    };
+  }
+
+  const remoteIp = req.ip || req.socket.remoteAddress || '';
+  const forwarded = req.headers['x-forwarded-for'];
+  const forwardedFirst = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0]?.trim();
+  const isLocalBypass = isLoopbackIp(remoteIp) && (!forwardedFirst || isLoopbackIp(forwardedFirst));
+
+  if (isLocalBypass) {
+    return {
+      authenticated: true,
+      localBypass: true,
+      publicAccess: false,
+      deviceUnlocked: true,
+      user: {
+        id: 'local-server',
+        email: 'local@server',
+        name: 'Local Server',
+      },
+    };
+  }
+
+  const session = req.session as any;
+
+  if (session?.customerId) {
+    return {
+      authenticated: true,
+      localBypass: false,
+      publicAccess: false,
+      deviceUnlocked: true,
+      user: {
+        id: session.customerId,
+        email: session.customerEmail || '',
+        name: session.customerEmail?.split('@')[0] || 'משתמש',
+      },
+    };
+  }
+
+  if (session?.userId) {
+    return {
+      authenticated: true,
+      localBypass: false,
+      publicAccess: false,
+      deviceUnlocked: true,
+      user: {
+        id: session.userId,
+        email: session.user?.email || '',
+        name: session.user?.displayName || session.user?.username || 'משתמש',
+      },
+    };
+  }
+
+  return {
+    authenticated: false,
+    localBypass: false,
+    publicAccess: false,
+    deviceUnlocked: false,
+    user: null,
+  };
+}
+
+export function requireCodexAccess(req: Request, res: Response, next: NextFunction) {
+  if ((req as any).codeAiRemoteAgentAuthenticated === true) {
+    (req as any).codexAuth = {
+      authenticated: true,
+      localBypass: false,
+      publicAccess: false,
+      deviceUnlocked: true,
+      remoteAgent: true,
+      user: {
+        id: 'code-ai-control-plane',
+        email: '',
+        name: 'code-ai control plane',
+      },
+    };
+    next();
+    return;
+  }
+
+  const extensionCredentials = readPersonalChromeUiCredentials(req);
+  if (extensionCredentials) {
+    void authenticatePersonalChromeUiToken(extensionCredentials.deviceId, extensionCredentials.token)
+      .then((authState) => {
+        if (!authState) {
+          const browserAuthState = readAuthenticatedUser(req);
+          if (browserAuthState.authenticated && browserAuthState.deviceUnlocked) {
+            (req as any).codexAuth = browserAuthState;
+            next();
+            return;
+          }
+          res.status(401).json({ authenticated: false, error: 'תוסף CODE-AI אינו מזווג או שהגישה שלו בוטלה.' });
+          return;
+        }
+        (req as any).codexAuth = authState;
+        next();
+      })
+      .catch((error) => {
+        res.status(500).json({ authenticated: false, error: error?.message || 'Extension authentication failed' });
+      });
+    return;
+  }
+
+  const authState = readAuthenticatedUser(req);
+
+  if (!authState.authenticated) {
+    res.status(401).json({
+      authenticated: false,
+      error: 'פתח את code-ai דרך הכתובת שהוגדרה לשרת.',
+    });
+    return;
+  }
+
+  if (!authState.deviceUnlocked) {
+    res.status(403).json({
+      authenticated: true,
+      deviceUnlocked: false,
+      error: 'המכשיר הזה עדיין לא נפתח עם סיסמת הניהול.',
+    });
+    return;
+  }
+
+  (req as any).codexAuth = authState;
+  next();
+}
+
+function readTerminalOwnerId(req: Request): string {
+  const authState = (req as any).codexAuth;
+  if ((req as any).codeAiRemoteAgentAuthenticated === true) {
+    const proxiedOwner = typeof req.headers['x-code-ai-proxied-owner'] === 'string'
+      ? req.headers['x-code-ai-proxied-owner'].trim().toLowerCase()
+      : '';
+    if (/^[a-f0-9]{64}$/.test(proxiedOwner)) {
+      return `proxied:${proxiedOwner}`;
+    }
+  }
+
+  const userId = String(authState?.user?.id || 'code-ai-local-user');
+  return createHmac('sha256', CODEX_APP_CONFIG.sessionSecret)
+    .update(userId)
+    .digest('hex');
+}
+
+async function logFileRouteEvent(
+  req: Request,
+  entry: {
+    type: string;
+    rawTarget?: string;
+    resolvedPath?: string | null;
+    status?: number;
+    message?: string;
+    matches?: string[];
+    mimeType?: string | false;
+    previewKind?: string;
+    size?: number;
+    lineNumber?: number | null;
+    metadata?: Record<string, unknown>;
+  }
+) {
+  const authState = (req as any).codexAuth;
+  await appendCodexFileLog({
+    ...entry,
+    authUserId: authState?.user?.id || null,
+    remoteIp: req.ip || req.socket.remoteAddress || null,
+    profileId: typeof req.query.profile === 'string'
+      ? req.query.profile
+      : typeof req.body?.profileId === 'string'
+        ? req.body.profileId
+        : null,
+  });
+}
+
+async function hydrateForkDraftRequest(
+  profileId: string,
+  queueKey: string | undefined,
+  sessionId: string | undefined,
+  contextPrefix: string | undefined,
+  forkContext: any
+): Promise<{
+  contextPrefix: string | undefined;
+  forkContext: any;
+}> {
+  const draftSessionId = [sessionId, queueKey].find((value) => typeof value === 'string' && value.startsWith('draft:'));
+  const needsContextPrefix = !contextPrefix?.trim();
+  const needsForkTimeline = !forkContext || typeof forkContext !== 'object' || !Array.isArray(forkContext.timeline) || forkContext.timeline.length === 0;
+
+  if (!draftSessionId || (!needsContextPrefix && !needsForkTimeline)) {
+    return {
+      contextPrefix,
+      forkContext,
+    };
+  }
+
+  const draft = await getForkDraftSession(draftSessionId);
+  if (!draft || draft.profileId !== profileId) {
+    return {
+      contextPrefix,
+      forkContext,
+    };
+  }
+
+  return {
+    contextPrefix: needsContextPrefix ? draft.promptPrefix : contextPrefix,
+    forkContext: needsForkTimeline
+      ? {
+        sourceSessionId: draft.sourceSessionId,
+        sourceTitle: draft.sourceTitle,
+        sourceCwd: draft.sourceCwd,
+        forkEntryId: draft.forkEntryId,
+        transferSourceProvider: draft.transferSourceProvider || null,
+        transferTargetProvider: draft.transferTargetProvider || null,
+        timeline: draft.timeline,
+      }
+      : forkContext,
+  };
+}
+
+function isDraftSessionKey(value: string | undefined): boolean {
+  return typeof value === 'string' && value.startsWith('draft:');
+}
+
+function isMissingSessionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.includes('was not found');
+}
+
+async function copySessionSidebarMetadataToForkSession(
+  sourceProfileId: string,
+  targetProfileId: string,
+  sourceSession: CodexSessionDetail,
+  targetSessionId: string,
+  options?: {
+    preserveHidden?: boolean;
+  }
+) {
+  const [hiddenIds, topicMap, titleMap] = await Promise.all([
+    listHiddenSessionIds(sourceProfileId),
+    getSessionTopicMap(sourceProfileId),
+    getSessionTitleMap(sourceProfileId),
+  ]);
+
+  const sourceTopic = topicMap[sourceSession.id] || null;
+  const sourceCustomTitle = titleMap[sourceSession.id] || null;
+  const nextHidden = options?.preserveHidden !== false && hiddenIds.has(sourceSession.id);
+  let assignedTopic: CodexSessionTopic | null = null;
+
+  if (sourceTopic) {
+    const targetTopics = await listSessionTopics(targetProfileId, sourceTopic.cwd);
+    let targetTopic = targetTopics.find((topic) => (
+      topic.name === sourceTopic.name
+      && topic.icon === sourceTopic.icon
+      && topic.colorKey === sourceTopic.colorKey
+    )) || null;
+
+    if (!targetTopic) {
+      targetTopic = await createSessionTopic(targetProfileId, sourceTopic.cwd, {
+        name: sourceTopic.name,
+        icon: sourceTopic.icon,
+        colorKey: sourceTopic.colorKey,
+      });
+    }
+
+    await setSessionTopic(targetProfileId, targetSessionId, targetTopic.id, sourceSession.cwd);
+    assignedTopic = targetTopic;
+  }
+
+  if (nextHidden) {
+    await setSessionHidden(targetProfileId, targetSessionId, true);
+  }
+
+  if (sourceCustomTitle) {
+    await setSessionCustomTitle(targetProfileId, targetSessionId, sourceCustomTitle);
+  }
+
+  return {
+    hidden: nextHidden,
+    topic: assignedTopic,
+    title: sourceCustomTitle || sourceSession.title,
+  };
+}
+
+async function copySessionInstructionToSession(
+  sourceProfileId: string,
+  targetProfileId: string,
+  sourceSessionId: string,
+  targetSessionId: string
+) {
+  const instruction = await getSessionInstruction(sourceProfileId, sourceSessionId);
+  if (!instruction?.trim()) {
+    return null;
+  }
+
+  return setSessionInstruction(targetProfileId, targetSessionId, instruction);
+}
+
+async function copySessionContextSelectionToSession(
+  sourceProfileId: string,
+  targetProfileId: string,
+  sourceSessionId: string,
+  targetSessionId: string
+) {
+  const selection = await getSessionContextSelection(sourceProfileId, sourceSessionId);
+  if (
+    selection.anchorIds.length === 0
+    && selection.skillIds.length === 0
+    && selection.reminderIds.length === 0
+    && !selection.agentSessionDraftId
+    && !selection.professionalMode
+    && !selection.annotationsMode
+    && !selection.goalMode
+    && !selection.actionRestriction
+  ) {
+    return;
+  }
+
+  await setSessionContextSelection(targetProfileId, targetSessionId, selection);
+}
+
+async function copySessionRemindersToSession(
+  sourceProfileId: string,
+  targetProfileId: string,
+  sourceSessionId: string,
+  targetSessionId: string
+) {
+  await copySessionReminders(sourceProfileId, sourceSessionId, targetProfileId, targetSessionId);
+}
+
+async function copySessionNotificationPreferenceToSession(
+  sourceProfileId: string,
+  targetProfileId: string,
+  sourceSessionId: string,
+  targetSessionId: string
+) {
+  await copySessionFinalNotificationPreference(
+    sourceProfileId,
+    sourceSessionId,
+    targetProfileId,
+    targetSessionId
+  );
+}
+
+async function deleteSessionMetadata(profileId: string, sessionId: string) {
+  await Promise.all([
+    deleteSessionVisibility(profileId, sessionId),
+    deleteSessionTopicAssignment(profileId, sessionId),
+    deleteSessionCustomTitle(profileId, sessionId),
+    deleteSessionInstruction(profileId, sessionId),
+    clearSessionContextSelection(profileId, sessionId),
+    deleteSessionReminders(profileId, sessionId),
+    deleteSessionBrowserMode(profileId, sessionId),
+    deleteSessionDesignMode(profileId, sessionId),
+    deleteSessionUxMode(profileId, sessionId),
+    deleteSessionProjectMode(profileId, sessionId),
+    deleteSessionConversationSearchMode(profileId, sessionId),
+    deleteSessionPersonalChromeMode(profileId, sessionId),
+    deleteSessionFinalNotificationPreference(profileId, sessionId),
+    deleteSessionTrigger(profileId, sessionId),
+    deleteForkSessionMetadata(sessionId),
+    deleteSupportSessionRecord(profileId, sessionId),
+    deleteSessionChangeRecords(sessionId),
+  ]);
+}
+
+async function deleteSessionPermanently(profileId: string, sessionId: string) {
+  if (isDraftSessionKey(sessionId)) {
+    await deleteForkDraftSession(sessionId);
+    await deleteSessionMetadata(profileId, sessionId);
+    await removeSessionFromTasks(profileId, sessionId);
+    await removeSessionSubtasks(profileId, sessionId);
+    return {
+      deleted: true,
+      sessionId,
+      profileId,
+      draft: true,
+    };
+  }
+
+  try {
+    await deleteAgentSession(sessionId, profileId);
+  } catch (error) {
+    if (!isMissingSessionError(error)) {
+      throw error;
+    }
+  }
+
+  await deleteSessionMetadata(profileId, sessionId);
+  await removeSessionFromTasks(profileId, sessionId);
+  await removeSessionSubtasks(profileId, sessionId);
+  return {
+    deleted: true,
+    sessionId,
+    profileId,
+    draft: false,
+  };
+}
+
+interface ProfessionalModeQueueSpec {
+  prompt: string;
+  promptPreview: string;
+}
+
+interface AnnotationsModeQueueSpec {
+  prompt: string;
+  promptPreview: string;
+  reportPath?: string;
+}
+
+interface GoalModeQueueSpec {
+  prompt: string;
+  promptPreview: string;
+  chainId: string;
+  stepIndex: number;
+  totalSteps: number;
+}
+
+function buildProfessionalModeQueueSpecs(goal: string): ProfessionalModeQueueSpec[] {
+  const trimmedGoal = goal.trim();
+  return [
+    {
+      prompt: [
+        `עליך לתכנן היטב מקצה לקצה את "${trimmedGoal}".`,
+        'חשוב קודם למפות את המטרה, התלויות, הסיכונים, שלבי העבודה, ומה הסדר המקצועי הנכון לביצוע.',
+        'אל תישאר ברמת דיבור כללית; כתוב תכנון מעשי ומדויק ואז עבור לביצוע הצעד הראשון שבאמת מקדם את המשימה.',
+      ].join('\n\n'),
+      promptPreview: `מצב מקצועי · תכנון · ${trimmedGoal}`,
+    },
+    {
+      prompt: [
+        `כעת בצע על מלא ובצורה מקצועית את "${trimmedGoal}".`,
+        'הסתמך על התכנון שכבר נבנה בשיחה, עבוד מקצה לקצה, אל תעצור באמצע, ועדכן באופן ברור מה בוצע בפועל ומה נשאר אם יש חסם אמיתי.',
+      ].join('\n\n'),
+      promptPreview: `מצב מקצועי · ביצוע · ${trimmedGoal}`,
+    },
+    {
+      prompt: [
+        `בדוק כעת מקצה לקצה את "${trimmedGoal}".`,
+        'בצע בדיקת עומק מקצועית לתוצאה שכבר הופקה: מה תקין, מה חסר, מה מסוכן, ומה עדיין דורש תיקון או אימות נוסף.',
+        'אם אתה מגלה פער, דווח עליו בצורה ישירה וברורה.',
+      ].join('\n\n'),
+      promptPreview: `מצב מקצועי · בדיקה · ${trimmedGoal}`,
+    },
+  ];
+}
+
+function buildGoalModeQueueSpecs(goal: string): GoalModeQueueSpec[] {
+  const trimmedGoal = goal.trim();
+  const chainId = randomUUID();
+  const totalSteps = 10;
+
+  return Array.from({ length: totalSteps }, (_, index) => {
+    const stepNumber = index + 1;
+    const automaticFollowup = [
+      `הודעת מטרה אוטומטית ${stepNumber} מתוך ${totalSteps} עבור "${trimmedGoal}".`,
+      `הבקשה המקורית שעליך להמשיך לבצע היא:\n${trimmedGoal}`,
+      'ביקשתי ממך ביצוע מלא. אם עדיין לא הגעת לתוצאה מלאה ומאומתת, עליך להמשיך לעבוד בפועל ולא לעצור.',
+      'אם ההודעה האוטומטית הזו חוזרת שוב, זה אומר שעדיין לא זוהתה השלמה רשמית, ולכן עליך להמשיך לעבוד עד שתוכל להגיד בוודאות של 100% שהעבודה הושלמה או עד שתיתקל בחסם אמיתי.',
+      'אם ורק אם סיימת את העבודה ב-100% ודאית, התגובה שלך חייבת להכיל רק שתי שורות, בדיוק בסדר הבא, בלי שום טקסט נוסף ובלי markdown fences:',
+      'סיימתי',
+      '{"finish": "yes"}',
+      'המפתח JSON חייב להיות בדיוק finish באנגלית, והערך חייב להיות בדיוק "yes".',
+    ].join('\n\n');
+
+    return {
+      prompt: automaticFollowup,
+      promptPreview: `מצב מטרה · ${stepNumber}/${totalSteps} · ${trimmedGoal}`,
+      chainId,
+      stepIndex: stepNumber,
+      totalSteps,
+    };
+  });
+}
+
+function sanitizeFileSlug(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u0590-\u05ff]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'report';
+}
+
+async function prepareAnnotationsModeReportPath(
+  profileId: string,
+  goal: string,
+  queueKey: string,
+  actionRestriction: CodexSessionActionRestriction | null
+): Promise<string> {
+  const slug = sanitizeFileSlug(goal);
+  const stamp = nowIso().replace(/[:.]/g, '-');
+  const suffix = randomUUID().slice(0, 8);
+
+  let reportDir: string;
+  if (actionRestriction?.enabled) {
+    if (actionRestriction.targetKind === 'file') {
+      throw Object.assign(new Error('מצב ביאורים לא יכול לכתוב דוח כאשר מצב הגבלת פעולה מוגדר על קובץ יחיד. בחר תיקייה או כבה את ההגבלה.'), {
+        statusCode: 400,
+      });
+    }
+    reportDir = path.join(actionRestriction.targetPath, '.code-ai-annotations');
+  } else {
+    reportDir = path.join(
+      CODEX_APP_CONFIG.storageRoot,
+      'annotation-reports',
+      profileId,
+      queueKey
+    );
+  }
+
+  await fs.mkdir(reportDir, { recursive: true });
+  return path.join(reportDir, `${stamp}-${slug}-${suffix}.md`);
+}
+
+async function buildAnnotationsModeQueueSpecs(
+  profileId: string,
+  goal: string,
+  queueKey: string,
+  actionRestriction: CodexSessionActionRestriction | null
+): Promise<AnnotationsModeQueueSpec[]> {
+  const trimmedGoal = goal.trim();
+  const reportPath = await prepareAnnotationsModeReportPath(profileId, trimmedGoal, queueKey, actionRestriction);
+  return [
+    {
+      prompt: trimmedGoal,
+      promptPreview: trimmedGoal,
+    },
+    {
+      prompt: [
+        `בדוק כעת מקצה לקצה את "${trimmedGoal}" וכתוב דוח ביאורים מלא לקובץ Markdown.`,
+        'חובה לעבוד עם הסקיל הבא ולציית למבנה העבודה שלו:',
+        '/home/developer/.codex/skills/hebrew-code-change-report/SKILL.md',
+        `צור או עדכן את הקובץ הבא וכתוב בו את הדוח המלא בעברית:\n${reportPath}`,
+        'הדוח חייב לכלול לכל הפחות:',
+        '- תקציר מנהלים קצר וברור',
+        '- פירוט מפתחים טכני עם הקבצים והזרימות ששונו או נבדקו',
+        '- מה בוצע בפועל',
+        '- מה אומת בפועל',
+        '- מה לא אומת או נשאר חסם',
+        '- נתיבי קבצים רלוונטיים אם יש',
+        'אל תשאיר את הדוח רק בתשובת הצאט; הוא חייב להיכתב בפועל לקובץ ה-MD שצוין. לאחר הכתיבה דווח בקצרה שהדוח נשמר והיכן.',
+      ].join('\n\n'),
+      promptPreview: `מצב ביאורים · דוח · ${trimmedGoal}`,
+      reportPath,
+    },
+  ];
+}
+
+function getProviderDisplayLabel(provider: AppProvider): string {
+  if (provider === 'claude') {
+    return 'Claude';
+  }
+
+  if (provider === 'gemini') {
+    return 'Gemini';
+  }
+
+  return 'Codex';
+}
+
+function readTriggerToken(req: Request): string {
+  const queryToken = typeof req.query.token === 'string' ? req.query.token.trim() : '';
+  const headerToken = typeof req.headers['x-code-ai-trigger-token'] === 'string'
+    ? req.headers['x-code-ai-trigger-token'].trim()
+    : '';
+  return queryToken || headerToken;
+}
+
+function readSessionTriggerClientRequestId(req: Request, triggerId: string): string | null {
+  const idempotencyHeader = typeof req.headers['idempotency-key'] === 'string'
+    ? req.headers['idempotency-key']
+    : typeof req.headers['x-code-ai-event-id'] === 'string'
+      ? req.headers['x-code-ai-event-id']
+      : '';
+  const suppliedId = idempotencyHeader
+    || (typeof req.body?.clientRequestId === 'string' ? req.body.clientRequestId : '')
+    || (typeof req.body?.eventId === 'string' ? req.body.eventId : '');
+  return buildSessionTriggerClientRequestId(triggerId, suppliedId);
+}
+
+function clipTransferText(text: string, limit = 6_000): string {
+  const normalized = text.replace(/\s+\n/g, '\n').trim();
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, limit - 1).trimEnd()}\n…`;
+}
+
+function renderTransferTimelineEntry(
+  entry: CodexSessionDetail['timeline'][number],
+  sourceProviderLabel: string
+): string | null {
+  if (entry.entryType === 'message' && typeof entry.text === 'string') {
+    const prefix = entry.role === 'user'
+      ? 'משתמש'
+      : entry.kind === 'commentary'
+        ? `${sourceProviderLabel} (עובד)`
+        : sourceProviderLabel;
+    return `${prefix}:\n${clipTransferText(entry.text, entry.kind === 'commentary' ? 3_000 : 8_000)}`;
+  }
+
+  if (entry.entryType === 'tool') {
+    const title = entry.title || entry.toolName || 'Tool';
+    const details = [entry.subtitle, entry.text].filter(Boolean).join('\n');
+    return `כלי ${title}:\n${clipTransferText(details || 'Tool event without textual details.', 4_000)}`;
+  }
+
+  if (entry.entryType === 'status') {
+    const details = [entry.title || entry.status || 'Status', entry.subtitle].filter(Boolean).join('\n');
+    return `סטטוס:\n${clipTransferText(details, 2_000)}`;
+  }
+
+  return null;
+}
+
+function buildTransferPromptPrefix(
+  sourceSession: CodexSessionDetail,
+  sourceProviderLabel: string,
+  timeline: CodexSessionDetail['timeline']
+): string {
+  const transcript = timeline
+    .map((entry) => renderTransferTimelineEntry(entry, sourceProviderLabel))
+    .filter((value): value is string => Boolean(value))
+    .join('\n\n');
+
+  return [
+    `הקשר משוחזר מתוך שיחה קיימת עם ${sourceProviderLabel}.`,
+    `כותרת השיחה: ${sourceSession.title}`,
+    sourceSession.cwd ? `התיקייה הפעילה: ${sourceSession.cwd}` : '',
+    'להלן השיחה עד הנקודה שנבחרה, לפי סדר כרונולוגי:',
+    transcript,
+    `עד כאן השיחה עם ${sourceProviderLabel} ועכשיו תורך. אל תסכם את השיחה ואל תדבר עליה מבחוץ. המשך ישירות מאותה נקודה. אם ההודעה האחרונה היא של המשתמש, ענה למשתמש. אם ההודעה האחרונה היא של המודל, המשך בהתאם לבקשה האחרונה של המשתמש.`,
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildTransferAutoPrompt(lastEntry: CodexSessionDetail['timeline'][number] | undefined): string {
+  if (lastEntry?.entryType === 'message' && lastEntry.role === 'user') {
+    return 'ענה עכשיו למשתמש מאותה נקודה, בלי לסכם את השיחה.';
+  }
+
+  return 'המשך עכשיו מאותה נקודה בצורה טבעית, בלי לסכם את השיחה.';
+}
+
+function readAppProvider(value: unknown): AppProvider | null {
+  if (value === 'codex' || value === 'claude' || value === 'gemini') {
+    return value;
+  }
+  return null;
+}
+
+async function readAgentPlanJsonFromDisk(record: AgentSessionRecord): Promise<unknown> {
+  const raw = await fs.readFile(record.planPath, 'utf-8');
+  try {
+    return JSON.parse(raw);
+  } catch (error: any) {
+    throw new Error(`תכנית הסוכנים נכתבה אבל אינה JSON תקין: ${error?.message || 'Invalid JSON'}`);
+  }
+}
+
+function assertAgentSessionAccess(record: AgentSessionRecord, sourceProfileId: string) {
+  if (record.sourceProfileId !== sourceProfileId) {
+    throw new Error('סשן הסוכנים המבוקש לא שייך לפרופיל הפעיל.');
+  }
+}
+
+function isUserTimelineMessage(entry: CodexSessionDetail['timeline'][number] | undefined): boolean {
+  return Boolean(entry && entry.entryType === 'message' && entry.role === 'user');
+}
+
+function isAssistantFinalTimelineMessage(entry: CodexSessionDetail['timeline'][number] | undefined): boolean {
+  return Boolean(entry && entry.entryType === 'message' && entry.role === 'assistant' && entry.kind === 'final');
+}
+
+function resolveDeletedTurnRange(
+  timeline: CodexSessionDetail['timeline'],
+  selectedEntryId: string
+): {
+  startIndex: number;
+  endExclusive: number;
+  selectedEntry: CodexSessionDetail['timeline'][number];
+  turnEntries: CodexSessionDetail['timeline'];
+  deletedUserEntryId: string;
+  deletedAssistantEntryId: string | null;
+} {
+  const selectedIndex = timeline.findIndex((entry) => entry.id === selectedEntryId);
+  if (selectedIndex === -1) {
+    throw new Error('לא ניתן לאתר את זוג ההודעות שנבחר למחיקה.');
+  }
+
+  const selectedEntry = timeline[selectedIndex]!;
+  let startIndex = selectedIndex;
+
+  if (!isUserTimelineMessage(selectedEntry)) {
+    startIndex = -1;
+    for (let index = selectedIndex; index >= 0; index -= 1) {
+      if (isUserTimelineMessage(timeline[index])) {
+        startIndex = index;
+        break;
+      }
+    }
+  }
+
+  if (startIndex < 0 || !isUserTimelineMessage(timeline[startIndex])) {
+    throw new Error('אפשר למחוק רק זוג שמתחיל בהודעת משתמש.');
+  }
+
+  let endExclusive = timeline.length;
+  for (let index = startIndex + 1; index < timeline.length; index += 1) {
+    if (isUserTimelineMessage(timeline[index])) {
+      endExclusive = index;
+      break;
+    }
+  }
+
+  const turnEntries = timeline.slice(startIndex, endExclusive).map((entry) => ({ ...entry }));
+  const deletedAssistantEntry = [...turnEntries].reverse().find((entry) => isAssistantFinalTimelineMessage(entry)) || null;
+
+  return {
+    startIndex,
+    endExclusive,
+    selectedEntry,
+    turnEntries,
+    deletedUserEntryId: timeline[startIndex]!.id,
+    deletedAssistantEntryId: deletedAssistantEntry?.id || null,
+  };
+}
+
+function buildDeletedTurnPromptPrefix(
+  sourceSession: CodexSessionDetail,
+  sourceProviderLabel: string,
+  timeline: CodexSessionDetail['timeline']
+): string {
+  if (timeline.length === 0) {
+    return [
+      `הקשר משוחזר מתוך שיחה קיימת עם ${sourceProviderLabel}, אחרי מחיקת הודעות מהשיחה.`,
+      sourceSession.cwd ? `התיקייה הפעילה: ${sourceSession.cwd}` : '',
+      'אין כרגע היסטוריה קודמת תקפה בתוך השיחה. המשך מכאן רק לפי ההודעה החדשה שתגיע אחר כך.',
+    ].filter(Boolean).join('\n\n');
+  }
+
+  const transcript = timeline
+    .map((entry) => renderTransferTimelineEntry(entry, sourceProviderLabel))
+    .filter((value): value is string => Boolean(value))
+    .join('\n\n');
+
+  return [
+    `הקשר משוחזר מתוך שיחה קיימת עם ${sourceProviderLabel}, אחרי מחיקת הודעות מהשיחה.`,
+    `כותרת השיחה: ${sourceSession.title}`,
+    sourceSession.cwd ? `התיקייה הפעילה: ${sourceSession.cwd}` : '',
+    'להלן ההיסטוריה התקפה היחידה של השיחה, לפי סדר כרונולוגי:',
+    transcript,
+    'הודעות שנמחקו אינן חלק מהשיחה יותר. אסור להתייחס אליהן, לצטט אותן, או להמשיך מהן. המשך רק מההיסטוריה התקפה למעלה ומההודעה החדשה שתגיע אחר כך.',
+  ].filter(Boolean).join('\n\n');
+}
+
+router.get('/auth/status', async (req, res) => {
+  const extensionCredentials = readPersonalChromeUiCredentials(req);
+  if (extensionCredentials) {
+    try {
+      const extensionAuth = await authenticatePersonalChromeUiToken(
+        extensionCredentials.deviceId,
+        extensionCredentials.token,
+      );
+      if (extensionAuth) {
+        const { personalChromeOwnerId: _ownerId, ...publicExtensionAuth } = extensionAuth;
+        res.json(publicExtensionAuth);
+        return;
+      }
+    } catch (error: any) {
+      res.status(500).json({ authenticated: false, error: error?.message || 'Extension authentication failed' });
+      return;
+    }
+  }
+  res.json(readAuthenticatedUser(req));
+});
+
+router.post('/device-unlock', async (req, res) => {
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+  if (password !== CODEX_APP_CONFIG.deviceAdminPassword) {
+    res.status(401).json({ error: 'סיסמת הניהול שגויה.' });
+    return;
+  }
+
+  res.cookie(DEVICE_UNLOCK_COOKIE, createDeviceUnlockToken(req), {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 365 * 24 * 60 * 60 * 1000,
+    domain: CODEX_APP_CONFIG.sessionCookieDomain || undefined,
+    path: '/',
+  });
+
+  const authState = readAuthenticatedUser(req);
+  (req as any).codexAuth = { ...authState, deviceUnlocked: true };
+
+  try {
+    const enrollment = req.body?.extensionPanel === true && authState.authenticated
+      ? await issuePersonalChromeEnrollmentToken(req)
+      : null;
+    res.json({
+      unlocked: true,
+      deviceUnlocked: true,
+      extensionEnrollmentToken: enrollment?.token || null,
+      extensionEnrollmentExpiresAt: enrollment?.expiresAt || null,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'Failed to authorize the browser extension' });
+  }
+});
+
+router.post('/logout', (req, res) => {
+  const finalize = () => {
+    clearCodexAuthCookies(res);
+    res.json({ loggedOut: true });
+  };
+
+  const session = req.session as any;
+  if (!session) {
+    finalize();
+    return;
+  }
+
+  session.destroy((error: any) => {
+    if (error) {
+      res.status(500).json({ error: 'לא ניתן היה לנתק את הסשן.' });
+      return;
+    }
+
+    finalize();
+  });
+});
+
+router.post('/client-logs', requireCodexAccess, async (req, res) => {
+  try {
+    const authState = (req as any).codexAuth;
+    const entry = {
+      ...req.body,
+      receivedAt: new Date().toISOString(),
+      remoteIp: req.ip || req.socket.remoteAddress || null,
+      authUserId: authState?.user?.id || null,
+    };
+
+    await appendClientCrashLog(entry);
+    res.status(202).json({ ok: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to persist client crash log' });
+  }
+});
+
+router.get('/client-logs', requireCodexAccess, async (req, res) => {
+  try {
+    const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 20;
+    const logs = await readRecentClientCrashLogs(limit);
+    res.json({ logs });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to read client crash logs' });
+  }
+});
+
+router.post('/uploads', requireCodexAccess, upload.array('files', MAX_UPLOAD_FILES), async (req, res) => {
+  try {
+    const files = ((req.files as Express.Multer.File[]) || []).map((file) => ({
+      id: randomUUID(),
+      name: decodeMultipartFileName(file.originalname),
+      mimeType: file.mimetype || 'application/octet-stream',
+      size: file.size,
+      path: file.path,
+      isImage: file.mimetype.startsWith('image/'),
+    }));
+
+    res.json({ files });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to upload files' });
+  }
+});
+
+router.get('/remote-agent/health', requireCodexAccess, async (_req, res) => {
+  try {
+    const profiles = await getAvailableProfiles();
+    let codexVersion: string | null = null;
+    try {
+      const result = await execFileAsync(process.env.CODEX_BIN?.trim() || 'codex', ['--version'], {
+        timeout: 3_000,
+        maxBuffer: 256 * 1024,
+        windowsHide: true,
+      });
+      codexVersion = String(result.stdout || result.stderr || '').trim() || null;
+    } catch {
+      codexVersion = null;
+    }
+
+    const decoratedProfiles = await Promise.all(profiles.map(async (profile) => {
+      let authenticated = false;
+      if (profile.provider === 'codex') {
+        authenticated = await fs.access(path.join(profile.codexHome, 'auth.json'))
+          .then(() => true)
+          .catch(() => false);
+      } else {
+        authenticated = true;
+      }
+      return {
+        id: profile.id,
+        label: profile.label,
+        provider: profile.provider,
+        mode: profile.mode,
+        authenticated,
+      };
+    }));
+
+    res.json({
+      ok: true,
+      hostname: hostname(),
+      version: '1.0.0',
+      codexVersion,
+      checkedAt: new Date().toISOString(),
+      profiles: decoratedProfiles,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to read remote agent health' });
+  }
+});
+
+router.get('/servers', requireCodexAccess, async (req, res) => {
+  try {
+    const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    const servers = await listCodeAiServers({ refresh });
+    res.json({ servers });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load code-ai servers' });
+  }
+});
+
+router.post('/servers/:serverId/connect', requireCodexAccess, async (req, res) => {
+  try {
+    const serverId = Array.isArray(req.params.serverId) ? req.params.serverId[0] : req.params.serverId;
+    const health = await refreshRemoteHostHealth(serverId);
+    const servers = await listCodeAiServers();
+    const server = servers.find((candidate) => candidate.id === serverId) || null;
+    res.json({ server, health });
+  } catch (error: any) {
+    res.status(502).json({ error: error.message || 'Failed to connect remote code-ai server' });
+  }
+});
+
+router.get('/profiles', requireCodexAccess, async (_req, res) => {
+  try {
+    const mode = readRequestedMode((_req as any).query?.mode);
+    const allProfiles = await getAvailableProfiles();
+    const profiles = mode ? filterProfilesByMode(allProfiles, mode) : allProfiles;
+    res.json({ profiles });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load Codex profiles' });
+  }
+});
+
+router.get('/models', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const catalog = await getAgentModelCatalog(profileId);
+    res.json(catalog);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load Codex models' });
+  }
+});
+
+router.post('/model-selection', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const modelSlug = typeof req.body?.modelSlug === 'string' ? req.body.modelSlug.trim() : '';
+    const reasoningEffort = typeof req.body?.reasoningEffort === 'string'
+      ? req.body.reasoningEffort.trim()
+      : null;
+    if (!modelSlug) {
+      res.status(400).json({ error: 'Model is required' });
+      return;
+    }
+
+    const catalog = await updateAgentExecutionDefaults(profileId, modelSlug, reasoningEffort);
+    res.json(catalog);
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update model selection' });
+  }
+});
+
+router.get('/multi-agent', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const multiAgent = await getAgentMultiAgentSnapshot(profileId);
+    res.json({ multiAgent });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to load multi-agent mode' });
+  }
+});
+
+router.post('/multi-agent', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    if (typeof req.body?.enabled !== 'boolean') {
+      res.status(400).json({ error: 'Multi-agent enabled state must be a boolean' });
+      return;
+    }
+
+    const multiAgent = await updateAgentMultiAgentMode(profileId, req.body.enabled);
+    res.json({ multiAgent });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update multi-agent mode' });
+  }
+});
+
+router.post('/permissions', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const modeId = typeof req.body?.modeId === 'string' ? req.body.modeId.trim() : '';
+    if (!modeId) {
+      res.status(400).json({ error: 'Permission mode is required' });
+      return;
+    }
+
+    const permissions = await updateAgentPermissionMode(profileId, modeId);
+    res.json({ permissions });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update permission mode' });
+  }
+});
+
+router.post('/response-speed', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const modeId = typeof req.body?.modeId === 'string' ? req.body.modeId.trim() : '';
+    if (!modeId) {
+      res.status(400).json({ error: 'Response speed mode is required' });
+      return;
+    }
+
+    const catalog = await updateAgentResponseSpeed(profileId, modeId);
+    res.json(catalog);
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update response speed' });
+  }
+});
+
+router.get('/rate-limits', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
+    const rateLimits = await getAgentRateLimitSnapshot(profileId, sessionId);
+    res.json({ rateLimits });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load Codex rate limits' });
+  }
+});
+
+router.get('/folders', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const requestedPath = typeof req.query.path === 'string' ? req.query.path : undefined;
+    const result = await browseCodexFolders(requestedPath, profileId);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to browse folders' });
+  }
+});
+
+router.get('/file-tree', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const requestedPath = typeof req.query.path === 'string' ? req.query.path : undefined;
+    const result = await browseCodexFileTree(requestedPath, profileId);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to browse file tree' });
+  }
+});
+
+router.get('/files/preview', requireCodexAccess, async (req, res) => {
+  const rawTarget = typeof req.query.path === 'string' ? req.query.path : '';
+  try {
+    if (!rawTarget) {
+      res.status(400).json({ error: 'File path is required' });
+      return;
+    }
+
+    const resolution = await resolveCodexFileTarget(rawTarget);
+    if (resolution.kind === 'matches') {
+      await logFileRouteEvent(req, {
+        type: 'file-preview-ambiguous',
+        rawTarget,
+        status: 409,
+        matches: resolution.matches.map((match) => match.path),
+        lineNumber: resolution.lineNumber,
+      });
+      res.status(409).json({
+        query: resolution.query,
+        lineNumber: resolution.lineNumber,
+        matches: resolution.matches,
+      });
+      return;
+    }
+
+    const { file } = resolution;
+    const fileSize = Number(file.stats.size);
+    if (fileSize > MAX_PREVIEW_FILE_BYTES) {
+      await logFileRouteEvent(req, {
+        type: 'file-preview-too-large',
+        rawTarget,
+        resolvedPath: file.resolvedPath,
+        status: 413,
+        size: fileSize,
+        previewKind: file.previewKind,
+        mimeType: file.mimeType,
+        lineNumber: file.lineNumber,
+      });
+      res.status(413).json({
+        error: `קבצים מעל ${(MAX_PREVIEW_FILE_BYTES / (1024 * 1024)).toFixed(0)}MB לא מוצגים בתצוגה מקדימה.`,
+      });
+      return;
+    }
+
+    const resolvedPathParam = encodeURIComponent(file.resolvedPath);
+    const contentUrl = `/api/codex/files/content?path=${resolvedPathParam}`;
+    const downloadUrl = `/api/codex/files/download?path=${resolvedPathParam}`;
+
+    await logFileRouteEvent(req, {
+      type: 'file-preview-success',
+      rawTarget,
+      resolvedPath: file.resolvedPath,
+      status: 200,
+      size: fileSize,
+      mimeType: file.mimeType,
+      previewKind: file.previewKind,
+      lineNumber: file.lineNumber,
+    });
+
+    res.json({
+      file: {
+        path: file.displayPath,
+        name: path.basename(file.resolvedPath),
+        extension: file.extension,
+        size: fileSize,
+        lineNumber: file.lineNumber,
+        isMarkdown: file.isMarkdown,
+        isText: file.isText,
+        mimeType: file.mimeType || 'application/octet-stream',
+        previewKind: file.previewKind,
+        codeLanguage: file.codeLanguage,
+        truncated: file.truncated,
+        content: file.content,
+        downloadUrl,
+        contentUrl,
+      },
+    });
+  } catch (error: any) {
+    await logFileRouteEvent(req, {
+      type: 'file-preview-error',
+      rawTarget,
+      status: 404,
+      message: error.message || 'Failed to preview file',
+    });
+    res.status(404).json({ error: error.message || 'Failed to preview file' });
+  }
+});
+
+router.get('/files/download', requireCodexAccess, async (req, res) => {
+  const rawTarget = typeof req.query.path === 'string' ? req.query.path : '';
+  try {
+    if (!rawTarget) {
+      res.status(400).json({ error: 'File path is required' });
+      return;
+    }
+
+    const resolution = await resolveCodexFileTarget(rawTarget);
+    if (resolution.kind === 'matches') {
+      await logFileRouteEvent(req, {
+        type: 'file-download-ambiguous',
+        rawTarget,
+        status: 409,
+        matches: resolution.matches.map((match) => match.path),
+        lineNumber: resolution.lineNumber,
+      });
+      res.status(409).json({
+        error: 'נמצאו כמה קבצים. בחר קובץ אחד לפני ההורדה.',
+        query: resolution.query,
+        lineNumber: resolution.lineNumber,
+        matches: resolution.matches,
+      });
+      return;
+    }
+
+    const { file } = resolution;
+    const fileSize = Number(file.stats.size);
+    await logFileRouteEvent(req, {
+      type: 'file-download-success',
+      rawTarget,
+      resolvedPath: file.resolvedPath,
+      status: 200,
+      size: fileSize,
+      mimeType: file.mimeType,
+      previewKind: file.previewKind,
+      lineNumber: file.lineNumber,
+    });
+    res.download(file.resolvedPath, path.basename(file.resolvedPath));
+  } catch (error: any) {
+    await logFileRouteEvent(req, {
+      type: 'file-download-error',
+      rawTarget,
+      status: 404,
+      message: error.message || 'Failed to download file',
+    });
+    res.status(404).json({ error: error.message || 'Failed to download file' });
+  }
+});
+
+router.get('/files/content', requireCodexAccess, async (req, res) => {
+  const rawTarget = typeof req.query.path === 'string' ? req.query.path : '';
+  try {
+    if (!rawTarget) {
+      res.status(400).json({ error: 'File path is required' });
+      return;
+    }
+
+    const resolution = await resolveCodexFileTarget(rawTarget);
+    if (resolution.kind === 'matches') {
+      await logFileRouteEvent(req, {
+        type: 'file-content-ambiguous',
+        rawTarget,
+        status: 409,
+        matches: resolution.matches.map((match) => match.path),
+        lineNumber: resolution.lineNumber,
+      });
+      res.status(409).json({
+        error: 'נמצאו כמה קבצים. בחר קובץ אחד לפני התצוגה.',
+        query: resolution.query,
+        lineNumber: resolution.lineNumber,
+        matches: resolution.matches,
+      });
+      return;
+    }
+
+    const { file } = resolution;
+    const fileSize = Number(file.stats.size);
+    await logFileRouteEvent(req, {
+      type: 'file-content-success',
+      rawTarget,
+      resolvedPath: file.resolvedPath,
+      status: 200,
+      size: fileSize,
+      mimeType: file.mimeType,
+      previewKind: file.previewKind,
+      lineNumber: file.lineNumber,
+    });
+
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(path.basename(file.resolvedPath))}"`);
+    if (file.mimeType) {
+      res.type(file.mimeType);
+    }
+    res.sendFile(file.resolvedPath);
+  } catch (error: any) {
+    await logFileRouteEvent(req, {
+      type: 'file-content-error',
+      rawTarget,
+      status: 404,
+      message: error.message || 'Failed to load file content',
+    });
+    res.status(404).json({ error: error.message || 'Failed to load file content' });
+  }
+});
+
+router.get('/files/logs', requireCodexAccess, async (req, res) => {
+  try {
+    const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50;
+    const logs = await readRecentCodexFileLogs(limit);
+    res.json({ logs });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to read file logs' });
+  }
+});
+
+router.post('/terminal/sessions', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+    if (!profileId || !requestedCwd) {
+      res.status(400).json({ error: 'Profile id and terminal directory are required' });
+      return;
+    }
+
+    const { profile, resolvedPath } = await resolveCodexFolderPath(requestedCwd, profileId);
+    const terminal = createCodexTerminalSession({
+      ownerId: readTerminalOwnerId(req),
+      profile,
+      cwd: resolvedPath,
+      columns: typeof req.body?.columns === 'number' ? req.body.columns : undefined,
+      rows: typeof req.body?.rows === 'number' ? req.body.rows : undefined,
+    });
+    res.status(201).json({ terminal });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to start terminal' });
+  }
+});
+
+router.get('/terminal/sessions/:terminalId/output', requireCodexAccess, (req, res) => {
+  try {
+    const terminalId = readRouteParam(req.params.terminalId);
+    const cursor = typeof req.query.cursor === 'string'
+      ? Number.parseInt(req.query.cursor, 10)
+      : 0;
+    const output = readCodexTerminalOutput(
+      readTerminalOwnerId(req),
+      terminalId,
+      Number.isInteger(cursor) ? cursor : 0
+    );
+    res.json(output);
+  } catch (error: any) {
+    const message = error.message || 'Failed to read terminal output';
+    res.status(message === 'Terminal session was not found' ? 404 : 400).json({ error: message });
+  }
+});
+
+router.post('/terminal/sessions/:terminalId/input', requireCodexAccess, (req, res) => {
+  try {
+    const terminalId = readRouteParam(req.params.terminalId);
+    const data = typeof req.body?.data === 'string' ? req.body.data : '';
+    writeCodexTerminalInput(readTerminalOwnerId(req), terminalId, data);
+    res.json({ accepted: true });
+  } catch (error: any) {
+    const message = error.message || 'Failed to write terminal input';
+    res.status(message === 'Terminal session was not found' ? 404 : 400).json({ error: message });
+  }
+});
+
+router.post('/terminal/sessions/:terminalId/resize', requireCodexAccess, (req, res) => {
+  try {
+    const terminalId = readRouteParam(req.params.terminalId);
+    resizeCodexTerminal(
+      readTerminalOwnerId(req),
+      terminalId,
+      typeof req.body?.columns === 'number' ? req.body.columns : undefined,
+      typeof req.body?.rows === 'number' ? req.body.rows : undefined
+    );
+    res.json({ resized: true });
+  } catch (error: any) {
+    const message = error.message || 'Failed to resize terminal';
+    res.status(message === 'Terminal session was not found' ? 404 : 400).json({ error: message });
+  }
+});
+
+router.delete('/terminal/sessions/:terminalId', requireCodexAccess, (req, res) => {
+  try {
+    const terminalId = readRouteParam(req.params.terminalId);
+    closeCodexTerminal(readTerminalOwnerId(req), terminalId);
+    res.json({ closed: true });
+  } catch (error: any) {
+    const message = error.message || 'Failed to close terminal';
+    res.status(message === 'Terminal session was not found' ? 404 : 400).json({ error: message });
+  }
+});
+
+router.get('/sessions', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const query = typeof req.query.query === 'string' ? req.query.query : '';
+    const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined;
+
+    const primarySessions = await listAgentSessions(profileId, query, limit);
+    const linkedSessions = profileId ? await loadAgentLinkedSessionSummaries(profileId, query, limit) : [];
+    const mergedSessionMap = new Map<string, CodexSessionSummary>();
+    for (const session of [...primarySessions, ...linkedSessions]) {
+      mergedSessionMap.set(session.id, session);
+    }
+    const sessions = await decorateSessionSummaryListForClient(
+      profileId,
+      [...mergedSessionMap.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    );
+    const hiddenIds = profileId ? await listHiddenSessionIds(profileId) : new Set<string>();
+    const topicMap = profileId ? await getSessionTopicMap(profileId) : {};
+    const titleMap = profileId ? await getSessionTitleMap(profileId) : {};
+    res.json({
+      sessions: sessions.map((session) => ({
+        ...session,
+        title: profileId ? titleMap[session.id] || session.title : session.title,
+        hidden: hiddenIds.has(session.id),
+        topic: profileId ? topicMap[session.id] || null : null,
+      })),
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load Codex sessions' });
+  }
+});
+
+router.get('/sessions/share-candidates', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : undefined;
+    const query = typeof req.query.query === 'string' ? req.query.query.trim().slice(0, 500) : '';
+    const requestedOffset = typeof req.query.offset === 'string'
+      ? Number.parseInt(req.query.offset, 10)
+      : 0;
+    const requestedLimit = typeof req.query.limit === 'string'
+      ? Number.parseInt(req.query.limit, 10)
+      : 60;
+    const offset = Number.isFinite(requestedOffset) ? Math.max(0, requestedOffset) : 0;
+    const pageSize = Number.isFinite(requestedLimit)
+      ? Math.min(100, Math.max(1, requestedLimit))
+      : 60;
+
+    if (!profileId || !findConfiguredProfile(profileId)) {
+      res.status(404).json({ error: 'הפרופיל שנבחר לא קיים.' });
+      return;
+    }
+
+    const requestedCount = offset + pageSize + 1;
+    const [primarySessions, linkedSessions] = await Promise.all([
+      listAgentSessions(profileId, query, requestedCount, { allowExtendedLimit: true }),
+      loadAgentLinkedSessionSummaries(profileId, query, requestedCount, { allowExtendedLimit: true }),
+    ]);
+    const mergedSessionMap = new Map<string, CodexSessionSummary>();
+    for (const session of [...primarySessions, ...linkedSessions]) {
+      mergedSessionMap.set(session.id, session);
+    }
+    const sortedSessions = [...mergedSessionMap.values()]
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    const pageRows = sortedSessions.slice(offset, offset + pageSize);
+    const sessions = await decorateSessionSummaryListForClient(profileId, pageRows);
+    const [hiddenIds, topicMap, titleMap] = await Promise.all([
+      listHiddenSessionIds(profileId),
+      getSessionTopicMap(profileId),
+      getSessionTitleMap(profileId),
+    ]);
+    const hasMore = sortedSessions.length > offset + pageSize;
+
+    res.json({
+      sessions: sessions.map((session) => ({
+        ...session,
+        title: titleMap[session.id] || session.title,
+        hidden: hiddenIds.has(session.id),
+        topic: topicMap[session.id] || null,
+      })),
+      hasMore,
+      nextOffset: hasMore ? offset + pageRows.length : null,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load conversation share candidates' });
+  }
+});
+
+router.post('/sessions/copy', requireCodexAccess, async (req, res) => {
+  try {
+    const sourceProfileId = typeof req.body?.sourceProfileId === 'string' && req.body.sourceProfileId.trim()
+      ? req.body.sourceProfileId.trim()
+      : undefined;
+    const targetProfileId = typeof req.body?.targetProfileId === 'string' && req.body.targetProfileId.trim()
+      ? req.body.targetProfileId.trim()
+      : undefined;
+    const sessionIds = Array.isArray(req.body?.sessionIds)
+      ? req.body.sessionIds
+        .filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+        .map((value) => value.trim())
+      : [];
+
+    if (!sourceProfileId || !targetProfileId || sessionIds.length === 0) {
+      res.status(400).json({ error: 'Source profile, target profile and session ids are required' });
+      return;
+    }
+
+    const sourceProfile = CODEX_APP_CONFIG.profiles.find((profile) => profile.id === sourceProfileId);
+    const targetProfile = CODEX_APP_CONFIG.profiles.find((profile) => profile.id === targetProfileId);
+
+    if (!sourceProfile || !targetProfile) {
+      res.status(404).json({ error: 'אחד המשתמשים שנבחרו לא קיים.' });
+      return;
+    }
+
+    if (sourceProfile.provider !== 'codex' || targetProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'העתקת שיחות בין משתמשים נתמכת כרגע רק ב-Codex.' });
+      return;
+    }
+
+    if (sourceProfile.mode !== 'standard' || targetProfile.mode !== 'standard') {
+      res.status(400).json({ error: 'העתקת שיחות זמינה רק בין משתמשים רגילים.' });
+      return;
+    }
+
+    if (sourceProfile.id === targetProfile.id) {
+      res.status(400).json({ error: 'בחר משתמש יעד שונה מהמשתמש הנוכחי.' });
+      return;
+    }
+
+    const copied: Array<{ sessionId: string; targetSessionId: string; title: string; targetProfileId: string }> = [];
+    const skipped: Array<{ sessionId: string; reason: string }> = [];
+    const uniqueSessionIds = [...new Set(sessionIds)];
+
+    for (const sessionId of uniqueSessionIds) {
+      if (sessionId.startsWith('draft:')) {
+        skipped.push({ sessionId, reason: 'אי אפשר להעתיק draft. פתח את השיחה הרגילה או המשך אותה קודם.' });
+        continue;
+      }
+
+      try {
+        const sourceSession = await getAgentSessionDetail(sessionId, sourceProfileId, { tail: 1, full: false });
+        if (sourceSession.isDraft || sourceSession.agentSession) {
+          skipped.push({ sessionId, reason: 'אי אפשר להעתיק draft או סשן סוכנים במצב הזה.' });
+          continue;
+        }
+
+        const copiedSession = await copyCodexSessionToProfile(sessionId, sourceProfileId, targetProfileId);
+        await copySessionSidebarMetadataToForkSession(
+          sourceProfileId,
+          targetProfileId,
+          sourceSession,
+          copiedSession.id,
+          { preserveHidden: false }
+        );
+        await copySessionInstructionToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
+        await copySessionContextSelectionToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
+        await copySessionRemindersToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
+        await copySessionNotificationPreferenceToSession(sourceProfileId, targetProfileId, sessionId, copiedSession.id);
+
+        copied.push({
+          sessionId,
+          targetSessionId: copiedSession.id,
+          title: sourceSession.title,
+          targetProfileId,
+        });
+      } catch (error: any) {
+        skipped.push({
+          sessionId,
+          reason: error?.message || 'העתקת השיחה נכשלה.',
+        });
+      }
+    }
+
+    res.json({
+      copied,
+      skipped,
+      sourceProfileId,
+      targetProfileId,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to copy sessions between users' });
+  }
+});
+
+router.post('/sessions/share-as-markdown', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionIds = Array.isArray(req.body?.sessionIds)
+      ? req.body.sessionIds
+        .filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+        .map((value: string) => value.trim())
+      : [];
+    const targetSessionId = typeof req.body?.targetSessionId === 'string' && req.body.targetSessionId.trim()
+      ? req.body.targetSessionId.trim()
+      : null;
+
+    if (!profileId || sessionIds.length === 0) {
+      res.status(400).json({ error: 'Profile id and at least one session id are required' });
+      return;
+    }
+    if (!findConfiguredProfile(profileId)) {
+      res.status(404).json({ error: 'הפרופיל שנבחר לא קיים.' });
+      return;
+    }
+    if (sessionIds.length > MAX_SHARED_CONVERSATIONS) {
+      res.status(400).json({ error: `אפשר לשתף עד ${MAX_SHARED_CONVERSATIONS} שיחות בכל פעולה.` });
+      return;
+    }
+    if (targetSessionId) {
+      const [resolvedTargetSessionId, ...resolvedSourceSessionIds] = await Promise.all([
+        resolveEffectiveSessionId(targetSessionId),
+        ...sessionIds.map((sessionId) => resolveEffectiveSessionId(sessionId)),
+      ]);
+      if (resolvedSourceSessionIds.includes(resolvedTargetSessionId)) {
+        res.status(400).json({ error: 'אי אפשר לצרף שיחה לעצמה. בחר שיחה אחרת.' });
+        return;
+      }
+    }
+
+    const exports = await exportSharedConversations(profileId, sessionIds, targetSessionId, {
+      loadSessionDetail: async (sessionId, visibleProfileId) => {
+        const effectiveProfileId = await resolveEffectiveProfileIdForSession(visibleProfileId, sessionId);
+        const resolvedSessionId = await resolveEffectiveSessionId(sessionId);
+        const session = await getAgentSessionDetail(resolvedSessionId, effectiveProfileId, { full: true });
+        return {
+          ...session,
+          profileId: visibleProfileId,
+        };
+      },
+    });
+
+    res.status(201).json({
+      files: exports.map((item) => item.attachment),
+      exports,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to export shared conversations' });
+  }
+});
+
+router.get('/topics', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : undefined;
+    const cwd = typeof req.query.cwd === 'string' && req.query.cwd.trim()
+      ? (await resolveCodexFolderPath(req.query.cwd.trim(), profileId)).resolvedPath
+      : undefined;
+
+    if (!profileId || !cwd) {
+      res.status(400).json({ error: 'Profile id and cwd are required' });
+      return;
+    }
+
+    const topics = await listSessionTopics(profileId, cwd);
+    res.json({ topics });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to load topics' });
+  }
+});
+
+router.post('/topics', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const cwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? (await resolveCodexFolderPath(req.body.cwd.trim(), profileId)).resolvedPath
+      : undefined;
+
+    if (!profileId || !cwd) {
+      res.status(400).json({ error: 'Profile id and cwd are required' });
+      return;
+    }
+
+    const topic = await createSessionTopic(profileId, cwd, {
+      name: typeof req.body?.name === 'string' ? req.body.name : '',
+      icon: typeof req.body?.icon === 'string' ? req.body.icon : '',
+      colorKey: typeof req.body?.colorKey === 'string' ? req.body.colorKey : '',
+    });
+
+    res.status(201).json({ topic });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to create topic' });
+  }
+});
+
+router.delete('/topics/:topicId', requireCodexAccess, async (req, res) => {
+  try {
+    const topicId = readRouteParam(req.params.topicId);
+    const profileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+        ? req.body.profileId.trim()
+        : undefined;
+    const deleteSessions = req.query.deleteSessions === 'true' || req.body?.deleteSessions === true;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const affectedSessionIds = await listTopicAssignmentSessionIds(profileId, topicId);
+    const deletion = await deleteSessionTopic(profileId, topicId);
+
+    if (deleteSessions) {
+      for (const sessionId of affectedSessionIds) {
+        await deleteSessionPermanently(profileId, sessionId);
+      }
+    }
+
+    res.json({
+      deleted: true,
+      profileId,
+      topic: deletion.topic,
+      affectedSessionIds,
+      deletedSessions: deleteSessions,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete topic' });
+  }
+});
+
+router.post('/sessions/:sessionId/hide', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const hidden = req.body?.hidden !== false;
+    const nextHidden = await setSessionHidden(profileId, sessionId, hidden);
+    res.json({
+      sessionId,
+      profileId,
+      hidden: nextHidden,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to update session visibility' });
+  }
+});
+
+router.delete('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const requestedProfileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+        ? req.body.profileId.trim()
+        : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+    res.json(await deleteSessionPermanently(requestedProfileId || profileId, sessionId));
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete session permanently' });
+  }
+});
+
+router.get('/sessions/:sessionId/events', requireCodexAccess, async (req, res) => {
+  let closeSubscription: (() => void) | null = null;
+  let heartbeat: NodeJS.Timeout | null = null;
+
+  try {
+    const requestedSessionId = readRouteParam(req.params.sessionId);
+    const sessionId = await resolveEffectiveSessionId(requestedSessionId);
+    const requestedProfileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const requestedKnownTimelineEntries = typeof req.query.knownTimelineEntries === 'string'
+      ? Number.parseInt(req.query.knownTimelineEntries, 10)
+      : 0;
+    let streamKnownTimelineEntries = Number.isFinite(requestedKnownTimelineEntries)
+      ? Math.max(0, requestedKnownTimelineEntries)
+      : 0;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+    if (!profileId || getProviderForProfile(profileId) !== 'codex') {
+      res.status(409).json({ error: 'Live session streaming is currently available for Codex sessions' });
+      return;
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const sendEvent = (event: string, payload: unknown) => {
+      if (res.writableEnded || res.destroyed) return;
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    let snapshotGeneration = 0;
+    const sendLatestSnapshot = (revision: unknown) => {
+      const generation = ++snapshotGeneration;
+      sendEvent('session-changed', revision);
+      void getAgentSessionDetail(sessionId, profileId, { tail: 120 })
+        .then((session) => {
+          if (generation === snapshotGeneration) {
+            const growth = session.totalTimelineEntries - streamKnownTimelineEntries;
+            const canSendTailPatch = streamKnownTimelineEntries > 0 && growth >= 0;
+            const streamedTailSize = Math.min(120, Math.max(16, growth + 8));
+            const streamedSessionBase = canSendTailPatch && session.timeline.length > streamedTailSize
+              ? {
+                ...session,
+                messages: [],
+                timeline: session.timeline.slice(-streamedTailSize),
+                timelineWindowStart: Math.max(0, session.totalTimelineEntries - streamedTailSize),
+                timelineWindowEnd: session.totalTimelineEntries,
+                hasEarlierTimeline: session.totalTimelineEntries > streamedTailSize,
+              }
+              : session;
+            const streamedSession = prepareSessionDetailForClient(streamedSessionBase, {
+              maxTimelineBytes: 256 * 1024,
+            });
+            streamKnownTimelineEntries = session.totalTimelineEntries;
+            sendEvent('session-snapshot', {
+              mode: streamedSessionBase === session ? 'full' : 'tail',
+              revision,
+              session: streamedSession,
+            });
+          }
+        })
+        .catch((error) => {
+          console.error(`Failed to stream live session snapshot for ${sessionId}:`, error);
+          if (generation === snapshotGeneration) {
+            sendEvent('session-snapshot-error', {
+              revision,
+              message: 'Live session snapshot could not be generated',
+            });
+          }
+        });
+    };
+
+    const subscription = await subscribeCodexSessionChanges(
+      sessionId,
+      profileId,
+      sendLatestSnapshot
+    );
+    closeSubscription = subscription.close;
+    sendEvent('ready', subscription.initialRevision);
+
+    heartbeat = setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(': keep-alive\n\n');
+      }
+    }, 15_000);
+    heartbeat.unref?.();
+
+    req.once('close', () => {
+      if (heartbeat) clearInterval(heartbeat);
+      closeSubscription?.();
+      heartbeat = null;
+      closeSubscription = null;
+    });
+  } catch (error: any) {
+    if (heartbeat) clearInterval(heartbeat);
+    closeSubscription?.();
+    if (!res.headersSent) {
+      res.status(404).json({ error: error.message || 'Session was not found' });
+      return;
+    }
+    if (!res.writableEnded) {
+      res.end();
+    }
+  }
+});
+
+router.get('/sessions/:sessionId', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedSessionId = readRouteParam(req.params.sessionId);
+    const sessionId = await resolveEffectiveSessionId(requestedSessionId);
+    const requestedProfileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+    const tail = typeof req.query.tail === 'string'
+      ? Number.parseInt(req.query.tail, 10)
+      : undefined;
+    const before = typeof req.query.before === 'string'
+      ? Number.parseInt(req.query.before, 10)
+      : undefined;
+    const full = req.query.full === '1' || req.query.full === 'true';
+    const session = await decorateSessionDetailForClient(
+      profileId,
+      await getAgentSessionDetail(sessionId, profileId, {
+        tail: Number.isFinite(tail) ? tail : undefined,
+        before: Number.isFinite(before) ? before : undefined,
+        full,
+      })
+    );
+    const visibleProfileId = requestedProfileId || profileId;
+    const topicMap = visibleProfileId ? await getSessionTopicMap(visibleProfileId) : {};
+    const titleMap = visibleProfileId ? await getSessionTitleMap(visibleProfileId) : {};
+    res.json({
+      session: {
+        ...session,
+        profileId: visibleProfileId || session.profileId,
+        title: visibleProfileId ? titleMap[session.id] || session.title : session.title,
+        topic: session.agentSession?.topicId
+          ? Object.values(topicMap).find((topic) => topic.id === session.agentSession?.topicId) || null
+          : visibleProfileId ? topicMap[session.id] || null : null,
+      },
+    });
+  } catch (error: any) {
+    res.status(404).json({ error: error.message || 'Session was not found' });
+  }
+});
+
+router.get('/sessions/:sessionId/changes/:entryId', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const entryId = readRouteParam(req.params.entryId);
+    const requestedProfileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+    const record = await getAgentSessionChangeRecord(sessionId, entryId, profileId);
+    res.json({ record });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session change record' });
+  }
+});
+
+router.post('/sessions/:sessionId/delete-turn', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+    const entryId = typeof req.body?.entryId === 'string' && req.body.entryId.trim()
+      ? req.body.entryId.trim()
+      : undefined;
+
+    if (!profileId || !entryId) {
+      res.status(400).json({ error: 'Profile id and entry id are required' });
+      return;
+    }
+
+    const profile = CODEX_APP_CONFIG.profiles.find((candidate) => candidate.id === profileId);
+    if (!profile) {
+      res.status(404).json({ error: 'הפרופיל שנבחר לא קיים.' });
+      return;
+    }
+
+    const sourceSession = await normalizeSessionDetailForOperations(
+      profileId,
+      await getAgentSessionDetail(sessionId, profileId, {
+        full: true,
+      })
+    );
+    const resolvedTurnRange = sourceSession.isDraft
+      ? resolveDeletedTurnRange(sourceSession.timeline, entryId)
+      : (() => {
+        try {
+          return resolveDeletedTurnRange(sourceSession.timeline, entryId);
+        } catch {
+          return null;
+        }
+      })();
+    const deletedUserEntryId = resolvedTurnRange?.deletedUserEntryId || entryId;
+    const deletedAssistantEntryId = resolvedTurnRange?.deletedAssistantEntryId || null;
+    const filteredTimeline = resolvedTurnRange
+      ? [
+        ...sourceSession.timeline.slice(0, resolvedTurnRange.startIndex),
+        ...sourceSession.timeline.slice(resolvedTurnRange.endExclusive),
+      ].map((entry) => ({ ...entry }))
+      : [];
+
+    const activeQueueItems = (await listCodexQueueItems(profileId)).filter((item) => (
+      (item.queueKey === sessionId || item.sessionId === sessionId)
+      && (
+        item.status === 'scheduled'
+        || item.status === 'queued'
+        || item.status === 'running'
+        || item.status === 'cancelling'
+      )
+    ));
+
+    for (const item of activeQueueItems) {
+      try {
+        await cancelCodexQueueItem(item.id);
+      } catch {
+        // Best effort cancellation. Session rewrite still proceeds.
+      }
+    }
+
+    if (sourceSession.isDraft) {
+      const draft = await getForkDraftSession(sourceSession.id);
+      if (!draft || draft.profileId !== profileId) {
+        throw new Error('טיוטת השיחה שנבחרה כבר לא קיימת.');
+      }
+
+      const sourceProviderLabel = getProviderDisplayLabel(
+        draft.transferSourceProvider || profile.provider
+      );
+      const latestUserEntryWithText = [...filteredTimeline]
+        .reverse()
+        .find((entry) => entry.entryType === 'message' && entry.role === 'user' && entry.text?.trim());
+      const promptPreview = clipTransferText(latestUserEntryWithText?.text || draft.sourceTitle, 140);
+      const promptPrefix = buildDeletedTurnPromptPrefix({
+        ...sourceSession,
+        title: draft.sourceTitle || sourceSession.title,
+        cwd: draft.sourceCwd || sourceSession.cwd,
+      }, sourceProviderLabel, filteredTimeline);
+
+      await updateForkDraftSession(sourceSession.id, {
+        promptPreview,
+        promptPrefix,
+        timeline: filteredTimeline,
+      });
+    } else {
+      await deleteAgentTurn(sourceSession.id, deletedUserEntryId, profileId);
+    }
+
+    await deleteSessionChangeRecords(sourceSession.id);
+
+    const updatedSessionBase = await getAgentSessionDetail(sourceSession.id, profileId, {
+      full: true,
+    });
+    const updatedSession = await decorateSessionDetailForClient(profileId, updatedSessionBase);
+    const [topicMap, titleMap] = await Promise.all([
+      getSessionTopicMap(profileId),
+      getSessionTitleMap(profileId),
+    ]);
+
+    res.json({
+      sessionId: sourceSession.id,
+      deletedUserEntryId,
+      deletedAssistantEntryId,
+      cancelledQueueItemIds: activeQueueItems.map((item) => item.id),
+      session: {
+        ...updatedSession,
+        title: titleMap[sourceSession.id] || updatedSession.title,
+        topic: topicMap[sourceSession.id] || null,
+      },
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete the selected turn' });
+  }
+});
+
+router.post('/sessions/:sessionId/fork', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const forkEntryId = typeof req.body?.forkEntryId === 'string' && req.body.forkEntryId.trim()
+      ? req.body.forkEntryId.trim()
+      : undefined;
+
+    if (!profileId || !forkEntryId) {
+      res.status(400).json({ error: 'Profile id and fork entry id are required' });
+      return;
+    }
+
+    const sourceSession = await normalizeSessionDetailForOperations(
+      profileId,
+      await getAgentSessionDetail(sessionId, profileId, {
+        full: true,
+      })
+    );
+    const forkResult = await createAgentForkSession(sourceSession.id, forkEntryId, profileId);
+    const forkSidebarMetadata = await copySessionSidebarMetadataToForkSession(
+      profileId,
+      profileId,
+      sourceSession,
+      forkResult.sessionId
+    );
+    await copySessionContextSelectionToSession(profileId, profileId, sourceSession.id, forkResult.sessionId);
+    await copySessionRemindersToSession(profileId, profileId, sourceSession.id, forkResult.sessionId);
+    await copySessionNotificationPreferenceToSession(profileId, profileId, sourceSession.id, forkResult.sessionId);
+    await recordForkSessionMetadata({
+      sessionId: forkResult.sessionId,
+      profileId,
+      sourceSessionId: sourceSession.id,
+      sourceTitle: sourceSession.title,
+      sourceCwd: sourceSession.cwd || null,
+      forkEntryId,
+      promptPreview: sourceSession.title,
+      timeline: [],
+      createdAt: new Date().toISOString(),
+    });
+    const forkSession = await decorateSessionDetailForClient(
+      profileId,
+      await getAgentSessionDetail(forkResult.sessionId, profileId, {
+        tail: 120,
+      })
+    );
+
+    res.status(201).json({
+      sessionId: forkResult.sessionId,
+      forkedAt: forkResult.forkedAt,
+      session: {
+        id: forkResult.sessionId,
+        title: forkSidebarMetadata.title,
+        updatedAt: forkSession.updatedAt,
+        createdAt: forkSession.createdAt,
+        profileId,
+        cwd: forkSession.cwd,
+        messageCount: forkSession.messageCount,
+        preview: forkSession.preview,
+        startPreview: forkSession.startPreview,
+        endPreview: forkSession.endPreview,
+        path: forkSession.path,
+        source: forkSession.source,
+        hidden: forkSidebarMetadata.hidden,
+        topic: forkSidebarMetadata.topic,
+        forkSourceSessionId: sourceSession.id,
+        forkEntryId,
+      },
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to create fork session' });
+  }
+});
+
+router.post('/sessions/:sessionId/transfer', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const targetProfileId = typeof req.body?.targetProfileId === 'string' && req.body.targetProfileId.trim()
+      ? req.body.targetProfileId.trim()
+      : undefined;
+    const transferEntryId = typeof req.body?.transferEntryId === 'string' && req.body.transferEntryId.trim()
+      ? req.body.transferEntryId.trim()
+      : undefined;
+    const clientRequestId = typeof req.body?.clientRequestId === 'string' && req.body.clientRequestId.trim()
+      ? req.body.clientRequestId.trim()
+      : randomUUID();
+
+    if (!profileId || !targetProfileId || !transferEntryId) {
+      res.status(400).json({ error: 'Source profile, target profile and transfer entry id are required' });
+      return;
+    }
+
+    const sourceProfile = CODEX_APP_CONFIG.profiles.find((profile) => profile.id === profileId);
+    const targetProfile = CODEX_APP_CONFIG.profiles.find((profile) => profile.id === targetProfileId);
+
+    if (!sourceProfile || !targetProfile) {
+      res.status(404).json({ error: 'אחד הפרופילים שנבחרו לא קיים.' });
+      return;
+    }
+
+    if (sourceProfile.id === targetProfile.id) {
+      res.status(400).json({ error: 'בחר יעד שונה מהפרופיל הנוכחי.' });
+      return;
+    }
+
+    if (sourceProfile.provider === targetProfile.provider) {
+      res.status(400).json({ error: 'בחר יעד מספק אחר.' });
+      return;
+    }
+
+    const sourceSession = await getAgentSessionDetail(sessionId, profileId, {
+      full: true,
+    });
+    const entryIndex = sourceSession.timeline.findIndex((entry) => entry.id === transferEntryId);
+
+    if (entryIndex === -1) {
+      res.status(404).json({ error: 'לא ניתן לאתר את נקודת ההעברה שנבחרה.' });
+      return;
+    }
+
+    const slicedTimeline = sourceSession.timeline
+      .slice(0, entryIndex + 1)
+      .map((entry) => ({ ...entry }));
+    const selectedEntry = slicedTimeline.at(-1);
+    const sourceProviderLabel = getProviderDisplayLabel(sourceProfile.provider);
+    const promptPreview = clipTransferText(
+      (
+        selectedEntry?.entryType === 'message'
+        && typeof selectedEntry.text === 'string'
+        && selectedEntry.text.trim()
+      ) ? selectedEntry.text : sourceSession.title,
+      140
+    );
+    const promptPrefix = buildTransferPromptPrefix(sourceSession, sourceProviderLabel, slicedTimeline);
+    const draft = await createForkDraftSession({
+      profileId: targetProfile.id,
+      sourceSessionId: sourceSession.id,
+      sourceTitle: sourceSession.title,
+      sourceCwd: sourceSession.cwd || targetProfile.workspaceCwd,
+      forkEntryId: transferEntryId,
+      transferSourceProvider: sourceProfile.provider,
+      transferTargetProvider: targetProfile.provider,
+      promptPreview,
+      promptPrefix,
+      timeline: slicedTimeline,
+    });
+    const draftSidebarMetadata = await copySessionSidebarMetadataToForkSession(
+      profileId,
+      targetProfile.id,
+      sourceSession,
+      draft.sessionId
+    );
+    await copySessionContextSelectionToSession(profileId, targetProfile.id, sourceSession.id, draft.sessionId);
+    await copySessionRemindersToSession(profileId, targetProfile.id, sourceSession.id, draft.sessionId);
+    await copySessionNotificationPreferenceToSession(profileId, targetProfile.id, sourceSession.id, draft.sessionId);
+    const autoPrompt = buildTransferAutoPrompt(selectedEntry);
+    const queueItem = await enqueueCodexQueueItem({
+      profileId: targetProfile.id,
+      queueKey: draft.sessionId,
+      clientRequestId,
+      sessionId: null,
+      cwd: draft.sourceCwd || targetProfile.workspaceCwd,
+      prompt: autoPrompt,
+      promptPreview,
+      contextPrefix: draft.promptPrefix,
+      forkContext: {
+        sourceSessionId: draft.sourceSessionId,
+        sourceTitle: draft.sourceTitle,
+        sourceCwd: draft.sourceCwd,
+        forkEntryId: draft.forkEntryId,
+        transferSourceProvider: draft.transferSourceProvider || null,
+        transferTargetProvider: draft.transferTargetProvider || null,
+        timeline: draft.timeline,
+      },
+      attachments: [],
+    });
+    const transferSession = await decorateSessionDetailForClient(
+      targetProfile.id,
+      await getAgentSessionDetail(draft.sessionId, targetProfile.id, {
+        tail: 120,
+      })
+    );
+
+    res.status(201).json({
+      sessionId: draft.sessionId,
+      targetProfileId: targetProfile.id,
+      forkedAt: selectedEntry?.timestamp || draft.updatedAt,
+      autoPrompt,
+      session: {
+        ...transferSession,
+        title: draftSidebarMetadata.title,
+        hidden: draftSidebarMetadata.hidden,
+        topic: draftSidebarMetadata.topic,
+      },
+      item: queueItem,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to transfer session between providers' });
+  }
+});
+
+router.post('/sessions/:sessionId/title', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const requestedTitle = typeof req.body?.title === 'string'
+      ? req.body.title
+      : req.body?.title === null
+        ? null
+        : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    if (requestedTitle === undefined) {
+      res.status(400).json({ error: 'Title is required' });
+      return;
+    }
+
+    const title = await setSessionCustomTitle(profileId, sessionId, requestedTitle);
+    let displayTitle = title;
+
+    if (!displayTitle) {
+      const session = await getAgentSessionDetail(sessionId, profileId, {
+        tail: 1,
+      });
+      displayTitle = session.title;
+    }
+
+    res.json({
+      sessionId,
+      profileId,
+      title,
+      displayTitle,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update session title' });
+  }
+});
+
+router.post('/sessions/:sessionId/topic', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const topicId = typeof req.body?.topicId === 'string' && req.body.topicId.trim()
+      ? req.body.topicId.trim()
+      : null;
+    const cwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const topic = await setSessionTopic(profileId, sessionId, topicId, cwd);
+    res.json({
+      sessionId,
+      profileId,
+      topic,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update session topic' });
+  }
+});
+
+router.get('/sessions/:sessionId/trigger', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const requestedProfileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const trigger = await getSessionTrigger(requestedProfileId || profileId, sessionId);
+    res.json({ trigger });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to load session trigger' });
+  }
+});
+
+router.post('/sessions/:sessionId/trigger', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const label = typeof req.body?.label === 'string' ? req.body.label : '';
+    const rotateToken = req.body?.rotateToken === true;
+    const trigger = await upsertSessionTrigger(requestedProfileId || profileId, sessionId, label, {
+      rotateToken,
+    });
+    res.status(201).json({ trigger });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to save session trigger' });
+  }
+});
+
+router.delete('/sessions/:sessionId/trigger', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const requestedProfileId = typeof req.query.profile === 'string' && req.query.profile.trim()
+      ? req.query.profile.trim()
+      : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+        ? req.body.profileId.trim()
+        : undefined;
+    const profileId = await resolveEffectiveProfileIdForSession(requestedProfileId, sessionId);
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    await deleteSessionTrigger(requestedProfileId || profileId, sessionId);
+    res.json({ deleted: true, sessionId, profileId: requestedProfileId || profileId });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete session trigger' });
+  }
+});
+
+router.post('/session-triggers/:triggerId/fire', async (req, res) => {
+  try {
+    const triggerId = readRouteParam(req.params.triggerId);
+    const token = readTriggerToken(req);
+    if (!token) {
+      res.status(401).json({ error: 'Trigger token is required' });
+      return;
+    }
+
+    const trigger = await resolveTriggerInvocation(triggerId, token);
+    if (!trigger) {
+      res.status(401).json({ error: 'Trigger token is invalid' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(trigger.profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const invocation = await enqueueSessionTriggerInvocation({
+      trigger,
+      body: req.body,
+      clientRequestId: readSessionTriggerClientRequestId(req, triggerId),
+    });
+
+    await recordSessionTriggerInvocation(trigger.profileId, trigger.sessionId, invocation.prompt.payloadPreview);
+    res.status(202).json({
+      accepted: true,
+      trigger: await getSessionTrigger(trigger.profileId, trigger.sessionId),
+      item: invocation.item,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to fire session trigger' });
+  }
+});
+
+router.get('/queue/items', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const requestedQueueKey = typeof req.query.queueKey === 'string'
+      ? req.query.queueKey.trim()
+      : '';
+    res.json(await listCodexQueueWorkspaceItems(profileId, requestedQueueKey));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load Codex queue' });
+  }
+});
+
+router.get('/queue/items/:itemId', requireCodexAccess, async (req, res) => {
+  try {
+    const itemId = readRouteParam(req.params.itemId);
+    const item = await getCodexQueueItem(itemId);
+    if (!item) {
+      res.status(404).json({ error: 'Queue item was not found' });
+      return;
+    }
+
+    const includeSession = req.query.includeSession !== 'false';
+    const session = includeSession ? await getCodexQueueItemSession(itemId) : null;
+    res.json({ item: { ...item, detailsIncluded: true }, session });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load queue item' });
+  }
+});
+
+router.get('/session-instruction', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const instructionState = await getSessionInstructionRecord(profileId, sessionKey);
+    res.json(instructionState);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session instruction' });
+  }
+});
+
+router.post('/session-instruction', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    const instruction = typeof req.body?.instruction === 'string' ? req.body.instruction : null;
+    const enabled = typeof req.body?.enabled === 'boolean' ? req.body.enabled : true;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const savedInstruction = await setSessionInstruction(profileId, sessionKey, instruction, enabled);
+    res.json({
+      instruction: savedInstruction?.instruction || null,
+      enabled: savedInstruction?.enabled ?? true,
+      legacyLikelyTruncated: savedInstruction?.instruction ? false : false,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to update session instruction' });
+  }
+});
+
+router.get('/session-context-selection', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const selection = await getSessionContextSelection(profileId, sessionKey);
+    res.json({ selection });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session context selection' });
+  }
+});
+
+router.post('/session-context-selection', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const selection = await setSessionContextSelection(profileId, sessionKey, {
+      anchorIds: req.body?.anchorIds,
+      skillIds: req.body?.skillIds,
+      reminderIds: req.body?.reminderIds,
+      agentSessionDraftId: req.body?.agentSessionDraftId,
+      professionalMode: req.body?.professionalMode,
+      annotationsMode: req.body?.annotationsMode,
+      goalMode: req.body?.goalMode,
+      actionRestriction: req.body?.actionRestriction,
+    });
+    res.json({ selection });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to update session context selection' });
+  }
+});
+
+router.get('/session-browser-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const browserMode = await getSessionBrowserMode(profileId, sessionKey);
+    res.json({ browserMode });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session browser mode' });
+  }
+});
+
+router.post('/session-browser-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    if ((req.body?.browserMode?.enabled === true) && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+
+    const browserModeInput = await validateSessionBrowserMode(configuredProfile, req.body?.browserMode || null);
+    const browserMode = await setSessionBrowserMode(profileId, sessionKey, browserModeInput);
+    res.json({ browserMode });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to update session browser mode' });
+  }
+});
+
+router.get('/session-design-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const designMode = await getSessionDesignMode(profileId, sessionKey);
+    res.json({ designMode });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session design mode' });
+  }
+});
+
+router.post('/session-design-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const rawMode = req.body?.designMode && typeof req.body.designMode === 'object'
+      ? req.body.designMode
+      : {};
+    let canvasAttachment: CodexUploadedAttachment | undefined;
+    if (rawMode.canvasAttachment) {
+      const rawAttachment = rawMode.canvasAttachment;
+      const attachmentPath = typeof rawAttachment?.path === 'string'
+        ? path.resolve(rawAttachment.path)
+        : '';
+      if (!attachmentPath || !isPathInside(CODEX_UPLOAD_ROOT, attachmentPath)) {
+        res.status(400).json({ error: 'Design canvas must come from the authenticated upload endpoint' });
+        return;
+      }
+      canvasAttachment = {
+        id: typeof rawAttachment.id === 'string' ? rawAttachment.id : randomUUID(),
+        name: typeof rawAttachment.name === 'string' ? rawAttachment.name : path.basename(attachmentPath),
+        mimeType: typeof rawAttachment.mimeType === 'string' ? rawAttachment.mimeType : 'image/png',
+        size: typeof rawAttachment.size === 'number' ? rawAttachment.size : 0,
+        path: attachmentPath,
+        isImage: true,
+      };
+    }
+    const validated = await validateSessionDesignMode(configuredProfile, {
+      ...rawMode,
+      canvasAttachment,
+      clearCanvas: rawMode.clearCanvas === true,
+    });
+    const designMode = await setSessionDesignMode(profileId, sessionKey, validated);
+    res.json({ designMode });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update session design mode' });
+  }
+});
+
+router.get('/session-ux-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const uxMode = await getSessionUxMode(profileId, sessionKey);
+    res.json({ uxMode });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session UX mode' });
+  }
+});
+
+router.post('/session-ux-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const uxModeInput = await validateSessionUxMode(configuredProfile, req.body?.uxMode || null);
+    const uxMode = await setSessionUxMode(profileId, sessionKey, uxModeInput);
+    res.json({ uxMode });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update session UX mode' });
+  }
+});
+
+router.get('/session-conversation-search-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' ? req.query.profileId.trim() : '';
+    const sessionKey = typeof req.query.sessionKey === 'string' ? req.query.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const searchMode = await getSessionConversationSearchMode(profileId, sessionKey);
+    res.json({ searchMode });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load conversation search mode' });
+  }
+});
+
+router.post('/session-conversation-search-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId.trim() : '';
+    const sessionKey = typeof req.body?.sessionKey === 'string' ? req.body.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const currentSearchMode = await getSessionConversationSearchModeRecord(profileId, sessionKey);
+    const rawMode = req.body?.searchMode && typeof req.body.searchMode === 'object'
+      ? req.body.searchMode
+      : {};
+    const resolvedMode = { ...rawMode };
+    if (rawMode.enabled === true && rawMode.scope === 'project') {
+      const project = await resolveCodexFolderPath(String(rawMode.projectRoot || ''), profileId);
+      resolvedMode.projectRoot = project.resolvedPath;
+    }
+    const validatedSearchMode = await validateSessionConversationSearchMode(
+      configuredProfile,
+      resolvedMode,
+      currentSearchMode,
+    );
+    const searchMode = await setSessionConversationSearchMode(profileId, sessionKey, validatedSearchMode);
+    res.json({ searchMode });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update conversation search mode' });
+  }
+});
+
+router.get('/session-project-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' ? req.query.profileId.trim() : '';
+    const sessionKey = typeof req.query.sessionKey === 'string' ? req.query.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const projectMode = await getSessionProjectMode(profileId, sessionKey);
+    res.json({ projectMode });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session project mode' });
+  }
+});
+
+router.post('/session-project-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId.trim() : '';
+    const sessionKey = typeof req.body?.sessionKey === 'string' ? req.body.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const currentProjectMode = await getSessionProjectModeRecord(profileId, sessionKey);
+    const rawMode = req.body?.projectMode && typeof req.body.projectMode === 'object'
+      ? req.body.projectMode
+      : {};
+    const resolvedMode = { ...rawMode };
+    if (rawMode.enabled === true) {
+      const [frontend, backend, designSystem] = await Promise.all([
+        resolveCodexFolderPath(String(rawMode.frontendRoot || ''), profileId),
+        resolveCodexFolderPath(String(rawMode.backendRoot || ''), profileId),
+        typeof rawMode.designSystemPath === 'string' && rawMode.designSystemPath.trim()
+          ? resolveCodexFolderPath(rawMode.designSystemPath, profileId)
+          : Promise.resolve(null),
+      ]);
+      resolvedMode.frontendRoot = frontend.resolvedPath;
+      resolvedMode.backendRoot = backend.resolvedPath;
+      resolvedMode.designSystemPath = designSystem?.resolvedPath || '';
+    }
+    const validatedProjectMode = await validateSessionProjectMode(
+      configuredProfile,
+      resolvedMode,
+      currentProjectMode,
+    );
+
+    let designMode = await getSessionDesignMode(profileId, sessionKey);
+    let uxMode = await getSessionUxMode(profileId, sessionKey);
+    if (validatedProjectMode.enabled) {
+      const managedBrief = [
+        `Project Mode: ${validatedProjectMode.projectName}`,
+        validatedProjectMode.productBrief,
+        `Business context: ${validatedProjectMode.businessContext}`,
+        `Primary outcome: ${validatedProjectMode.primaryOutcome}`,
+        `Audience: ${validatedProjectMode.targetAudience}`,
+        `User archetypes: ${validatedProjectMode.userArchetypes}`,
+        `Content voice: ${validatedProjectMode.contentVoice}`,
+        `Locales: ${validatedProjectMode.locales}`,
+        `Accessibility: ${validatedProjectMode.accessibilityRequirements}`,
+        `Responsive: ${validatedProjectMode.responsiveRequirements}`,
+        validatedProjectMode.analyticsRequirements ? `Analytics: ${validatedProjectMode.analyticsRequirements}` : '',
+        `Design school: ${validatedProjectMode.designSchool}`,
+        `Desired feeling: ${validatedProjectMode.desiredFeeling}`,
+        `Font: ${validatedProjectMode.fontFamily}`,
+        `Palette: ${JSON.stringify(validatedProjectMode.palette)}`,
+        validatedProjectMode.designSystemPath ? `Design source: ${validatedProjectMode.designSystemPath}` : '',
+      ].filter(Boolean).join('\n\n').slice(0, 19_500);
+      const validatedDesignMode = await validateSessionDesignMode(configuredProfile, {
+        enabled: true,
+        geminiProfileId: validatedProjectMode.geminiProfileId,
+        quality: 'deep',
+        brief: managedBrief,
+      });
+      const validatedUxMode = await validateSessionUxMode(configuredProfile, {
+        enabled: true,
+        geminiProfileId: validatedProjectMode.geminiProfileId,
+        depth: 'deep',
+        productBrief: managedBrief,
+        targetAudience: validatedProjectMode.targetAudience,
+        primaryOutcome: validatedProjectMode.primaryOutcome,
+      });
+      await updateAgentMultiAgentMode(profileId, true);
+      [designMode, uxMode] = await Promise.all([
+        setSessionDesignMode(profileId, sessionKey, validatedDesignMode),
+        setSessionUxMode(profileId, sessionKey, validatedUxMode),
+      ]);
+    } else if (currentProjectMode?.enabled) {
+      [designMode, uxMode] = await Promise.all([
+        setSessionDesignMode(profileId, sessionKey, { ...designMode, enabled: false }),
+        setSessionUxMode(profileId, sessionKey, { ...uxMode, enabled: false }),
+      ]);
+    }
+    const projectMode = await setSessionProjectMode(profileId, sessionKey, validatedProjectMode);
+    res.json({ projectMode, designMode, uxMode });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update session project mode' });
+  }
+});
+
+router.get('/session-personal-chrome-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' ? req.query.profileId.trim() : '';
+    const sessionKey = typeof req.query.sessionKey === 'string' ? req.query.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    res.json({ personalChromeMode: await getSessionPersonalChromeMode(profileId, sessionKey) });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load personal Chrome mode' });
+  }
+});
+
+router.post('/session-personal-chrome-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId.trim() : '';
+    const sessionKey = typeof req.body?.sessionKey === 'string' ? req.body.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const profile = findConfiguredProfile(profileId);
+    if (!profile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    if (req.body?.personalChromeMode?.enabled === true && profile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב Chrome אישי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    const personalChromeMode = await setSessionPersonalChromeMode(
+      profileId,
+      sessionKey,
+      req.body?.personalChromeMode || null,
+    );
+    res.json({ personalChromeMode });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update personal Chrome mode' });
+  }
+});
+
+router.get('/session-design-mode/canvas', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const canvasPath = await getSessionDesignCanvasPath(profileId, sessionKey);
+    if (!canvasPath) {
+      res.status(404).json({ error: 'No design canvas is saved for this session' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.sendFile(canvasPath);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session design canvas' });
+  }
+});
+
+router.get('/session-browser-viewer', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+    const initialUrl = normalizeBrowserViewerNavigationUrl(req.query.url);
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const browserMode = await getSessionBrowserMode(profileId, sessionKey);
+    if (browserMode.enabled !== true) {
+      res.status(409).json({ error: 'Browser mode must be enabled before opening the remote viewer' });
+      return;
+    }
+
+    const viewer = await openSessionBrowserViewer(configuredProfile, sessionKey, initialUrl);
+    res.json({ viewer });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to open session browser viewer' });
+  }
+});
+
+// standalone-strip:start private-runtime-integration
+router.post('/session-browser-viewer/bina-sso', requireCodexAccess, async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  let cleanupProfile: ReturnType<typeof findConfiguredProfile> = undefined;
+  let cleanupSessionKey: string | null = null;
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const secFetchSite = typeof req.headers['sec-fetch-site'] === 'string'
+      ? req.headers['sec-fetch-site'].toLowerCase()
+      : '';
+    if (secFetchSite && secFetchSite !== 'same-origin') {
+      res.status(403).json({ error: 'The secure Bina connection must originate from this Workbench' });
+      return;
+    }
+    const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    if (requestOrigin) {
+      let originHost = '';
+      try {
+        originHost = new URL(requestOrigin).host.toLowerCase();
+      } catch {
+        res.status(403).json({ error: 'The secure Bina connection has an invalid origin' });
+        return;
+      }
+      if (originHost !== readRequestHost(req)) {
+        res.status(403).json({ error: 'The secure Bina connection must originate from this Workbench' });
+        return;
+      }
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    cleanupProfile = configuredProfile;
+    cleanupSessionKey = sessionKey;
+    const browserMode = await getSessionBrowserMode(profileId, sessionKey);
+    if (browserMode.enabled !== true) {
+      res.status(409).json({ error: 'Browser mode must be enabled before connecting the Bina session' });
+      return;
+    }
+
+    const runtimeConnection = await issueBinaRuntimeWorkbenchSession({ profileId, sessionKey });
+    const rawForumSession = readRawCookieValue(req.headers.cookie, FORUM_SESSION_COOKIE);
+    let validatedForumSession: string | null = null;
+    if (isSafeForumSessionCookie(rawForumSession)) {
+      try {
+        const legacyValidation = await validateBinaForumSession(rawForumSession);
+        if (legacyValidation.authenticated) validatedForumSession = rawForumSession;
+      } catch (legacyError: any) {
+        console.warn('[workbench-bina-sso] Legacy Bina session verification was skipped', {
+          message: legacyError?.message || 'unknown error',
+        });
+      }
+    }
+
+    const connection = await syncSessionBrowserViewerBinaAuth(configuredProfile, sessionKey, {
+      forumSession: validatedForumSession,
+      runtimeSession: runtimeConnection.runtimeSession,
+    });
+    res.json({
+      connected: connection.runtimeConnected,
+      legacyConnected: connection.legacyConnected,
+      runtimeConnected: connection.runtimeConnected,
+      source: 'bina-runtime-sso',
+    });
+  } catch (error: any) {
+    if (cleanupProfile && cleanupSessionKey) {
+      await syncSessionBrowserViewerBinaAuth(cleanupProfile, cleanupSessionKey, {
+        forumSession: null,
+        runtimeSession: null,
+      }).catch(() => undefined);
+    }
+    console.warn('[workbench-bina-sso] Secure session synchronization failed', {
+      message: error?.message || 'unknown error',
+    });
+    res.status(502).json({ error: 'The secure Bina connection could not be verified' });
+  }
+});
+// standalone-strip:end private-runtime-integration
+
+router.post('/session-browser-viewer/inspect', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    const x = Number(req.body?.x);
+    const y = Number(req.body?.y);
+    const tabId = Number.isFinite(Number(req.body?.tabId)) ? Number(req.body?.tabId) : null;
+
+    if (!profileId || !sessionKey || !Number.isFinite(x) || !Number.isFinite(y)) {
+      res.status(400).json({ error: 'Profile id, session key, x and y are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const browserMode = await getSessionBrowserMode(profileId, sessionKey);
+    if (browserMode.enabled !== true) {
+      res.status(409).json({ error: 'Browser mode must be enabled before inspecting the remote viewer' });
+      return;
+    }
+
+    const inspection = await inspectSessionBrowserViewerPoint(
+      configuredProfile,
+      sessionKey,
+      x,
+      y,
+      tabId,
+    );
+    res.json({ inspection });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to inspect browser element' });
+  }
+});
+
+router.post('/session-browser-viewer/input', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    const inputType = typeof req.body?.input === 'string' ? req.body.input.trim() : '';
+    if (!profileId || !sessionKey || !inputType) {
+      res.status(400).json({ error: 'Profile id, session key and input are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const tabId = Number.isFinite(Number(req.body?.tabId)) ? Number(req.body.tabId) : null;
+
+    if (inputType === 'hover') {
+      const x = Number(req.body?.x);
+      const y = Number(req.body?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 2560 || y > 2160) {
+        res.status(400).json({ error: 'Hover input requires viewport coordinates' });
+        return;
+      }
+      await queueSessionBrowserViewerInput(configuredProfile, sessionKey, {
+        type: 'hover',
+        tabId,
+        x,
+        y,
+      });
+      res.status(202).json({ queued: true });
+      return;
+    }
+
+    if (inputType === 'scroll') {
+      const deltaX = Number(req.body?.deltaX || 0);
+      const deltaY = Number(req.body?.deltaY || 0);
+      if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || (!deltaX && !deltaY)) {
+        res.status(400).json({ error: 'Scroll input requires a finite wheel delta' });
+        return;
+      }
+      await queueSessionBrowserViewerInput(configuredProfile, sessionKey, {
+        type: 'scroll',
+        tabId,
+        deltaX: Math.max(-2_400, Math.min(2_400, deltaX)),
+        deltaY: Math.max(-2_400, Math.min(2_400, deltaY)),
+      });
+      res.status(202).json({ queued: true });
+      return;
+    }
+
+    res.status(400).json({ error: 'Unsupported browser viewer input' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to queue browser viewer input' });
+  }
+});
+
+router.post('/session-browser-viewer/action', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    const actionType = typeof req.body?.action === 'string' && req.body.action.trim()
+      ? req.body.action.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey || !actionType) {
+      res.status(400).json({ error: 'Profile id, session key and action are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const numericTabId = Number.isFinite(Number(req.body?.tabId)) ? Number(req.body?.tabId) : null;
+
+    let viewer;
+    switch (actionType) {
+      case 'back':
+      case 'capture':
+      case 'forward':
+      case 'refresh':
+      case 'sync':
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: actionType,
+          tabId: numericTabId,
+        });
+        break;
+      case 'inspect': {
+        const x = Number(req.body?.x);
+        const y = Number(req.body?.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          res.status(400).json({ error: 'Inspect actions require numeric x and y coordinates' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'inspect',
+          tabId: numericTabId,
+          x,
+          y,
+        });
+        break;
+      }
+      case 'click': {
+        const x = Number(req.body?.x);
+        const y = Number(req.body?.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          res.status(400).json({ error: 'Click actions require numeric x and y coordinates' });
+          return;
+        }
+        const button = req.body?.button === 'right' ? 'right' : 'left';
+        const clickCount = [1, 2, 3].includes(Number(req.body?.clickCount))
+          ? Number(req.body?.clickCount) as 1 | 2 | 3
+          : 1;
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'click',
+          button,
+          clickCount,
+          tabId: numericTabId,
+          x,
+          y,
+        });
+        break;
+      }
+      case 'drag': {
+        const startX = Number(req.body?.startX);
+        const startY = Number(req.body?.startY);
+        const endX = Number(req.body?.endX);
+        const endY = Number(req.body?.endY);
+        if (![startX, startY, endX, endY].every((value) => Number.isFinite(value))) {
+          res.status(400).json({ error: 'Drag actions require numeric startX, startY, endX and endY coordinates' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'drag',
+          endX,
+          endY,
+          startX,
+          startY,
+          tabId: numericTabId,
+        });
+        break;
+      }
+      case 'key': {
+        const key = typeof req.body?.key === 'string' && req.body.key.trim()
+          ? req.body.key.trim()
+          : '';
+        if (!key) {
+          res.status(400).json({ error: 'Key actions require a key value' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'key',
+          tabId: numericTabId,
+          key,
+        });
+        break;
+      }
+      case 'navigate': {
+        const url = normalizeBrowserViewerNavigationUrl(req.body?.url) || '';
+        if (!url) {
+          res.status(400).json({ error: 'Navigate actions require a URL' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'navigate',
+          tabId: numericTabId,
+          url,
+        });
+        break;
+      }
+      case 'newTab':
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'newTab',
+          url: normalizeBrowserViewerNavigationUrl(req.body?.url),
+        });
+        break;
+      case 'resize': {
+        const width = Math.round(Number(req.body?.width));
+        const height = Math.round(Number(req.body?.height));
+        if (!Number.isFinite(width) || !Number.isFinite(height)) {
+          res.status(400).json({ error: 'Resize actions require numeric width and height' });
+          return;
+        }
+        if (width < 320 || width > 2560 || height < 320 || height > 2160) {
+          res.status(400).json({ error: 'Viewport dimensions are outside the supported range' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'resize',
+          tabId: numericTabId,
+          width,
+          height,
+        });
+        break;
+      }
+      case 'scroll': {
+        const direction = typeof req.body?.direction === 'string' && req.body.direction.trim()
+          ? req.body.direction.trim()
+          : 'down';
+        if (!['up', 'down', 'top', 'bottom'].includes(direction)) {
+          res.status(400).json({ error: 'Scroll direction must be up, down, top or bottom' });
+          return;
+        }
+        const amount = Number.isFinite(Number(req.body?.amount)) ? Number(req.body?.amount) : null;
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'scroll',
+          amount,
+          direction: direction as 'up' | 'down' | 'top' | 'bottom',
+          tabId: numericTabId,
+        });
+        break;
+      }
+      case 'switchTab': {
+        if (!numericTabId) {
+          res.status(400).json({ error: 'switchTab requires a tabId' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'switchTab',
+          tabId: numericTabId,
+        });
+        break;
+      }
+      case 'type': {
+        const text = typeof req.body?.text === 'string' ? req.body.text : '';
+        if (!text) {
+          res.status(400).json({ error: 'Type actions require text' });
+          return;
+        }
+        viewer = await performSessionBrowserViewerAction(configuredProfile, sessionKey, {
+          type: 'type',
+          tabId: numericTabId,
+          text,
+        });
+        break;
+      }
+      default:
+        res.status(400).json({ error: 'Unsupported browser viewer action' });
+        return;
+    }
+
+    res.json({ viewer });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to run session browser viewer action' });
+  }
+});
+
+router.delete('/session-browser-viewer', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    await closeSessionBrowserViewer(profileId, sessionKey);
+    res.status(204).end();
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to close session browser viewer' });
+  }
+});
+
+router.get('/session-browser-viewer/stream', requireCodexAccess, async (req, res) => {
+  const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+    ? req.query.profileId.trim()
+    : undefined;
+  const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+    ? req.query.sessionKey.trim()
+    : undefined;
+  const tabId = Number(req.query.tabId);
+  const requestedWidth = Number(req.query.width);
+  const requestedHeight = Number(req.query.height);
+  const expectedWidth = Number.isFinite(requestedWidth) && requestedWidth > 0 ? Math.round(requestedWidth) : null;
+  const expectedHeight = Number.isFinite(requestedHeight) && requestedHeight > 0 ? Math.round(requestedHeight) : null;
+
+  if (!profileId || !sessionKey || !Number.isFinite(tabId) || tabId <= 0) {
+    res.status(400).json({ error: 'Profile id, session key and tab id are required' });
+    return;
+  }
+
+  const configuredProfile = findConfiguredProfile(profileId);
+  if (!configuredProfile) {
+    res.status(404).json({ error: 'The selected profile was not found' });
+    return;
+  }
+
+  let closed = false;
+  res.once('close', () => {
+    closed = true;
+  });
+
+  try {
+    const frameReader = await openSessionBrowserViewerLiveFrameReader(configuredProfile, sessionKey);
+    const firstFrameDeadline = Date.now() + 3_000;
+    let firstFrame: Awaited<ReturnType<typeof frameReader.read>> = null;
+    let firstFrameSequence = 0;
+    while (!closed && Date.now() < firstFrameDeadline) {
+      const candidate = await frameReader.read(
+        Math.round(tabId),
+        firstFrameSequence,
+        Math.max(1, firstFrameDeadline - Date.now()),
+      );
+      if (!candidate) break;
+      firstFrameSequence = candidate.sequence;
+      const dimensionsMatch = (
+        (expectedWidth === null || candidate.width === expectedWidth)
+        && (expectedHeight === null || candidate.height === expectedHeight)
+      );
+      if (dimensionsMatch) {
+        firstFrame = candidate;
+        break;
+      }
+    }
+    if (!firstFrame || closed) {
+      if (!closed) res.status(503).end();
+      return;
+    }
+
+    const boundary = 'code-ai-browser-frame';
+    res.status(200);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Content-Type', `multipart/x-mixed-replace; boundary=${boundary}`);
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const waitForDrain = () => new Promise<void>((resolve) => {
+      const finish = () => {
+        res.off('drain', finish);
+        res.off('close', finish);
+        resolve();
+      };
+      res.once('drain', finish);
+      res.once('close', finish);
+    });
+    const writeFrame = async (frame: typeof firstFrame) => {
+      if (!frame || closed) return;
+      const header = Buffer.from(
+        `--${boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.data.length}\r\nX-Frame-Sequence: ${frame.sequence}\r\n\r\n`,
+        'utf-8',
+      );
+      if (!res.write(header)) await waitForDrain();
+      if (closed) return;
+      if (!res.write(frame.data)) await waitForDrain();
+      if (!closed) res.write('\r\n');
+    };
+
+    let sequence = firstFrame.sequence;
+    await writeFrame(firstFrame);
+    // Chromium commits the first MJPEG part reliably once the following part
+    // begins. Prime the stream with the same frame so a static page appears
+    // immediately after a viewport-size reconnect.
+    await writeFrame(firstFrame);
+    while (!closed) {
+      const frame = await frameReader.read(
+        Math.round(tabId),
+        sequence,
+        1_500,
+      );
+      if (!frame || closed) continue;
+      sequence = frame.sequence;
+      if (
+        (expectedWidth !== null && frame.width !== expectedWidth)
+        || (expectedHeight !== null && frame.height !== expectedHeight)
+      ) {
+        continue;
+      }
+      await writeFrame(frame);
+    }
+  } catch (error: any) {
+    if (!closed && !res.headersSent) {
+      res.status(502).json({ error: error.message || 'Failed to open browser live stream' });
+    }
+  } finally {
+    if (!closed && !res.writableEnded) res.end();
+  }
+});
+
+router.get('/session-browser-viewer/frame', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+    const imageId = typeof req.query.imageId === 'string' && req.query.imageId.trim()
+      ? req.query.imageId.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey || !imageId) {
+      res.status(400).json({ error: 'Profile id, session key and image id are required' });
+      return;
+    }
+
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const framePath = await resolveSessionBrowserViewerFramePath(configuredProfile, sessionKey, imageId);
+    if (!framePath) {
+      res.status(404).json({ error: 'The requested frame was not found' });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(framePath);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to stream browser viewer frame' });
+  }
+});
+
+router.get('/agent-sessions', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const cwdInput = typeof req.query.cwd === 'string' && req.query.cwd.trim()
+      ? req.query.cwd.trim()
+      : null;
+    const cwd = cwdInput
+      ? (await resolveCodexFolderPath(cwdInput, sourceProfile.id)).resolvedPath
+      : null;
+    const agentSessions = await listAgentSessionRecords(sourceProfile.id, cwd);
+    res.json({ agentSessions });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load agent sessions' });
+  }
+});
+
+router.post('/agent-sessions', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const cwdInput = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : sourceProfile.workspaceCwd;
+    const cwd = (await resolveCodexFolderPath(cwdInput, sourceProfile.id)).resolvedPath;
+    const plannerProvider = readAppProvider(req.body?.plannerProvider) || sourceProfile.provider;
+    const title = typeof req.body?.title === 'string' && req.body.title.trim()
+      ? req.body.title.trim()
+      : `סשן סוכנים · ${path.basename(cwd) || 'workspace'}`;
+    const goal = typeof req.body?.goal === 'string' ? req.body.goal : '';
+    const topicId = typeof req.body?.topicId === 'string' && req.body.topicId.trim()
+      ? req.body.topicId.trim()
+      : null;
+
+    const agentSession = await createAgentSessionDraft({
+      sourceProfile,
+      cwd,
+      title,
+      goal,
+      plannerProvider,
+      topicId,
+    });
+
+    res.status(201).json({ agentSession });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to create agent session draft' });
+  }
+});
+
+router.get('/agent-sessions/:agentSessionId', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const agentSessionId = readRouteParam(req.params.agentSessionId);
+    const agentSession = await getAgentSessionRecord(agentSessionId);
+    if (!agentSession) {
+      res.status(404).json({ error: 'Agent session was not found' });
+      return;
+    }
+    assertAgentSessionAccess(agentSession, sourceProfile.id);
+
+    res.json({ agentSession });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to load agent session' });
+  }
+});
+
+router.delete('/agent-sessions/:agentSessionId', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const agentSessionId = readRouteParam(req.params.agentSessionId);
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (!record) {
+      res.status(404).json({ error: 'Agent session was not found' });
+      return;
+    }
+    assertAgentSessionAccess(record, sourceProfile.id);
+
+    const plannerSessionDeletion = record.plannerSessionId && record.plannerProfileId
+      ? {
+        sessionId: record.plannerSessionId,
+        profileId: record.plannerProfileId,
+      }
+      : null;
+    const { links } = await deleteAgentSessionRecord(agentSessionId);
+    const deletedSessionIds = new Set<string>();
+    const deletionErrors: Array<{ sessionId: string; error: string }> = [];
+
+    for (const link of links) {
+      try {
+        await deleteAgentSession(link.sessionId, link.profileId);
+        deletedSessionIds.add(link.sessionId);
+      } catch (error: any) {
+        const message = error?.message || 'Failed to delete linked agent session';
+        if (!/not found|not exist|was not found|ENOENT/i.test(message)) {
+          deletionErrors.push({ sessionId: link.sessionId, error: message });
+        }
+      }
+    }
+
+    if (plannerSessionDeletion && !deletedSessionIds.has(plannerSessionDeletion.sessionId)) {
+      try {
+        await deleteAgentSession(plannerSessionDeletion.sessionId, plannerSessionDeletion.profileId);
+        deletedSessionIds.add(plannerSessionDeletion.sessionId);
+      } catch (error: any) {
+        const message = error?.message || 'Failed to delete planner session';
+        if (!/not found|not exist|was not found|ENOENT/i.test(message)) {
+          deletionErrors.push({ sessionId: plannerSessionDeletion.sessionId, error: message });
+        }
+      }
+    }
+
+    res.json({
+      agentSessionId,
+      deletedSessionIds: [...deletedSessionIds],
+      errors: deletionErrors,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete agent session' });
+  }
+});
+
+router.post('/agent-sessions/:agentSessionId/goal', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const agentSessionId = readRouteParam(req.params.agentSessionId);
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (!record) {
+      res.status(404).json({ error: 'Agent session was not found' });
+      return;
+    }
+    assertAgentSessionAccess(record, sourceProfile.id);
+
+    const goal = typeof req.body?.goal === 'string' ? req.body.goal : '';
+    const agentSession = await updateAgentSessionGoal(agentSessionId, goal);
+    res.json({ agentSession });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update agent session goal' });
+  }
+});
+
+router.post('/agent-sessions/:agentSessionId/plan', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const agentSessionId = readRouteParam(req.params.agentSessionId);
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (!record) {
+      res.status(404).json({ error: 'Agent session was not found' });
+      return;
+    }
+    assertAgentSessionAccess(record, sourceProfile.id);
+
+    const rawPlan = req.body?.plan;
+    const agentSession = await saveAgentSessionPlan(agentSessionId, rawPlan, {
+      plannerSessionId: record.plannerSessionId,
+      plannerProfileId: record.plannerProfileId,
+    });
+    res.json({ agentSession });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to save agent session plan' });
+  }
+});
+
+router.post('/agent-sessions/:agentSessionId/approve', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sourceProfile = resolveVisibleSourceProfile(requestedProfileId);
+    if (!sourceProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+
+    const agentSessionId = readRouteParam(req.params.agentSessionId);
+    const record = await getAgentSessionRecord(agentSessionId);
+    if (!record) {
+      res.status(404).json({ error: 'Agent session was not found' });
+      return;
+    }
+    assertAgentSessionAccess(record, sourceProfile.id);
+
+    const approvedRecord = await approveAgentSession(agentSessionId);
+    const launchItems = [];
+    const agents = approvedRecord.plan?.agents || [];
+
+    for (const agent of agents) {
+      const internalProfileId = resolveAgentProviderProfileId(sourceProfile, agent.provider);
+      const item = await enqueueCodexQueueItem({
+        profileId: internalProfileId,
+        sourceProfileId: sourceProfile.id,
+        queueKey: `agent:${approvedRecord.id}:${agent.id}:${randomUUID()}`,
+        sessionId: approvedRecord.plan?.runtimeAgents?.find((runtimeAgent) => runtimeAgent.id === agent.id)?.linkedSessionId || undefined,
+        cwd: approvedRecord.cwd,
+        prompt: buildAgentExecutionPrompt(approvedRecord, agent),
+        promptPreview: `${approvedRecord.title} / ${agent.name}`,
+        permissionModeId: 'full',
+        agentSessionId: approvedRecord.id,
+        agentId: agent.id,
+        agentLinkKind: 'agent',
+      });
+      launchItems.push(item);
+      await updateAgentRuntimeStatus(approvedRecord.id, agent.id, {
+        runtimeStatus: 'queued',
+        queueItemId: item.id,
+        linkedSessionId: item.sessionId,
+        lastError: null,
+      });
+    }
+
+    await markAgentSessionLaunched(agentSessionId);
+    const agentSession = await getAgentSessionRecord(agentSessionId);
+    res.json({ agentSession, items: launchItems });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to approve and launch agent session' });
+  }
+});
+
+router.get('/anchors', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const cwdInput = typeof req.query.cwd === 'string' && req.query.cwd.trim()
+      ? req.query.cwd.trim()
+      : undefined;
+
+    if (!profileId || !cwdInput) {
+      res.status(400).json({ error: 'Profile id and cwd are required' });
+      return;
+    }
+
+    const cwd = (await resolveCodexFolderPath(cwdInput, profileId)).resolvedPath;
+    const anchors = await listProjectAnchors(cwd);
+    res.json({
+      anchors: anchors.map((anchor) => ({
+        ...anchor,
+        relativePath: path.relative(cwd, anchor.targetPath) || '.',
+      })),
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to load anchors' });
+  }
+});
+
+router.post('/anchors', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const cwdInput = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+    const targetPathInput = typeof req.body?.targetPath === 'string' && req.body.targetPath.trim()
+      ? req.body.targetPath.trim()
+      : undefined;
+    const targetKind = req.body?.targetKind === 'directory' ? 'directory' : req.body?.targetKind === 'file' ? 'file' : null;
+    const name = typeof req.body?.name === 'string' ? req.body.name : '';
+    const description = typeof req.body?.description === 'string' ? req.body.description : '';
+
+    if (!profileId || !cwdInput || !targetPathInput || !targetKind) {
+      res.status(400).json({ error: 'Profile id, cwd, target path and target kind are required' });
+      return;
+    }
+
+    const cwd = (await resolveCodexFolderPath(cwdInput, profileId)).resolvedPath;
+    const targetPath = (await resolveCodexFolderPath(targetPathInput, profileId)).resolvedPath;
+    const targetStats = await fs.stat(targetPath);
+    if (targetKind === 'directory' && !targetStats.isDirectory()) {
+      res.status(400).json({ error: 'Target is not a directory' });
+      return;
+    }
+    if (targetKind === 'file' && !targetStats.isFile()) {
+      res.status(400).json({ error: 'Target is not a file' });
+      return;
+    }
+
+    const anchor = await createProjectAnchor(cwd, {
+      targetPath,
+      targetKind,
+      name,
+      description,
+    });
+    res.status(201).json({
+      anchor: {
+        ...anchor,
+        relativePath: path.relative(cwd, anchor.targetPath) || '.',
+      },
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to create anchor' });
+  }
+});
+
+router.delete('/anchors/:anchorId', requireCodexAccess, async (req, res) => {
+  try {
+    const anchorId = readRouteParam(req.params.anchorId);
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const cwdInput = typeof req.query.cwd === 'string' && req.query.cwd.trim()
+      ? req.query.cwd.trim()
+      : undefined;
+
+    if (!profileId || !cwdInput) {
+      res.status(400).json({ error: 'Profile id and cwd are required' });
+      return;
+    }
+
+    const cwd = (await resolveCodexFolderPath(cwdInput, profileId)).resolvedPath;
+    await deleteProjectAnchor(cwd, anchorId);
+    res.status(204).end();
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete anchor' });
+  }
+});
+
+router.get('/skills', requireCodexAccess, async (_req, res) => {
+  try {
+    const skills = await listUnifiedSkills();
+    res.json({ skills });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load unified skills' });
+  }
+});
+
+router.get('/session-reminders', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const reminders = await listSessionReminders(profileId, sessionKey);
+    res.json({ reminders });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session reminders' });
+  }
+});
+
+router.post('/session-reminders', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
+      ? req.body.sessionKey.trim()
+      : undefined;
+    const name = typeof req.body?.name === 'string' ? req.body.name : '';
+    const content = typeof req.body?.content === 'string' ? req.body.content : '';
+    const sourceEntryId = typeof req.body?.sourceEntryId === 'string' ? req.body.sourceEntryId : null;
+    const sourceRole = req.body?.sourceRole === 'user' || req.body?.sourceRole === 'assistant'
+      ? req.body.sourceRole
+      : null;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    const reminder = await createSessionReminder(profileId, sessionKey, {
+      name,
+      content,
+      sourceEntryId,
+      sourceRole,
+    });
+    res.status(201).json({ reminder });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to create reminder' });
+  }
+});
+
+router.delete('/session-reminders/:reminderId', requireCodexAccess, async (req, res) => {
+  try {
+    const reminderId = readRouteParam(req.params.reminderId);
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionKey = typeof req.query.sessionKey === 'string' && req.query.sessionKey.trim()
+      ? req.query.sessionKey.trim()
+      : undefined;
+
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+
+    await deleteSessionReminder(profileId, sessionKey, reminderId);
+    res.json({ deleted: true, reminderId });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete reminder' });
+  }
+});
+
+router.get('/tasks', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const tasks = await listSessionTasks(profileId);
+    res.json({ tasks });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load tasks' });
+  }
+});
+
+router.post('/tasks', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const taskId = typeof req.body?.taskId === 'string' && req.body.taskId.trim()
+      ? req.body.taskId.trim()
+      : null;
+    const title = typeof req.body?.title === 'string' ? req.body.title : '';
+    const description = typeof req.body?.description === 'string' ? req.body.description : '';
+    const dueAt = typeof req.body?.dueAt === 'string' ? req.body.dueAt : req.body?.dueAt === null ? null : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const task = taskId
+      ? await updateSessionTask(profileId, taskId, { title, description, dueAt })
+      : await createSessionTask(profileId, { title, description, dueAt });
+
+    res.status(taskId ? 200 : 201).json({ task });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to save task' });
+  }
+});
+
+router.delete('/tasks/:taskId', requireCodexAccess, async (req, res) => {
+  try {
+    const taskId = readRouteParam(req.params.taskId);
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+        ? req.body.profileId.trim()
+        : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    await deleteSessionTask(profileId, taskId);
+    res.json({ deleted: true, taskId });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete task' });
+  }
+});
+
+router.post('/tasks/:taskId/sessions', requireCodexAccess, async (req, res) => {
+  try {
+    const taskId = readRouteParam(req.params.taskId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+      ? req.body.sessionId.trim()
+      : undefined;
+    const assigned = req.body?.assigned !== false;
+
+    if (!profileId || !sessionId) {
+      res.status(400).json({ error: 'Profile id and session id are required' });
+      return;
+    }
+
+    const task = await setTaskSessionAssignment(profileId, taskId, sessionId, assigned);
+    res.json({ task });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update task sessions' });
+  }
+});
+
+router.post('/tasks/:taskId/sessions/:sessionId/completion', requireCodexAccess, async (req, res) => {
+  try {
+    const taskId = readRouteParam(req.params.taskId);
+    const sessionId = readRouteParam(req.params.sessionId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const completed = req.body?.completed !== false;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const task = await setTaskSessionCompletion(profileId, taskId, sessionId, completed);
+    res.json({ task });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update task completion' });
+  }
+});
+
+router.get('/session-subtasks', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : undefined;
+    const sessionId = typeof req.query.sessionId === 'string' && req.query.sessionId.trim()
+      ? req.query.sessionId.trim()
+      : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const subtasks = await listSessionSubtasks(profileId, sessionId);
+    res.json({ subtasks });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load session subtasks' });
+  }
+});
+
+router.post('/session-subtasks', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+      ? req.body.sessionId.trim()
+      : undefined;
+    const title = typeof req.body?.title === 'string' ? req.body.title : '';
+
+    if (!profileId || !sessionId) {
+      res.status(400).json({ error: 'Profile id and session id are required' });
+      return;
+    }
+
+    const subtask = await createSessionSubtask(profileId, sessionId, title);
+    res.status(201).json({ subtask });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to create session subtask' });
+  }
+});
+
+router.post('/session-subtasks/:subtaskId/completion', requireCodexAccess, async (req, res) => {
+  try {
+    const subtaskId = readRouteParam(req.params.subtaskId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const completed = req.body?.completed !== false;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    const subtask = await setSessionSubtaskCompletion(profileId, subtaskId, completed);
+    res.json({ subtask });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update session subtask completion' });
+  }
+});
+
+router.delete('/session-subtasks/:subtaskId', requireCodexAccess, async (req, res) => {
+  try {
+    const subtaskId = readRouteParam(req.params.subtaskId);
+    const profileId = typeof req.query.profileId === 'string' && req.query.profileId.trim()
+      ? req.query.profileId.trim()
+      : typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+        ? req.body.profileId.trim()
+        : undefined;
+
+    if (!profileId) {
+      res.status(400).json({ error: 'Profile id is required' });
+      return;
+    }
+
+    await deleteSessionSubtask(profileId, subtaskId);
+    res.json({ deleted: true, subtaskId });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete session subtask' });
+  }
+});
+
+router.post('/queue/items', requireCodexAccess, async (req, res) => {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const visibleProfileId = requestedProfileId || 'developer';
+    const requestedSessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+      ? req.body.sessionId.trim()
+      : undefined;
+    const sessionId = requestedSessionId
+      ? await resolveEffectiveSessionId(requestedSessionId)
+      : undefined;
+    const profileId = sessionId
+      ? await resolveEffectiveProfileIdForSession(visibleProfileId, sessionId)
+      : visibleProfileId;
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const queueKey = typeof req.body?.queueKey === 'string' && req.body.queueKey.trim()
+      ? req.body.queueKey.trim()
+      : randomUUID();
+    const clientRequestId = typeof req.body?.clientRequestId === 'string' && req.body.clientRequestId.trim()
+      ? req.body.clientRequestId.trim()
+      : undefined;
+    const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+    const prompt = typeof req.body?.prompt === 'string'
+      ? req.body.prompt
+      : typeof req.body?.message === 'string'
+        ? req.body.message
+        : '';
+    const promptPreview = typeof req.body?.promptPreview === 'string' ? req.body.promptPreview : undefined;
+    const contextPrefix = typeof req.body?.contextPrefix === 'string' ? req.body.contextPrefix : undefined;
+    const sessionInstruction = typeof req.body?.sessionInstruction === 'string' ? req.body.sessionInstruction : undefined;
+    const forkContext = req.body?.forkContext;
+    const scheduledAt = typeof req.body?.scheduledAt === 'string' && req.body.scheduledAt.trim()
+      ? req.body.scheduledAt.trim()
+      : undefined;
+    const recurrence = readRecurringConfig(req.body);
+    const cwd = requestedCwd
+      ? (await resolveCodexFolderPath(requestedCwd, visibleProfileId)).resolvedPath
+      : undefined;
+    const attachments = (Array.isArray(req.body?.attachments) ? req.body.attachments : [])
+      .map((attachment: any): CodexUploadedAttachment | null => {
+        const attachmentPath = typeof attachment?.path === 'string'
+          ? path.resolve(attachment.path)
+          : '';
+
+        if (!attachmentPath || !isPathInside(CODEX_UPLOAD_ROOT, attachmentPath)) {
+          return null;
+        }
+
+        return {
+          id: typeof attachment?.id === 'string' ? attachment.id : randomUUID(),
+          name: typeof attachment?.name === 'string' ? attachment.name : path.basename(attachmentPath),
+          mimeType: typeof attachment?.mimeType === 'string'
+            ? attachment.mimeType
+            : 'application/octet-stream',
+          size: typeof attachment?.size === 'number' ? attachment.size : 0,
+          path: attachmentPath,
+          isImage: typeof attachment?.isImage === 'boolean'
+            ? attachment.isImage
+            : false,
+        };
+      })
+      .filter((attachment: CodexUploadedAttachment | null): attachment is CodexUploadedAttachment => Boolean(attachment));
+
+    const isDraftTarget = isDraftSessionKey(sessionId) || isDraftSessionKey(queueKey);
+    const hydratedForkDraft = isDraftTarget
+      ? await hydrateForkDraftRequest(
+        visibleProfileId,
+        queueKey,
+        sessionId,
+        contextPrefix,
+        forkContext
+      )
+      : {
+        contextPrefix: undefined,
+        forkContext: undefined,
+      };
+    const supportEnvelope = isSupportProfile(configuredProfile)
+      ? buildSupportPromptEnvelope(configuredProfile, {
+        source: 'ui',
+        userPrompt: prompt,
+        authenticatedUser: (req as any).codexAuth?.user || null,
+      })
+      : null;
+    const basePrompt = supportEnvelope?.compiledPrompt || prompt;
+    const effectivePromptPreview = supportEnvelope?.promptPreview || promptPreview;
+    const effectiveSessionInstruction = buildSupportSessionInstruction(sessionInstruction, supportEnvelope);
+    const sessionContextKey = sessionId || queueKey;
+    const sessionContextSelection = sessionContextKey
+      ? await getSessionContextSelection(visibleProfileId, sessionContextKey)
+      : {
+        anchorIds: [],
+        skillIds: [],
+        reminderIds: [],
+        agentSessionDraftId: null,
+        professionalMode: false,
+        annotationsMode: false,
+        goalMode: false,
+        actionRestriction: null,
+      };
+    const sessionBrowserModeRecord = sessionContextKey
+      ? await getSessionBrowserModeRecord(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionBrowserMode = sessionBrowserModeRecord
+      ? {
+        enabled: sessionBrowserModeRecord.enabled === true,
+        headless: sessionBrowserModeRecord.headless !== false,
+        profileSeed: sessionBrowserModeRecord.profileSeed,
+        customProfileDir: sessionBrowserModeRecord.profileSeed === 'custom'
+          ? sessionBrowserModeRecord.customProfileDir || null
+          : null,
+      }
+      : null;
+    const sessionDesignModeRecord = sessionContextKey
+      ? await getSessionDesignModeRecord(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionDesignMode = sessionDesignModeRecord
+      ? await getSessionDesignMode(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionUxModeRecord = sessionContextKey
+      ? await getSessionUxModeRecord(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionUxMode = sessionUxModeRecord
+      ? await getSessionUxMode(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionProjectModeRecord = sessionContextKey
+      ? await getSessionProjectModeRecord(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionProjectMode = sessionProjectModeRecord
+      ? await getSessionProjectMode(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionPersonalChromeModeRecord = sessionContextKey
+      ? await getSessionPersonalChromeModeRecord(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionPersonalChromeMode = sessionPersonalChromeModeRecord
+      ? await getSessionPersonalChromeMode(visibleProfileId, sessionContextKey)
+      : null;
+    if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionDesignModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב עיצוב זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionUxModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב חוויית משתמש זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionProjectModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב פרויקט זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionPersonalChromeModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב Chrome אישי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    const contextCwd = cwd || (
+      sessionId
+        ? (await getAgentSessionDetail(sessionId, profileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
+        : configuredProfile.workspaceCwd
+    );
+    const additionsPromptSuffix = sessionContextKey
+      ? await buildSessionPromptAdditionsContext({
+        profileId: visibleProfileId,
+        sessionKey: sessionContextKey,
+        cwd: contextCwd,
+      })
+      : null;
+    const effectivePrompt = [basePrompt, additionsPromptSuffix]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n\n');
+    const combinedContextPrefix = [hydratedForkDraft.contextPrefix]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n\n');
+
+    if (sessionProjectMode?.enabled) {
+      if (!sessionDesignMode?.enabled || !sessionUxMode?.enabled) {
+        res.status(400).json({ error: 'מצב פרויקט דורש את מועצות Gemini UX ו־Design. פתח את מצב הפרויקט ושמור אותו מחדש.' });
+        return;
+      }
+      if (sessionContextSelection.agentSessionDraftId) {
+        res.status(400).json({ error: 'מצב פרויקט כבר מנהל צוותי Codex בעצמו; אין לשלב איתו מצב סוכנים נפרד.' });
+        return;
+      }
+      if (sessionContextSelection.professionalMode || sessionContextSelection.annotationsMode || sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'מצב פרויקט כולל תכנון, ביצוע וביקורת משלו; כבה מצב מקצועי, ביאורים או מטרה לפני השליחה.' });
+        return;
+      }
+      if (sessionContextSelection.actionRestriction?.enabled) {
+        res.status(400).json({ error: 'מצב פרויקט זקוק לתיקיות frontend ו־backend ואינו תומך בהגבלת פעולה חד־נתיבית.' });
+        return;
+      }
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב פרויקט אינו תומך בתזמון קבוע. הפעל תוכנית פרויקט חד־פעמית.' });
+        return;
+      }
+      const readyProjectMode = await assertSessionProjectModeReady(sessionProjectMode);
+      const projectSpecs = buildProjectModeQueueSpecs(basePrompt, readyProjectMode);
+      const projectBrowserMode = sessionBrowserMode || {
+        enabled: true,
+        headless: true,
+        profileSeed: 'empty' as const,
+        customProfileDir: null,
+      };
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+      for (const [index, spec] of projectSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        queuedItems.push(await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd: cwd || readyProjectMode.frontendRoot,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          browserMode: projectBrowserMode,
+          designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          scheduledAt,
+          attachments: index === 0 ? attachments : [],
+        }));
+      }
+      if (sessionContextKey) await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      res.status(202).json({ items: queuedItems, projectMode: readyProjectMode });
+      return;
+    }
+
+    if (sessionContextSelection.agentSessionDraftId) {
+      if (sessionContextSelection.annotationsMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב ביאורים עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מטרה עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionContextSelection.actionRestriction?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב הגבלת פעולה עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionBrowserModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב דפדפן אמיתי עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionDesignModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב עיצוב עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionUxModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב חוויית משתמש עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionPersonalChromeModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב Chrome אישי עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
+      if (!sourceProfile) {
+        res.status(404).json({ error: 'The selected profile was not found' });
+        return;
+      }
+
+      const existingRecord = await getAgentSessionRecord(sessionContextSelection.agentSessionDraftId);
+      if (!existingRecord) {
+        res.status(404).json({ error: 'Agent session draft was not found' });
+        return;
+      }
+      assertAgentSessionAccess(existingRecord, sourceProfile.id);
+
+      const updatedRecord = await updateAgentSessionGoal(existingRecord.id, effectivePrompt);
+      const plannerProfileId = resolveAgentProviderProfileId(sourceProfile, updatedRecord.plannerProvider);
+      const plannerItem = await enqueueCodexQueueItem({
+        profileId: plannerProfileId,
+        sourceProfileId: sourceProfile.id,
+        queueKey,
+        clientRequestId,
+        sessionId: updatedRecord.plannerSessionId || undefined,
+        cwd: updatedRecord.cwd,
+        prompt: buildAgentPlanPrompt(updatedRecord),
+        promptPreview: `תכנית סוכנים · ${updatedRecord.title}`,
+        contextPrefix: combinedContextPrefix || undefined,
+        attachments,
+        agentSessionId: updatedRecord.id,
+        agentLinkKind: 'planner',
+        permissionModeId: 'full',
+      });
+
+      if (sessionContextKey) {
+        await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      }
+
+      res.status(202).json({ item: plannerItem, agentSession: updatedRecord });
+      return;
+    }
+
+    if (sessionContextSelection.professionalMode) {
+      if (sessionContextSelection.annotationsMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מקצועי עם מצב ביאורים באותה שליחה.' });
+        return;
+      }
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מקצועי עם מצב מטרה באותה שליחה.' });
+        return;
+      }
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב מקצועי אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      const professionalSpecs = buildProfessionalModeQueueSpecs(basePrompt);
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of professionalSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
+          designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          scheduledAt,
+          attachments: index === 0 ? attachments : [],
+        });
+        queuedItems.push(nextItem);
+      }
+
+      if (sessionContextKey) {
+        await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      }
+
+      res.status(202).json({ items: queuedItems });
+      return;
+    }
+
+    if (sessionContextSelection.annotationsMode) {
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב ביאורים עם מצב מטרה באותה שליחה.' });
+        return;
+      }
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב ביאורים אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      const annotationSpecs = await buildAnnotationsModeQueueSpecs(
+        visibleProfileId,
+        basePrompt,
+        queueKey,
+        sessionContextSelection.actionRestriction
+      );
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of annotationSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
+          designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          scheduledAt,
+          attachments: index === 0 ? attachments : [],
+        });
+        queuedItems.push(nextItem);
+      }
+
+      if (sessionContextKey) {
+        await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      }
+
+      res.status(202).json({ items: queuedItems });
+      return;
+    }
+
+    if (sessionContextSelection.goalMode) {
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב מטרה אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      const goalSpecs = buildGoalModeQueueSpecs(basePrompt);
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of goalSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
+          designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          scheduledAt,
+          attachments: index === 0 ? attachments : [],
+          goalMode: {
+            chainId: spec.chainId,
+            stepIndex: spec.stepIndex,
+            totalSteps: spec.totalSteps,
+          },
+        });
+        queuedItems.push(nextItem);
+      }
+
+      if (sessionContextKey) {
+        await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      }
+
+      res.status(202).json({ items: queuedItems });
+      return;
+    }
+
+    if (supportEnvelope) {
+      await recordSupportTurnRequest({
+        profile: configuredProfile,
+        sessionKey: sessionId || queueKey,
+        source: 'ui',
+        envelope: supportEnvelope,
+      });
+    }
+
+    const item = await enqueueCodexQueueItem({
+      profileId,
+      sourceProfileId: visibleProfileId,
+      queueKey,
+      clientRequestId,
+      sessionId,
+      cwd,
+      prompt: effectivePrompt,
+      promptPreview: effectivePromptPreview,
+      contextPrefix: combinedContextPrefix || undefined,
+      sessionInstruction: effectiveSessionInstruction,
+      actionRestriction: sessionContextSelection.actionRestriction,
+      browserMode: sessionBrowserMode,
+      designMode: sessionDesignMode,
+      uxMode: sessionUxMode,
+      personalChromeMode: sessionPersonalChromeMode,
+      forkContext: hydratedForkDraft.forkContext,
+      scheduledAt,
+      attachments,
+      recurrence,
+    });
+
+    if (sessionContextKey) {
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+    }
+
+    res.status(202).json({ item });
+  } catch (error: any) {
+    res.status(typeof error?.statusCode === 'number' ? error.statusCode : 500).json({
+      error: error.message || 'Failed to enqueue Codex task',
+    });
+  }
+});
+
+router.post('/queue/items/:itemId/cancel', requireCodexAccess, async (req, res) => {
+  try {
+    const item = await cancelCodexQueueItem(readRouteParam(req.params.itemId));
+    res.json({ item });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to cancel queue item' });
+  }
+});
+
+router.put('/queue/items/:itemId/stop-schedule', requireCodexAccess, async (req, res) => {
+  try {
+    const stopAt = typeof req.body?.stopAt === 'string' ? req.body.stopAt.trim() : '';
+    const mode = req.body?.mode === 'hard' || req.body?.mode === 'conditional'
+      ? req.body.mode
+      : null;
+    const question = typeof req.body?.question === 'string' ? req.body.question : null;
+    if (!stopAt || !mode) {
+      res.status(400).json({ error: 'Stop time and stop mode are required' });
+      return;
+    }
+
+    const item = await setCodexQueueItemStopSchedule(
+      readRouteParam(req.params.itemId),
+      { stopAt, mode, question }
+    );
+    res.json({ item });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to schedule queue item stop' });
+  }
+});
+
+router.delete('/queue/items/:itemId/stop-schedule', requireCodexAccess, async (req, res) => {
+  try {
+    const item = await clearCodexQueueItemStopSchedule(readRouteParam(req.params.itemId));
+    res.json({ item });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to remove queue item stop schedule' });
+  }
+});
+
+router.post('/queue/items/:itemId/retry', requireCodexAccess, async (req, res) => {
+  try {
+    const itemId = readRouteParam(req.params.itemId);
+    const scheduledAt = typeof req.body?.scheduledAt === 'string' && req.body.scheduledAt.trim()
+      ? req.body.scheduledAt.trim()
+      : undefined;
+    const item = await retryCodexQueueItem(itemId, scheduledAt);
+    res.json({ item });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to retry queue item' });
+  }
+});
+
+router.delete('/queue/items/:itemId', requireCodexAccess, async (req, res) => {
+  try {
+    await deleteCodexQueueItem(readRouteParam(req.params.itemId));
+    res.status(204).end();
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete queue item' });
+  }
+});
+
+router.get('/jobs/:jobId', requireCodexAccess, async (req, res) => {
+  const jobId = readRouteParam(req.params.jobId);
+  const job = await getCodexQueueItem(jobId);
+
+  if (!job) {
+    res.status(404).json({ error: 'Codex job was not found' });
+    return;
+  }
+
+  const session = await getCodexQueueItemSession(jobId);
+
+  res.json({ job, session });
+});
+
+router.post('/ask', requireCodexAccess, async (req, res) => {
+  try {
+    const prompt = typeof req.body?.prompt === 'string'
+      ? req.body.prompt
+      : typeof req.body?.message === 'string'
+        ? req.body.message
+        : '';
+    const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const visibleProfileId = requestedProfileId || 'developer';
+    const asyncRequested = req.headers['x-codex-async'] === '1' || req.body?.async === true;
+    const queueKey = typeof req.body?.queueKey === 'string' && req.body.queueKey.trim()
+      ? req.body.queueKey.trim()
+      : undefined;
+    const clientRequestId = typeof req.body?.clientRequestId === 'string' && req.body.clientRequestId.trim()
+      ? req.body.clientRequestId.trim()
+      : undefined;
+    const requestedSessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+      ? req.body.sessionId.trim()
+      : undefined;
+    const sessionId = requestedSessionId
+      ? await resolveEffectiveSessionId(requestedSessionId)
+      : undefined;
+    const profileId = sessionId
+      ? await resolveEffectiveProfileIdForSession(visibleProfileId, sessionId)
+      : visibleProfileId;
+    const configuredProfile = findConfiguredProfile(profileId);
+    if (!configuredProfile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const effectiveQueueKey = queueKey || sessionId || randomUUID();
+    const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+    const promptPreview = typeof req.body?.promptPreview === 'string' ? req.body.promptPreview : undefined;
+    const contextPrefix = typeof req.body?.contextPrefix === 'string' ? req.body.contextPrefix : undefined;
+    const sessionInstruction = typeof req.body?.sessionInstruction === 'string' ? req.body.sessionInstruction : undefined;
+    const forkContext = req.body?.forkContext;
+    const executionConfig = readExecutionConfig(req.body);
+    if (!executionConfig.permissionModeId) {
+      executionConfig.permissionModeId = await getSelectedPermissionModeId(configuredProfile);
+    }
+    const recurrence = readRecurringConfig(req.body);
+    const cwd = requestedCwd
+      ? (await resolveCodexFolderPath(requestedCwd, visibleProfileId)).resolvedPath
+      : undefined;
+    const attachments = (Array.isArray(req.body?.attachments) ? req.body.attachments : [])
+      .map((attachment: any): CodexUploadedAttachment | null => {
+        const attachmentPath = typeof attachment?.path === 'string'
+          ? path.resolve(attachment.path)
+          : '';
+
+        if (!attachmentPath || !isPathInside(CODEX_UPLOAD_ROOT, attachmentPath)) {
+          return null;
+        }
+
+        return {
+          id: typeof attachment?.id === 'string' ? attachment.id : randomUUID(),
+          name: typeof attachment?.name === 'string' ? attachment.name : path.basename(attachmentPath),
+          mimeType: typeof attachment?.mimeType === 'string'
+            ? attachment.mimeType
+            : 'application/octet-stream',
+          size: typeof attachment?.size === 'number' ? attachment.size : 0,
+          path: attachmentPath,
+          isImage: typeof attachment?.isImage === 'boolean'
+            ? attachment.isImage
+            : false,
+        };
+      })
+      .filter((attachment: CodexUploadedAttachment | null): attachment is CodexUploadedAttachment => Boolean(attachment));
+
+    const isDraftTarget = isDraftSessionKey(sessionId) || isDraftSessionKey(queueKey);
+    const hydratedForkDraft = isDraftTarget
+      ? await hydrateForkDraftRequest(
+        visibleProfileId,
+        queueKey,
+        sessionId,
+        contextPrefix,
+        forkContext
+      )
+      : {
+        contextPrefix: undefined,
+        forkContext: undefined,
+      };
+    const supportEnvelope = isSupportProfile(configuredProfile)
+      ? buildSupportPromptEnvelope(configuredProfile, {
+        source: 'ui',
+        userPrompt: prompt,
+        authenticatedUser: (req as any).codexAuth?.user || null,
+      })
+      : null;
+    const providerPrompt = supportEnvelope?.compiledPrompt || prompt;
+    const sessionContextKey = sessionId || effectiveQueueKey;
+    const sessionContextSelection = await getSessionContextSelection(visibleProfileId, sessionContextKey);
+    const sessionBrowserModeRecord = await getSessionBrowserModeRecord(visibleProfileId, sessionContextKey);
+    const sessionBrowserMode = sessionBrowserModeRecord
+      ? {
+        enabled: sessionBrowserModeRecord.enabled === true,
+        headless: sessionBrowserModeRecord.headless !== false,
+        profileSeed: sessionBrowserModeRecord.profileSeed,
+        customProfileDir: sessionBrowserModeRecord.profileSeed === 'custom'
+          ? sessionBrowserModeRecord.customProfileDir || null
+          : null,
+      }
+      : null;
+    const sessionDesignModeRecord = await getSessionDesignModeRecord(visibleProfileId, sessionContextKey);
+    const sessionDesignMode = sessionDesignModeRecord
+      ? await getSessionDesignMode(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionUxModeRecord = await getSessionUxModeRecord(visibleProfileId, sessionContextKey);
+    const sessionUxMode = sessionUxModeRecord
+      ? await getSessionUxMode(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionProjectModeRecord = await getSessionProjectModeRecord(visibleProfileId, sessionContextKey);
+    const sessionProjectMode = sessionProjectModeRecord
+      ? await getSessionProjectMode(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionPersonalChromeModeRecord = await getSessionPersonalChromeModeRecord(visibleProfileId, sessionContextKey);
+    const sessionPersonalChromeMode = sessionPersonalChromeModeRecord
+      ? await getSessionPersonalChromeMode(visibleProfileId, sessionContextKey)
+      : null;
+    if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionDesignModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב עיצוב זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionUxModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב חוויית משתמש זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionProjectModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב פרויקט זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionPersonalChromeModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב Chrome אישי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    const contextCwd = cwd || (sessionId
+      ? (await getAgentSessionDetail(sessionId, visibleProfileId, { tail: 1 }).catch(() => null))?.cwd || configuredProfile.workspaceCwd
+      : configuredProfile.workspaceCwd);
+    const additionsPromptSuffix = await buildSessionPromptAdditionsContext({
+      profileId: visibleProfileId,
+      sessionKey: sessionContextKey,
+      cwd: contextCwd,
+    });
+    const browserModePromptSuffix = sessionBrowserModeRecord
+      ? buildSessionBrowserModePromptAdditions(sessionBrowserModeRecord)
+      : null;
+    const designModePromptSuffix = sessionDesignModeRecord
+      ? buildSessionDesignModePromptAdditions(sessionDesignModeRecord)
+      : null;
+    const uxModePromptSuffix = sessionUxModeRecord
+      ? buildSessionUxModePromptAdditions(sessionUxModeRecord)
+      : null;
+    const personalChromeModePromptSuffix = sessionPersonalChromeModeRecord
+      ? buildSessionPersonalChromePromptAdditions(sessionPersonalChromeModeRecord)
+      : null;
+    const providerPromptWithAdditions = [
+      providerPrompt,
+      additionsPromptSuffix,
+      browserModePromptSuffix,
+      designModePromptSuffix,
+      uxModePromptSuffix,
+      personalChromeModePromptSuffix,
+    ]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n\n');
+    const combinedContextPrefix = [hydratedForkDraft.contextPrefix]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n\n');
+    const promptWithForkContext = combinedContextPrefix.trim()
+      ? `${combinedContextPrefix.trim()}\n\nהודעת ההמשך החדשה:\n${providerPromptWithAdditions}`
+      : providerPromptWithAdditions;
+    const effectiveSessionInstruction = buildSupportSessionInstruction(sessionInstruction, supportEnvelope);
+    const effectivePrompt = effectiveSessionInstruction?.trim()
+      ? `${promptWithForkContext}\n\nהוראה קבועה לסשן זה. יש ליישם אותה גם אם המשתמש לא חזר עליה בהודעה הנוכחית:\n${effectiveSessionInstruction}`
+      : promptWithForkContext;
+
+    if (sessionProjectMode?.enabled) {
+      if (!sessionDesignMode?.enabled || !sessionUxMode?.enabled) {
+        res.status(400).json({ error: 'מצב פרויקט דורש את מועצות Gemini UX ו־Design. פתח את מצב הפרויקט ושמור אותו מחדש.' });
+        return;
+      }
+      if (sessionContextSelection.agentSessionDraftId) {
+        res.status(400).json({ error: 'מצב פרויקט כבר מנהל צוותי Codex בעצמו; אין לשלב איתו מצב סוכנים נפרד.' });
+        return;
+      }
+      if (sessionContextSelection.professionalMode || sessionContextSelection.annotationsMode || sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'מצב פרויקט כולל תכנון, ביצוע וביקורת משלו; כבה מצב מקצועי, ביאורים או מטרה לפני השליחה.' });
+        return;
+      }
+      if (sessionContextSelection.actionRestriction?.enabled) {
+        res.status(400).json({ error: 'מצב פרויקט זקוק לתיקיות frontend ו־backend ואינו תומך בהגבלת פעולה חד־נתיבית.' });
+        return;
+      }
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב פרויקט אינו תומך בתזמון קבוע. הפעל תוכנית פרויקט חד־פעמית.' });
+        return;
+      }
+      const readyProjectMode = await assertSessionProjectModeReady(sessionProjectMode);
+      const projectSpecs = buildProjectModeQueueSpecs(providerPrompt, readyProjectMode);
+      const projectBrowserMode = sessionBrowserMode || {
+        enabled: true,
+        headless: true,
+        profileSeed: 'empty' as const,
+        customProfileDir: null,
+      };
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+      for (const [index, spec] of projectSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        queuedItems.push(await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey: effectiveQueueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd: cwd || readyProjectMode.frontendRoot,
+          model: executionConfig.model,
+          reasoningEffort: executionConfig.reasoningEffort,
+          permissionModeId: executionConfig.permissionModeId,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          browserMode: projectBrowserMode,
+          designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          attachments: index === 0 ? attachments : [],
+        }));
+      }
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      res.status(202).json({ items: queuedItems, projectMode: readyProjectMode });
+      return;
+    }
+
+    if (sessionContextSelection.agentSessionDraftId) {
+      if (sessionContextSelection.annotationsMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב ביאורים עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מטרה עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionContextSelection.actionRestriction?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב הגבלת פעולה עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionBrowserModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב דפדפן אמיתי עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionDesignModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב עיצוב עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionUxModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב חוויית משתמש עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionPersonalChromeModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב Chrome אישי עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
+      if (!sourceProfile) {
+        res.status(404).json({ error: 'The selected profile was not found' });
+        return;
+      }
+
+      const existingRecord = await getAgentSessionRecord(sessionContextSelection.agentSessionDraftId);
+      if (!existingRecord) {
+        res.status(404).json({ error: 'Agent session draft was not found' });
+        return;
+      }
+      assertAgentSessionAccess(existingRecord, sourceProfile.id);
+
+      const updatedRecord = await updateAgentSessionGoal(existingRecord.id, effectivePrompt);
+      const plannerProfileId = resolveAgentProviderProfileId(sourceProfile, updatedRecord.plannerProvider);
+      const plannerExecutionConfig: CodexExecutionConfig = {
+        model: null,
+        reasoningEffort: null,
+        permissionModeId: 'full',
+      };
+
+      if (!asyncRequested) {
+        const result = await runAgentPrompt(
+          buildAgentPlanPrompt(updatedRecord),
+          updatedRecord.plannerSessionId,
+          plannerProfileId,
+          attachments,
+          {
+            cwd: updatedRecord.cwd,
+            injectDirectoryContext: !updatedRecord.plannerSessionId,
+            executionConfig: plannerExecutionConfig,
+            finalNotification: {
+              profileId: visibleProfileId,
+              sessionKey: updatedRecord.plannerSessionId || sessionContextKey,
+              dedupeKey: clientRequestId,
+            },
+          }
+        );
+        const parsedPlan = await readAgentPlanJsonFromDisk(updatedRecord);
+        const savedRecord = await saveAgentSessionPlan(updatedRecord.id, parsedPlan, {
+          plannerSessionId: result.sessionId,
+          plannerProfileId,
+        });
+        await rebindSessionFinalNotificationPreference(
+          visibleProfileId,
+          updatedRecord.plannerSessionId || sessionContextKey,
+          result.sessionId
+        );
+        await recordAgentSessionLinkedSession({
+          sessionId: result.sessionId,
+          agentSessionId: savedRecord.id,
+          sourceProfileId: sourceProfile.id,
+          profileId: plannerProfileId,
+          provider: updatedRecord.plannerProvider,
+          kind: 'planner',
+          agentId: null,
+          createdAt: nowIso(),
+        });
+        await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+        const session = await decorateSessionDetailForClient(
+          visibleProfileId,
+          await getAgentSessionDetail(result.sessionId, plannerProfileId)
+        );
+        res.json({
+          session,
+          finalMessage: result.finalMessage,
+          agentSession: savedRecord,
+        });
+        return;
+      }
+
+      const item = await enqueueCodexQueueItem({
+        profileId: plannerProfileId,
+        sourceProfileId: sourceProfile.id,
+        queueKey: effectiveQueueKey,
+        clientRequestId,
+        sessionId: updatedRecord.plannerSessionId || undefined,
+        cwd: updatedRecord.cwd,
+        prompt: buildAgentPlanPrompt(updatedRecord),
+        promptPreview: `תכנית סוכנים · ${updatedRecord.title}`,
+        contextPrefix: combinedContextPrefix || undefined,
+        attachments,
+        agentSessionId: updatedRecord.id,
+        agentLinkKind: 'planner',
+        permissionModeId: 'full',
+      });
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      res.status(202).json({ job: item, agentSession: updatedRecord });
+      return;
+    }
+
+    if (sessionContextSelection.professionalMode) {
+      if (sessionContextSelection.annotationsMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מקצועי עם מצב ביאורים באותה שליחה.' });
+        return;
+      }
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב מקצועי עם מצב מטרה באותה שליחה.' });
+        return;
+      }
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב מקצועי אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      if (supportEnvelope) {
+        await recordSupportTurnRequest({
+          profile: configuredProfile,
+          sessionKey: effectiveQueueKey,
+          source: 'ui',
+          envelope: supportEnvelope,
+        });
+      }
+
+      const professionalSpecs = buildProfessionalModeQueueSpecs(providerPrompt);
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of professionalSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey: effectiveQueueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          model: executionConfig.model,
+          reasoningEffort: executionConfig.reasoningEffort,
+          permissionModeId: executionConfig.permissionModeId,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
+          designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          attachments: index === 0 ? attachments : [],
+        });
+        queuedItems.push(nextItem);
+      }
+
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      res.status(202).json({ items: queuedItems });
+      return;
+    }
+
+    if (sessionContextSelection.annotationsMode) {
+      if (sessionContextSelection.goalMode) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב ביאורים עם מצב מטרה באותה שליחה.' });
+        return;
+      }
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב ביאורים אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      if (supportEnvelope) {
+        await recordSupportTurnRequest({
+          profile: configuredProfile,
+          sessionKey: effectiveQueueKey,
+          source: 'ui',
+          envelope: supportEnvelope,
+        });
+      }
+
+      const annotationSpecs = await buildAnnotationsModeQueueSpecs(
+        visibleProfileId,
+        providerPrompt,
+        effectiveQueueKey,
+        sessionContextSelection.actionRestriction
+      );
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of annotationSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey: effectiveQueueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          model: executionConfig.model,
+          reasoningEffort: executionConfig.reasoningEffort,
+          permissionModeId: executionConfig.permissionModeId,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
+          designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          attachments: index === 0 ? attachments : [],
+        });
+        queuedItems.push(nextItem);
+      }
+
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      res.status(202).json({ items: queuedItems });
+      return;
+    }
+
+    if (sessionContextSelection.goalMode) {
+      if (recurrence) {
+        res.status(400).json({ error: 'מצב מטרה אינו תומך כרגע בתזמון קבוע. בחר שליחה חד-פעמית.' });
+        return;
+      }
+
+      if (supportEnvelope) {
+        await recordSupportTurnRequest({
+          profile: configuredProfile,
+          sessionKey: effectiveQueueKey,
+          source: 'ui',
+          envelope: supportEnvelope,
+        });
+      }
+
+      const goalSpecs = buildGoalModeQueueSpecs(providerPrompt);
+      const queuedItems: Awaited<ReturnType<typeof enqueueCodexQueueItem>>[] = [];
+
+      for (const [index, spec] of goalSpecs.entries()) {
+        const stepPrompt = index === 0
+          ? [spec.prompt, additionsPromptSuffix]
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            .join('\n\n')
+          : spec.prompt;
+        const nextItem = await enqueueCodexQueueItem({
+          profileId,
+          sourceProfileId: visibleProfileId,
+          queueKey: effectiveQueueKey,
+          clientRequestId: index === 0 ? clientRequestId : undefined,
+          sessionId,
+          cwd,
+          model: executionConfig.model,
+          reasoningEffort: executionConfig.reasoningEffort,
+          permissionModeId: executionConfig.permissionModeId,
+          prompt: stepPrompt,
+          promptPreview: spec.promptPreview,
+          contextPrefix: combinedContextPrefix || undefined,
+          sessionInstruction: effectiveSessionInstruction,
+          actionRestriction: sessionContextSelection.actionRestriction,
+          browserMode: sessionBrowserMode,
+          designMode: sessionDesignMode,
+          uxMode: sessionUxMode,
+          personalChromeMode: sessionPersonalChromeMode,
+          forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
+          attachments: index === 0 ? attachments : [],
+          goalMode: {
+            chainId: spec.chainId,
+            stepIndex: spec.stepIndex,
+            totalSteps: spec.totalSteps,
+          },
+        });
+        queuedItems.push(nextItem);
+      }
+
+      await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+      res.status(202).json({ items: queuedItems });
+      return;
+    }
+
+    if (!asyncRequested) {
+      const supportSessionKey = sessionId || effectiveQueueKey;
+      if (supportEnvelope) {
+        await recordSupportTurnRequest({
+          profile: configuredProfile,
+          sessionKey: supportSessionKey,
+          source: 'ui',
+          envelope: supportEnvelope,
+        });
+      }
+      const result = await runAgentPrompt(effectivePrompt, sessionId, profileId, attachments, {
+        cwd,
+        injectDirectoryContext: !sessionId,
+        executionConfig,
+        actionRestriction: sessionContextSelection.actionRestriction,
+        browserMode: sessionBrowserMode,
+        browserModeProfileId: visibleProfileId,
+        browserModeSessionKey: supportSessionKey,
+        designMode: sessionDesignMode,
+        designModeProfileId: visibleProfileId,
+        designModeSessionKey: supportSessionKey,
+        uxMode: sessionUxMode,
+        uxModeProfileId: visibleProfileId,
+        uxModeSessionKey: supportSessionKey,
+        personalChromeMode: sessionPersonalChromeMode,
+        personalChromeModeProfileId: visibleProfileId,
+        personalChromeModeSessionKey: supportSessionKey,
+        finalNotification: {
+          profileId: visibleProfileId,
+          sessionKey: supportSessionKey,
+          dedupeKey: clientRequestId,
+        },
+      });
+      if (sessionId && result.sessionId !== sessionId) {
+        const sourceSession = await getAgentSessionDetail(sessionId, visibleProfileId, {
+          tail: 1,
+        }).catch(() => null);
+        if (sourceSession) {
+          await copySessionSidebarMetadataToForkSession(
+            visibleProfileId,
+            visibleProfileId,
+            sourceSession,
+            result.sessionId
+          );
+        }
+        await rebindSessionInstruction(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionContextSelection(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionReminders(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionBrowserMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionPersonalChromeMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionDesignMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionUxMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionProjectMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionConversationSearchMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionFinalNotificationPreference(visibleProfileId, sessionId, result.sessionId);
+      }
+      if (!sessionId && supportSessionKey !== result.sessionId) {
+        await rebindSessionInstruction(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionContextSelection(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionReminders(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionBrowserMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionPersonalChromeMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionDesignMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionUxMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionProjectMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionConversationSearchMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionFinalNotificationPreference(visibleProfileId, supportSessionKey, result.sessionId);
+      }
+      if (supportEnvelope && supportSessionKey !== result.sessionId) {
+        await rebindSupportSessionRecord(visibleProfileId, supportSessionKey, result.sessionId);
+      }
+      if (sessionBrowserModeRecord && sessionBrowserModeRecord.enabled !== true) {
+        await consumeSessionBrowserModeAfterDispatch(visibleProfileId, result.sessionId);
+      }
+      if (sessionDesignModeRecord && sessionDesignModeRecord.enabled !== true) {
+        await consumeSessionDesignModeAfterDispatch(visibleProfileId, result.sessionId);
+      }
+      if (sessionUxModeRecord && sessionUxModeRecord.enabled !== true) {
+        await consumeSessionUxModeAfterDispatch(visibleProfileId, result.sessionId);
+      }
+      if (sessionPersonalChromeModeRecord && sessionPersonalChromeModeRecord.enabled !== true) {
+        await consumeSessionPersonalChromeModeAfterDispatch(visibleProfileId, result.sessionId);
+      }
+      await deleteSessionContextSelection(visibleProfileId, supportSessionKey);
+      const session = await decorateSessionDetailForClient(
+        visibleProfileId,
+        await getAgentSessionDetail(result.sessionId, profileId)
+      );
+
+      res.json({
+        session,
+        finalMessage: result.finalMessage,
+      });
+      return;
+    }
+
+    if (supportEnvelope) {
+      await recordSupportTurnRequest({
+        profile: configuredProfile,
+        sessionKey: effectiveQueueKey,
+        source: 'ui',
+        envelope: supportEnvelope,
+      });
+    }
+    const item = await enqueueCodexQueueItem({
+      profileId,
+      sourceProfileId: visibleProfileId,
+      queueKey: effectiveQueueKey,
+      clientRequestId,
+      sessionId,
+      cwd,
+      model: executionConfig.model,
+      reasoningEffort: executionConfig.reasoningEffort,
+      permissionModeId: executionConfig.permissionModeId,
+      prompt: providerPrompt,
+      promptPreview: supportEnvelope?.promptPreview || promptPreview,
+      contextPrefix: combinedContextPrefix || undefined,
+      sessionInstruction: effectiveSessionInstruction,
+      actionRestriction: sessionContextSelection.actionRestriction,
+      browserMode: sessionBrowserMode,
+      designMode: sessionDesignMode,
+      uxMode: sessionUxMode,
+      personalChromeMode: sessionPersonalChromeMode,
+      forkContext: hydratedForkDraft.forkContext,
+      attachments,
+      recurrence,
+    });
+
+    await deleteSessionContextSelection(visibleProfileId, sessionContextKey);
+
+    res.status(202).json({ job: item });
+  } catch (error: any) {
+    res.status(typeof error?.statusCode === 'number' ? error.statusCode : 500).json({
+      error: error.message || 'Codex request failed',
+    });
+  }
+});
+
+async function handleSupportAskRequest(
+  req: Request,
+  res: Response,
+  source: 'api' | 'webhook'
+) {
+  try {
+    const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId.trim() : '';
+    const requestedProvider = typeof req.body?.provider === 'string'
+      ? req.body.provider.trim()
+      : '';
+    const profile = resolveSupportProfileSelection(
+      requestedProfileId || undefined,
+      requestedProvider === 'codex' || requestedProvider === 'claude' || requestedProvider === 'gemini'
+        ? requestedProvider
+        : undefined
+    );
+    const prompt = typeof req.body?.prompt === 'string'
+      ? req.body.prompt
+      : typeof req.body?.message === 'string'
+        ? req.body.message
+        : '';
+    const asyncRequested = req.headers['x-codex-async'] === '1' || req.body?.async === true;
+    const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+    const queueKey = typeof req.body?.queueKey === 'string' && req.body.queueKey.trim()
+      ? req.body.queueKey.trim()
+      : `draft:support:${randomUUID()}`;
+    const clientRequestId = typeof req.body?.clientRequestId === 'string' && req.body.clientRequestId.trim()
+      ? req.body.clientRequestId.trim()
+      : undefined;
+    const requestedSessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+      ? req.body.sessionId.trim()
+      : undefined;
+    const sessionId = requestedSessionId
+      ? await resolveEffectiveSessionId(requestedSessionId)
+      : undefined;
+    const requestedSupportLevel = readSupportExecutionLevel(
+      req.body?.supportLevel ?? req.body?.level ?? req.body?.tier
+    );
+    const supportExecution = resolveSupportExecutionConfig(
+      profile.provider,
+      requestedSupportLevel,
+      readExecutionConfig(req.body)
+    );
+    const executionConfig = supportExecution.executionConfig;
+    if (!executionConfig.permissionModeId) {
+      executionConfig.permissionModeId = await getSelectedPermissionModeId(profile);
+    }
+    const cwd = requestedCwd
+      ? (await resolveCodexFolderPath(requestedCwd, profile.id)).resolvedPath
+      : profile.workspaceCwd;
+    const envelope = buildSupportPromptEnvelope(profile, {
+      source,
+      userPrompt: prompt,
+      userContext: typeof req.body?.userContext === 'string'
+        ? req.body.userContext
+        : (() => {
+          try {
+            return req.body?.userContext === undefined
+              ? null
+              : JSON.stringify(req.body.userContext, null, 2);
+          } catch {
+            return null;
+          }
+        })(),
+      webhookPayload: req.body?.payload ?? req.body?.webhookPayload,
+      authenticatedUser: (req as any).codexAuth?.user || null,
+    });
+
+    await recordSupportTurnRequest({
+      profile,
+      sessionKey: sessionId || queueKey,
+      source,
+      envelope,
+    });
+
+    if (!asyncRequested) {
+      const result = await runAgentPrompt(envelope.compiledPrompt, sessionId, profile.id, [], {
+        cwd,
+        injectDirectoryContext: !sessionId,
+        executionConfig,
+        finalNotification: {
+          profileId: profile.id,
+          sessionKey: sessionId || queueKey,
+          dedupeKey: clientRequestId,
+        },
+      });
+      if ((sessionId || queueKey) !== result.sessionId) {
+        await rebindSupportSessionRecord(profile.id, sessionId || queueKey, result.sessionId);
+        await rebindSessionFinalNotificationPreference(profile.id, sessionId || queueKey, result.sessionId);
+      }
+      const session = await decorateSessionDetailForClient(
+        profile.id,
+        await getAgentSessionDetail(result.sessionId, profile.id)
+      );
+
+      res.json({
+        profileId: profile.id,
+        supportLevel: supportExecution.level,
+        executionConfig,
+        session,
+        finalMessage: result.finalMessage,
+      });
+      return;
+    }
+
+    const item = await enqueueCodexQueueItem({
+      profileId: profile.id,
+      queueKey: sessionId || queueKey,
+      clientRequestId,
+      sessionId,
+      cwd,
+      model: executionConfig.model,
+      reasoningEffort: executionConfig.reasoningEffort,
+      permissionModeId: executionConfig.permissionModeId,
+      prompt: envelope.compiledPrompt,
+      promptPreview: envelope.promptPreview,
+    });
+
+    res.status(202).json({
+      profileId: profile.id,
+      supportLevel: supportExecution.level,
+      executionConfig,
+      item,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Support request failed' });
+  }
+}
+
+// standalone-strip:start private-incident-center
+function readIncidentString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized || null;
+}
+
+function readIncidentBoolean(value: unknown): boolean {
+  return value === true || value === 1 || value === '1' || value === 'true';
+}
+
+function readIncidentObject(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function readIncidentStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((entry) => readIncidentString(entry))
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function readIncidentAuthor(value: unknown, fallback: IncidentCaseMessageAuthor): IncidentCaseMessageAuthor {
+  const normalized = readIncidentString(value)?.toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+  if (normalized === 'system' || normalized === 'investigator' || normalized === 'operator') {
+    return normalized;
+  }
+  throw new Error(`incident_case_author_invalid:${normalized}`);
+}
+
+async function handleIncidentCaseCreateRequest(
+  req: Request,
+  res: Response
+) {
+  try {
+    const autoWake = readIncidentBoolean(req.body?.autoWake);
+    const investigatorSessionId = readIncidentString(req.body?.investigatorSessionId);
+    const investigatorProfileId = readIncidentString(req.body?.investigatorProfileId);
+
+    const result = await incidentDecisionCenter.createCase({
+      caseId: readIncidentString(req.body?.caseId) || undefined,
+      title: readIncidentString(req.body?.title) || 'מקרה הכרעה חדש',
+      summary: readIncidentString(req.body?.summary) || '',
+      failureTicketId: readIncidentString(req.body?.failureTicketId),
+      threadId: readIncidentString(req.body?.threadId),
+      messageId: readIncidentString(req.body?.messageId),
+      runId: readIncidentString(req.body?.runId),
+      investigatorSessionId,
+      investigatorProfileId,
+      metadata: readIncidentObject(req.body?.metadata),
+      investigatorPrompt: readIncidentString(req.body?.investigatorPrompt),
+      autoWake,
+    });
+
+    res.status(autoWake ? 202 : 201).json(result);
+  } catch (error: any) {
+    res.status(typeof error?.statusCode === 'number' ? error.statusCode : 500).json({
+      error: error?.message || 'פתיחת תיק ההכרעה נכשלה.',
+    });
+  }
+}
+
+async function handleIncidentSessionTaskWebhook(req: Request, res: Response) {
+  try {
+    const caseId = readIncidentString(req.body?.caseId || req.body?.incident_case_id);
+    const taskType = readIncidentString(req.body?.taskType || req.body?.task_type) || 'initial_investigation';
+    if (!caseId) {
+      res.status(400).json({ error: 'חסר מזהה תיק הכרעה.' });
+      return;
+    }
+    const result = await incidentDecisionCenter.wakeSessionTask({
+      caseId,
+      taskType,
+    });
+    res.status(202).json(result);
+  } catch (error: any) {
+    res.status(500).json({
+      error: error?.message || 'הקפצת סשן ההכרעה נכשלה.',
+    });
+  }
+}
+
+async function handleIncidentCaseMessageRequest(
+  req: Request,
+  res: Response,
+  defaultAuthor: IncidentCaseMessageAuthor
+) {
+  try {
+    const wakeInvestigator = readIncidentBoolean(req.body?.wakeInvestigator);
+    const result = await incidentDecisionCenter.appendMessage(req.params.caseId, {
+      author: readIncidentAuthor(req.body?.author, defaultAuthor),
+      kind: readIncidentString(req.body?.kind) || 'note',
+      text: readIncidentString(req.body?.text) || '',
+      messagePayload: readIncidentObject(req.body?.messagePayload ?? req.body?.payload) || null,
+      status: readIncidentString(req.body?.status) as any,
+      operatorDecision: readIncidentString(req.body?.operatorDecision),
+      resolutionSummary: readIncidentString(req.body?.resolutionSummary),
+      wakeInvestigator,
+      wakeReason: readIncidentString(req.body?.wakeReason),
+      wakePrompt: readIncidentString(req.body?.wakePrompt),
+    });
+
+    res.status(wakeInvestigator ? 202 : 200).json(result);
+  } catch (error: any) {
+    const statusCode = error?.message === 'incident_case_not_found'
+      ? 404
+      : typeof error?.statusCode === 'number'
+        ? error.statusCode
+        : 500;
+    res.status(statusCode).json({
+      error: error?.message || 'עדכון תיק ההכרעה נכשל.',
+    });
+  }
+}
+
+async function handleIncidentCaseActionRequest(req: Request, res: Response) {
+  try {
+    const caseId = req.params.caseId;
+    const action = readIncidentString(req.body?.action);
+    const note = readIncidentString(req.body?.text) || '';
+    const executionScope = readIncidentStringArray(req.body?.executionScope);
+    const duplicateOf = readIncidentString(req.body?.duplicateOf);
+    const details = readIncidentObject(req.body?.details) || {};
+
+    if (!action) {
+      res.status(400).json({ error: 'חסרה פעולה לביצוע.' });
+      return;
+    }
+
+    let result;
+    switch (action) {
+      case 'send_to_investigator':
+        result = await incidentDecisionCenter.appendMessage(caseId, {
+          author: 'operator',
+          kind: 'operator_reply',
+          text: note || 'נשלחה תגובת מפעיל.',
+          status: 'waiting_investigator',
+          wakeInvestigator: true,
+          wakeReason: 'operator_reply',
+        });
+        break;
+      case 'request_more_research':
+        result = await incidentDecisionCenter.appendMessage(caseId, {
+          author: 'operator',
+          kind: 'operator_research_request',
+          text: note || 'נדרשת חקירה נוספת.',
+          messagePayload: details,
+          status: 'waiting_investigator',
+          wakeInvestigator: true,
+          wakeReason: 'operator_research_request',
+        });
+        break;
+      case 'save_note':
+        result = await incidentDecisionCenter.appendMessage(caseId, {
+          author: 'operator',
+          kind: 'operator_note',
+          text: note || 'נשמרה הערת מפעיל.',
+          messagePayload: details,
+        });
+        break;
+      case 'approve_execution':
+        if (executionScope.length === 0) {
+          res.status(400).json({ error: 'חובה לבחור לפחות תחום ביצוע אחד.' });
+          return;
+        }
+        result = await incidentDecisionCenter.recordDecision(caseId, {
+          author: 'operator',
+          decisionKind: 'approved_for_execution',
+          status: 'approved_for_execution',
+          summary: note || 'אושר לביצוע.',
+          contract: {
+            ...details,
+            execution_scope: executionScope,
+            operator_note: note || null,
+          },
+          executionScope,
+          testPlan: readIncidentStringArray(req.body?.testPlan),
+        });
+        break;
+      case 'reject_recommendation':
+        if (!note) {
+          res.status(400).json({ error: 'חובה לכתוב הערה מפורשת בדחיית המלצה.' });
+          return;
+        }
+        result = await incidentDecisionCenter.recordDecision(caseId, {
+          author: 'operator',
+          decisionKind: 'rejected',
+          status: 'rejected',
+          summary: note,
+          contract: {
+            ...details,
+            operator_note: note,
+          },
+        });
+        break;
+      case 'mark_expected_behavior':
+        if (!note) {
+          res.status(400).json({ error: 'חובה לכתוב נימוק לסימון מצב צפוי.' });
+          return;
+        }
+        result = await incidentDecisionCenter.completeCase(caseId, {
+          author: 'operator',
+          summary: note,
+          completionType: 'expected_behavior',
+          completionReason: note,
+          details,
+        });
+        break;
+      case 'mark_duplicate_case':
+        if (!note) {
+          res.status(400).json({ error: 'חובה לכתוב נימוק לסימון כפילות.' });
+          return;
+        }
+        result = await incidentDecisionCenter.completeCase(caseId, {
+          author: 'operator',
+          summary: note,
+          completionType: 'duplicate_case',
+          completionReason: note,
+          details: {
+            ...details,
+            duplicate_of: duplicateOf || null,
+          },
+        });
+        break;
+      case 'complete_without_fix':
+        if (!note) {
+          res.status(400).json({ error: 'חובה לכתוב סיבה להשלמה ללא תיקון.' });
+          return;
+        }
+        result = await incidentDecisionCenter.completeCase(caseId, {
+          author: 'operator',
+          summary: note,
+          completionType: 'no_fix_required',
+          completionReason: note,
+          details,
+        });
+        break;
+      case 'complete_resolved':
+        result = await incidentDecisionCenter.completeCase(caseId, {
+          author: 'operator',
+          summary: note || 'הטיפול הושלם.',
+          completionType: 'completed',
+          completionReason: note || 'הטיפול הושלם.',
+          details,
+        });
+        break;
+      case 'reopen_case':
+        if (!note) {
+          res.status(400).json({ error: 'חובה לכתוב סיבה לפתיחה מחדש.' });
+          return;
+        }
+        result = await incidentDecisionCenter.reopenCase(caseId, {
+          author: 'operator',
+          summary: note,
+          reason: note,
+          details,
+        });
+        break;
+      default:
+        res.status(400).json({ error: `פעולת הכרעה לא מוכרת: ${action}` });
+        return;
+    }
+
+    res.status(action === 'save_note' ? 200 : 202).json(result);
+  } catch (error: any) {
+    res.status(typeof error?.statusCode === 'number' ? error.statusCode : 500).json({
+      error: error?.message || 'ביצוע פעולת ההכרעה נכשל.',
+    });
+  }
+}
+
+router.get('/incident-center', requireCodexAccess, async (_req, res) => {
+  res.type('html').send(buildIncidentDecisionCenterHtml());
+});
+
+router.get('/incident-cases', requireCodexAccess, async (req, res) => {
+  try {
+    const cases = await incidentDecisionCenter.listCases({
+      status: readIncidentString(req.query.status),
+    });
+    res.json({ cases });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'טעינת תיקי ההכרעה נכשלה.' });
+  }
+});
+
+router.get('/incident-cases/:caseId', requireCodexAccess, async (req, res) => {
+  try {
+    const caseRecord = await incidentDecisionCenter.getCase(req.params.caseId);
+    if (!caseRecord) {
+      res.status(404).json({ error: 'תיק ההכרעה לא נמצא.' });
+      return;
+    }
+    res.json({ caseRecord });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'טעינת תיק ההכרעה נכשלה.' });
+  }
+});
+
+router.post('/incident-cases', requireCodexAccess, async (req, res) => {
+  await handleIncidentCaseCreateRequest(req, res);
+});
+
+router.post('/incident-cases/webhook', requireSupportWebhookAccess, async (req, res) => {
+  await handleIncidentCaseCreateRequest(req, res);
+});
+
+router.post('/incident-cases/session-task/webhook', requireSupportWebhookAccess, async (req, res) => {
+  await handleIncidentSessionTaskWebhook(req, res);
+});
+
+router.post('/incident-cases/:caseId/messages', requireCodexAccess, async (req, res) => {
+  await handleIncidentCaseMessageRequest(req, res, 'operator');
+});
+
+router.post('/incident-cases/:caseId/actions', requireCodexAccess, async (req, res) => {
+  await handleIncidentCaseActionRequest(req, res);
+});
+
+router.post('/incident-cases/:caseId/messages/webhook', requireSupportWebhookAccess, async (req, res) => {
+  await handleIncidentCaseMessageRequest(req, res, 'investigator');
+});
+// standalone-strip:end private-incident-center
+
+router.post('/support/ask', requireCodexAccess, async (req, res) => {
+  await handleSupportAskRequest(req, res, 'api');
+});
+
+router.post('/support/webhook', requireSupportWebhookAccess, async (req, res) => {
+  await handleSupportAskRequest(req, res, 'webhook');
+});
+
+export default router;

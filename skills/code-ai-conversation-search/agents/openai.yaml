@@ -1,0 +1,4 @@
+interface:
+  display_name: "חיפוש בשיחות CODE-AI"
+  short_description: "חיפוש מדויק ומהיר בהיסטוריית השיחות"
+  default_prompt: "Use $code-ai-conversation-search to locate the relevant past conversation with evidence."

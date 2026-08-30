@@ -1,0 +1,5 @@
+playwright>=1.53,<2
+beautifulsoup4>=4.12,<5
+markdownify>=1.2,<2
+readability-lxml>=0.8.4,<1
+Pillow>=10,<12

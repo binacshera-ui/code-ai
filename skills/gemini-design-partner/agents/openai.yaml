@@ -1,0 +1,12 @@
+interface:
+  display_name: "Gemini Design Partner"
+  short_description: "ייעוץ עיצוב חזותי מבוקר דרך Gemini"
+  default_prompt: "Use $gemini-design-partner to redesign this interface while preserving every behavior."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "design_mode"
+      description: "Session-scoped Gemini design consultation tools"
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,257 @@
+import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { WebSocket } from 'ws';
+
+const baseUrl = String(process.env.CODE_AI_E2E_BASE_URL || 'http://127.0.0.1:4106').replace(/\/+$/, '');
+const storageRoot = process.env.CODEX_STORAGE_ROOT || '';
+const devicePassword = process.env.CODE_AI_E2E_DEVICE_PASSWORD || 'test-device-password';
+let sessionCookie = '';
+
+async function requestJson(pathname, init = {}, expectedStatus = 200) {
+  const headers = new Headers(init.headers || {});
+  if (sessionCookie && !headers.has('cookie')) headers.set('cookie', sessionCookie);
+  const response = await fetch(`${baseUrl}${pathname}`, { ...init, headers });
+  const setCookie = response.headers.get('set-cookie');
+  if (setCookie) sessionCookie = setCookie.split(';', 1)[0];
+  const contentType = response.headers.get('content-type') || '';
+  const payload = contentType.includes('application/json') ? await response.json() : await response.text();
+  assert.equal(response.status, expectedStatus, `${pathname}: ${JSON.stringify(payload)}`);
+  return payload;
+}
+
+function createMessageInbox(ws) {
+  const messages = [];
+  const waiters = [];
+  ws.on('message', (raw) => {
+    const message = JSON.parse(raw.toString());
+    const waiterIndex = waiters.findIndex((waiter) => waiter.predicate(message));
+    if (waiterIndex >= 0) {
+      const [waiter] = waiters.splice(waiterIndex, 1);
+      clearTimeout(waiter.timer);
+      waiter.resolve(message);
+    } else {
+      messages.push(message);
+    }
+  });
+  return {
+    next(predicate, timeoutMs = 5000) {
+      const index = messages.findIndex(predicate);
+      if (index >= 0) return Promise.resolve(messages.splice(index, 1)[0]);
+      return new Promise((resolve, reject) => {
+        const waiter = { predicate, resolve, reject, timer: null };
+        waiter.timer = setTimeout(() => {
+          const waiterIndex = waiters.indexOf(waiter);
+          if (waiterIndex >= 0) waiters.splice(waiterIndex, 1);
+          reject(new Error('Timed out waiting for extension bridge message'));
+        }, timeoutMs);
+        waiters.push(waiter);
+      });
+    },
+  };
+}
+
+async function main() {
+  const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
+  const installationId = 'e2e-installation-0001';
+  const health = await requestJson('/api/codex/browser-extension/health');
+  assert.equal(health.protocolVersion, 1);
+
+  const unlock = await requestJson('/api/codex/device-unlock', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ password: devicePassword, extensionPanel: true }),
+  });
+  assert.match(unlock.extensionEnrollmentToken, /^[A-Za-z0-9_-]{32,}$/);
+
+  const initialClaim = await requestJson('/api/codex/browser-extension/enrollment/claim', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      enrollmentToken: unlock.extensionEnrollmentToken,
+      deviceName: 'E2E Chrome',
+      extensionId,
+      installationId,
+      platform: 'test',
+    }),
+  }, 201);
+  assert.ok(initialClaim.deviceId && initialClaim.deviceToken);
+  const initialExtensionHeaders = {
+    'x-code-ai-extension-device': initialClaim.deviceId,
+    'x-code-ai-extension-token': initialClaim.deviceToken,
+  };
+
+  await requestJson('/api/codex/browser-extension/enrollment/claim', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enrollmentToken: unlock.extensionEnrollmentToken, deviceName: 'Replay attempt' }),
+  }, 400);
+
+  await requestJson(`/api/codex/browser-extension/devices/${encodeURIComponent(initialClaim.deviceId)}?preserveTrust=1`, {
+    method: 'DELETE', headers: initialExtensionHeaders,
+  });
+  const resumedEnrollment = await requestJson('/api/codex/browser-extension/enrollment/resume', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ extensionId, installationId }),
+  });
+  assert.match(resumedEnrollment.extensionEnrollmentToken, /^[A-Za-z0-9_-]{32,}$/);
+  await requestJson('/api/codex/browser-extension/enrollment/claim', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      enrollmentToken: resumedEnrollment.extensionEnrollmentToken,
+      deviceName: 'Wrong extension',
+      extensionId: 'ponmlkjihgfedcbaponmlkjihgfedcba',
+      installationId,
+    }),
+  }, 400);
+  const claim = await requestJson('/api/codex/browser-extension/enrollment/claim', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      enrollmentToken: resumedEnrollment.extensionEnrollmentToken,
+      deviceName: 'Recovered E2E Chrome',
+      extensionId,
+      installationId,
+      platform: 'test',
+    }),
+  }, 201);
+  const extensionHeaders = {
+    'x-code-ai-extension-device': claim.deviceId,
+    'x-code-ai-extension-token': claim.deviceToken,
+  };
+
+  const socketUrl = new URL(baseUrl);
+  socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  socketUrl.pathname = '/api/codex/browser-extension/socket';
+  const ws = new WebSocket(socketUrl);
+  const inbox = createMessageInbox(ws);
+  await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+  ws.send(JSON.stringify({ type: 'auth', version: 1, deviceId: claim.deviceId, token: claim.deviceToken, extensionId }));
+  assert.equal((await inbox.next((message) => message.type === 'auth_ok')).deviceId, claim.deviceId);
+  ws.send(JSON.stringify({ type: 'event', version: 1, name: 'capabilities', payload: ['tabs', 'e2e'] }));
+
+  const devices = await requestJson('/api/codex/browser-extension/devices', { headers: extensionHeaders });
+  assert.equal(devices.devices.find((device) => device.id === claim.deviceId)?.online, true);
+
+  const profilePayload = await requestJson('/api/codex/profiles', { headers: extensionHeaders });
+  const profiles = Array.isArray(profilePayload) ? profilePayload : profilePayload.profiles;
+  const profile = profiles.find((candidate) => candidate.provider === 'codex') || profiles[0];
+  assert.ok(profile?.id, 'staging server must expose at least one profile');
+  const sessionKey = `draft:e2e-personal-chrome-${Date.now()}`;
+
+  const binding = await requestJson('/api/codex/browser-extension/bindings', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...extensionHeaders },
+    body: JSON.stringify({
+      deviceId: claim.deviceId, profileId: profile.id, sessionKey,
+      scopes: ['read', 'write', 'javascript', 'upload', 'ports'], approvalPolicy: 'risky',
+    }),
+  }, 201);
+  const bearer = { authorization: `Bearer ${binding.bindingToken}`, 'content-type': 'application/json' };
+
+  const invalidArguments = await requestJson('/api/codex/browser-extension/tool-call', {
+    method: 'POST', headers: bearer,
+    body: JSON.stringify({ toolName: 'browser_key', arguments: { key: 'Enter', repeat: 21 } }),
+  }, 400);
+  assert.equal(invalidArguments.error.code, 'INVALID_ARGUMENT');
+
+  const statusPromise = requestJson('/api/codex/browser-extension/tool-call', {
+    method: 'POST', headers: bearer, body: JSON.stringify({ toolName: 'browser_status', arguments: {} }),
+  });
+  const statusCommand = await inbox.next((message) => message.type === 'command' && message.toolName === 'browser_status');
+  ws.send(JSON.stringify({ type: 'result', version: 1, commandId: statusCommand.commandId, ok: true, result: { online: true, activeTab: { id: 7 } } }));
+  assert.equal((await statusPromise).result.activeTab.id, 7);
+
+  const secret = `e2e-secret-${Date.now()}`;
+  const secretPromise = requestJson('/api/codex/browser-extension/tool-call', {
+    method: 'POST', headers: bearer,
+    body: JSON.stringify({ toolName: 'browser_type', arguments: { text: secret, secret: true, target: { selector: '#password' } } }),
+  });
+  const secretCommand = await inbox.next((message) => message.type === 'command' && message.toolName === 'browser_type');
+  assert.equal(secretCommand.arguments.text, secret);
+  ws.send(JSON.stringify({ type: 'result', version: 1, commandId: secretCommand.commandId, ok: true, result: { typed: true } }));
+  await secretPromise;
+
+  const networkPromise = requestJson('/api/codex/browser-extension/tool-call', {
+    method: 'POST', headers: bearer,
+    body: JSON.stringify({ toolName: 'browser_network', arguments: { includeBodies: true } }),
+  });
+  const approval = await inbox.next((message) => message.type === 'approval_request' && message.toolName === 'browser_network');
+  ws.send(JSON.stringify({ type: 'approval_response', version: 1, approvalId: approval.approvalId, approved: true }));
+  const networkCommand = await inbox.next((message) => message.type === 'command' && message.toolName === 'browser_network');
+  ws.send(JSON.stringify({ type: 'result', version: 1, commandId: networkCommand.commandId, ok: true, result: { entries: [] } }));
+  assert.deepEqual((await networkPromise).result.entries, []);
+
+  const freeAccessBinding = await requestJson('/api/codex/browser-extension/bindings', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...extensionHeaders },
+    body: JSON.stringify({
+      deviceId: claim.deviceId, profileId: profile.id, sessionKey: `${sessionKey}-free-access`,
+      scopes: ['read', 'write', 'javascript', 'upload', 'ports'], approvalPolicy: 'never',
+    }),
+  }, 201);
+  const freeAccessBearer = {
+    authorization: `Bearer ${freeAccessBinding.bindingToken}`,
+    'content-type': 'application/json',
+  };
+  const freeNetworkPromise = requestJson('/api/codex/browser-extension/tool-call', {
+    method: 'POST', headers: freeAccessBearer,
+    body: JSON.stringify({ toolName: 'browser_network', arguments: { includeBodies: true } }),
+  });
+  const freeNetworkMessage = await inbox.next((message) => (
+    (message.type === 'command' || message.type === 'approval_request')
+    && message.toolName === 'browser_network'
+  ));
+  assert.equal(freeNetworkMessage.type, 'command', 'free access must not emit an approval request');
+  ws.send(JSON.stringify({
+    type: 'result', version: 1, commandId: freeNetworkMessage.commandId,
+    ok: true, result: { entries: [], approvalBypassed: true },
+  }));
+  assert.equal((await freeNetworkPromise).result.approvalBypassed, true);
+  await requestJson(`/api/codex/browser-extension/bindings/${encodeURIComponent(freeAccessBinding.binding.id)}`, {
+    method: 'DELETE', headers: extensionHeaders,
+  });
+
+  await requestJson('/api/codex/session-personal-chrome-mode', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...extensionHeaders },
+    body: JSON.stringify({
+      profileId: profile.id, sessionKey,
+      personalChromeMode: {
+        enabled: true, deviceId: claim.deviceId, deviceName: 'E2E Chrome', tabId: null,
+        approvalPolicy: 'risky', allowJavascript: true, allowUploads: true, allowPorts: true,
+        bindingId: binding.binding.id, bindingToken: binding.bindingToken, controlUrl: baseUrl,
+      },
+    }),
+  });
+  const savedMode = await requestJson(`/api/codex/session-personal-chrome-mode?profileId=${encodeURIComponent(profile.id)}&sessionKey=${encodeURIComponent(sessionKey)}`, { headers: extensionHeaders });
+  assert.equal(savedMode.personalChromeMode.enabled, true);
+  assert.equal(Object.hasOwn(savedMode.personalChromeMode, 'bindingToken'), false);
+
+  const extensionAuth = await fetch(`${baseUrl}/api/codex/profiles`, {
+    headers: extensionHeaders,
+  });
+  assert.equal(extensionAuth.status, 200);
+  const extensionAuthStatus = await requestJson('/api/codex/auth/status', {
+    headers: extensionHeaders,
+  });
+  assert.equal(extensionAuthStatus.extensionDevice, true);
+  assert.equal(extensionAuthStatus.deviceUnlocked, true);
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (storageRoot) {
+    const audit = await fs.readFile(path.join(storageRoot, 'local/personal-chrome-bridge/audit.jsonl'), 'utf8');
+    assert.doesNotMatch(audit, new RegExp(secret));
+    assert.match(audit, /\[REDACTED\]/);
+  }
+
+  await requestJson(`/api/codex/browser-extension/bindings/${encodeURIComponent(binding.binding.id)}`, { method: 'DELETE', headers: extensionHeaders });
+  await requestJson('/api/codex/browser-extension/tool-call', {
+    method: 'POST', headers: bearer, body: JSON.stringify({ toolName: 'browser_status', arguments: {} }),
+  }, 401);
+  await requestJson(`/api/codex/browser-extension/devices/${encodeURIComponent(claim.deviceId)}`, { method: 'DELETE', headers: extensionHeaders });
+  await requestJson('/api/codex/browser-extension/enrollment/resume', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ extensionId, installationId }),
+  }, 403);
+  ws.close(1000, 'E2E complete');
+  console.log(JSON.stringify({ ok: true, deviceId: claim.deviceId, profileId: profile.id, testedTools: ['browser_status', 'browser_type', 'browser_network'], freeAccessApprovalBypassed: true }));
+}
+
+main().catch((error) => {
+  console.error(error?.stack || error);
+  process.exit(1);
+});

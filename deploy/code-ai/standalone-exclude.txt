@@ -1,0 +1,14 @@
+# Product-private integrations that are intentionally absent from the standalone repository.
+client/src/workbench
+docs/WORKBENCH.he.md
+server/binaRuntimeSso.ts
+server/binaSso.ts
+server/incidentDecisionCenter.ts
+scripts/__pycache__
+scripts/bina-runtime-sso-e2e.py
+scripts/bina-sso-smoke.ts
+scripts/incident-case-update.mjs
+scripts/workbench-parallel-tabs-e2e.py
+scripts/workbench-rebind-smoke.ts
+scripts/workbench-visual-e2e.py
+deploy/code-ai/nginx-workbench-site.conf.template

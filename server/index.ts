@@ -1,0 +1,319 @@
+import express from 'express';
+import cors from 'cors';
+import session from 'express-session';
+import connectPgSimple from 'connect-pg-simple';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { createServer } from 'http';
+import codexRoutes, { requireCodexAccess } from './codexRoutes.js';
+import codexWordExportRoutes from './codexWordExportRoutes.js';
+import codexFinalNotificationRoutes from './codexFinalNotificationRoutes.js';
+import { recordCodexServerCrash } from './codexCrashLogs.js';
+import { CODEX_APP_CONFIG } from './config.js';
+import { shutdownCodexQueueWorker, startCodexQueueWorker } from './codexQueue.js';
+import { startCodexFinalNotificationWorker } from './codexFinalNotifications.js';
+import { repairAllProviderHomesOwnership } from './providerRuntimeOwnership.js';
+import {
+  createRemoteHostProxyMiddleware,
+  requireRemoteAgentToken,
+} from './remoteHostProxy.js';
+import { shutdownRemoteHostTunnels } from './remoteHostRegistry.js';
+import { shutdownCodexTerminals } from './codexTerminal.js';
+import { shutdownCodexDesignModeBridge } from './codexDesignMode.js';
+import { shutdownCodexUxModeBridge } from './codexUxMode.js';
+import {
+  attachPersonalChromeBridge,
+  createPersonalChromeBridgeRouter,
+  shutdownPersonalChromeBridge,
+} from './personalChromeBridge.js';
+import {
+  shutdownPersonalPortForwardBroker,
+  startPersonalPortForwardBroker,
+} from './personalPortForwardBroker.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const app = express();
+const PORT = process.env.PORT || 4000;
+const HOST = process.env.HOST?.trim() || '0.0.0.0';
+const STARTUP_CONFIGURATION_EXIT_CODE = 78;
+const configuredCorsOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
+
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught exception in code-ai:', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Unhandled rejection in code-ai:', reason);
+});
+
+process.on('uncaughtExceptionMonitor', (error, origin) => {
+  void recordCodexServerCrash({
+    type: 'uncaughtException',
+    origin,
+    message: error.message,
+    stack: error.stack || null,
+  }).catch(() => {});
+});
+
+process.on('unhandledRejection', (reason) => {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  void recordCodexServerCrash({
+    type: 'unhandledRejection',
+    message: error.message,
+    stack: error.stack || null,
+  }).catch(() => {});
+});
+
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (configuredCorsOrigins.length === 0 || configuredCorsOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('CORS origin not allowed'));
+  },
+  credentials: true,
+}));
+
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: false }));
+app.set('trust proxy', true);
+
+const isProduction = process.env.NODE_ENV === 'production';
+const PostgreSQLStore = connectPgSimple(session);
+const sessionConfig: session.SessionOptions = {
+  secret: CODEX_APP_CONFIG.sessionSecret,
+  resave: false,
+  saveUninitialized: false,
+  rolling: true,
+  cookie: {
+    secure: isProduction,
+    httpOnly: true,
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    sameSite: isProduction ? 'none' : 'lax',
+    domain: isProduction && CODEX_APP_CONFIG.sessionCookieDomain
+      ? CODEX_APP_CONFIG.sessionCookieDomain
+      : undefined,
+  },
+  name: 'code-ai.session',
+};
+
+if (CODEX_APP_CONFIG.databaseUrl) {
+  const sessionStore = new PostgreSQLStore({
+    conString: CODEX_APP_CONFIG.databaseUrl,
+    tableName: 'user_sessions',
+    createTableIfMissing: true,
+  });
+
+  sessionStore.on('connect', () => {
+    console.log('✅ Session store connected to database');
+  });
+
+  sessionStore.on('disconnect', () => {
+    console.log('❌ Session store disconnected from database');
+  });
+
+  sessionConfig.store = sessionStore;
+} else {
+  console.log('ℹ️ DATABASE_URL is not set, using in-memory session store');
+}
+
+app.use(
+  session(sessionConfig)
+);
+
+// API endpoint to check shared session with main site
+app.get('/api/auth/check-session', async (req, res) => {
+  try {
+    // Check if user is logged in via shared session
+    const session = req.session as any;
+    
+    if (session?.customerId) {
+      // Customer from main site is logged in
+      res.json({
+        authenticated: true,
+        source: 'main_site',
+        user: {
+          id: session.customerId,
+          email: session.customerEmail,
+          name: session.customerEmail?.split('@')[0] || 'משתמש',
+          authMethod: session.customerAuthMethod,
+        }
+      });
+    } else if (session?.userId) {
+      // Forum user from main site is logged in
+      res.json({
+        authenticated: true,
+        source: 'forum',
+        user: {
+          id: session.userId,
+          email: session.user?.email,
+          name: session.user?.displayName || session.user?.username,
+        }
+      });
+    } else {
+      res.json({ authenticated: false });
+    }
+  } catch (error) {
+    console.error('Session check error:', error);
+    res.json({ authenticated: false, error: 'Session check failed' });
+  }
+});
+
+app.use('/api/codex/browser-extension', createPersonalChromeBridgeRouter(requireCodexAccess));
+app.use('/api/codex', requireRemoteAgentToken);
+app.use('/api/codex', createRemoteHostProxyMiddleware(requireCodexAccess));
+app.use('/api/codex/message-exports', requireCodexAccess, codexWordExportRoutes);
+app.use('/api/codex/session-final-notification', requireCodexAccess, codexFinalNotificationRoutes);
+app.use('/api/codex', codexRoutes);
+
+// Never let an unknown API route fall through to the SPA. Returning index.html
+// with a 200 status makes fetch clients try to parse HTML as JSON and hides the
+// real routing error behind an intermittent-looking client failure.
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    error: 'API route not found',
+    method: req.method,
+    path: req.originalUrl,
+  });
+});
+
+const publicPath = path.join(__dirname, 'public');
+app.use(express.static(publicPath, {
+  setHeaders(res, filePath) {
+    const normalizedPath = filePath.replace(/\\/g, '/');
+    if (normalizedPath.endsWith('/index.html') || normalizedPath.endsWith('/sw.js')) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+    } else if (normalizedPath.includes('/assets/')) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+
+    if (normalizedPath.endsWith('/sw.js')) {
+      res.setHeader('Service-Worker-Allowed', '/');
+    }
+  },
+}));
+
+// A missing hashed bundle must be a real 404. Serving the SPA shell here gives
+// JavaScript/CSS requests a text/html response and can leave the browser on a
+// blank page while also poisoning the service-worker asset cache.
+app.use('/assets', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.status(404).type('text/plain').send('Asset not found');
+});
+
+app.get('*', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.sendFile(path.join(publicPath, 'index.html'));
+});
+
+const server = createServer(app);
+attachPersonalChromeBridge(server);
+server.listen(Number(PORT), HOST);
+
+server.once('error', (error: NodeJS.ErrnoException) => {
+  console.error(`❌ Failed to start code-ai server on port ${PORT}:`, error);
+  void recordCodexServerCrash({
+    type: 'serverStartupError',
+    origin: `listen:${PORT}`,
+    message: error.message,
+    stack: error.stack || null,
+  })
+    .catch(() => {})
+    .finally(() => {
+      process.exit(STARTUP_CONFIGURATION_EXIT_CODE);
+    });
+});
+
+server.once('listening', () => {
+  console.log(`🚀 code-ai server running on ${HOST}:${PORT}`);
+
+  repairAllProviderHomesOwnership(CODEX_APP_CONFIG.profiles);
+
+  void startCodexFinalNotificationWorker()
+    .then(() => {
+      console.log('🔔 Final-response notification worker started');
+    })
+    .catch((error) => {
+      console.error('❌ Failed to start final-response notification worker:', error);
+    });
+
+  void startCodexQueueWorker()
+    .then(() => {
+      console.log('🤖 Codex queue worker started');
+    })
+    .catch((error) => {
+      console.error('❌ Failed to start Codex queue worker:', error);
+    });
+
+  void startPersonalPortForwardBroker()
+    .then(() => {
+      console.log('🔌 Personal development port broker started');
+    })
+    .catch((error) => {
+      console.error('❌ Failed to start personal development port broker:', error);
+    });
+});
+
+let shutdownStarted = false;
+function shutdownServer(signal: NodeJS.Signals): void {
+  if (shutdownStarted) {
+    return;
+  }
+  shutdownStarted = true;
+  console.log(`🛑 ${signal} received; closing code-ai cleanly`);
+  shutdownCodexTerminals();
+  shutdownRemoteHostTunnels();
+  shutdownPersonalChromeBridge();
+  shutdownPersonalPortForwardBroker();
+
+  const forceExitTimer = setTimeout(() => {
+    console.error('❌ Timed out while closing code-ai; forcing open connections to close');
+    server.closeAllConnections();
+    process.exit(1);
+  }, 10_000);
+  forceExitTimer.unref();
+
+  const closeServer = new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+
+  void Promise.all([
+    closeServer,
+    shutdownCodexQueueWorker(),
+    shutdownCodexDesignModeBridge(),
+    shutdownCodexUxModeBridge(),
+  ])
+    .then(() => {
+      clearTimeout(forceExitTimer);
+      process.exit(0);
+    })
+    .catch((error) => {
+      clearTimeout(forceExitTimer);
+      console.error('❌ Failed to close code-ai cleanly:', error);
+      process.exit(1);
+    });
+}
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => shutdownServer(signal));
+}

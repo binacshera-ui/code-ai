@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="code-ai-control-origin" content="http://127.0.0.1:4000" />
+    <title>CODE-AI</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <main id="connected" class="connected">
+      <header class="toolbar">
+        <div class="connection">
+          <span id="connection-dot" class="dot"></span>
+          <span id="connection-label">פותח את CODE-AI…</span>
+        </div>
+        <div class="toolbar-actions">
+          <button id="workspace-tabs" type="button" title="כל הטאבים וקבוצת העבודה של הסשן">▦ טאבים</button>
+          <button id="pick-element" type="button" title="בחר מוקד חכם: DOM, נגישות, עיצוב והקשר">⌁ מוקד</button>
+          <button id="pick-region" type="button" title="בחר אזור חכם עם האלמנטים והתוכן שבתוכו">▱ אזור</button>
+          <button id="open-tab" type="button" title="פתח CODE-AI בטאב מלא">↗</button>
+          <button id="settings" type="button" title="אפס אישור מכשיר">⚙</button>
+        </div>
+      </header>
+      <section id="selection-banner" class="selection-banner" hidden></section>
+      <section id="workspace-drawer" class="workspace-drawer" hidden>
+        <div class="workspace-heading">
+          <div>
+            <strong id="workspace-title">טאבים של הסשן</strong>
+            <span id="workspace-summary"></span>
+          </div>
+          <button id="workspace-refresh" type="button" title="רענן טאבים">↻</button>
+        </div>
+        <p class="workspace-help">הסוכן יכול לקרוא את רשימת כל הטאבים בפרופיל הזה, אך פעולות שינוי מותרות רק בטאבים המסומנים כשייכים לסשן.</p>
+        <div id="workspace-tab-list" class="workspace-tab-list"></div>
+        <p id="workspace-profile-note" class="workspace-profile-note"></p>
+      </section>
+      <section id="approval" class="approval" hidden>
+        <div class="approval-title" id="approval-title"></div>
+        <div class="approval-description" id="approval-description"></div>
+        <pre id="approval-preview"></pre>
+        <div class="approval-actions">
+          <button id="reject-approval" type="button">דחה</button>
+          <button id="approve-approval" class="primary" type="button">אשר פעולה</button>
+        </div>
+      </section>
+      <iframe id="code-ai-frame" title="CODE-AI"></iframe>
+    </main>
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>

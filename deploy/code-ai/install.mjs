@@ -1,0 +1,467 @@
+#!/usr/bin/env node
+import { existsSync } from 'fs';
+import { mkdir, readFile, writeFile } from 'fs/promises';
+import os from 'os';
+import path from 'path';
+import { spawnSync } from 'child_process';
+import { fileURLToPath } from 'url';
+
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const APP_ROOT = path.resolve(SCRIPT_DIR, '../..');
+const IS_WINDOWS = process.platform === 'win32';
+const HOME_DIR = process.env.USERPROFILE || process.env.HOME || APP_ROOT;
+const BROWSER_MODE_VENV_DIR = path.join(APP_ROOT, '.venv');
+const BROWSER_MODE_PYTHON = path.join(BROWSER_MODE_VENV_DIR, IS_WINDOWS ? 'Scripts/python.exe' : 'bin/python');
+const BROWSER_MODE_REQUIREMENTS = path.join(APP_ROOT, 'server', 'browser-mode', 'python', 'requirements.txt');
+const BROWSER_MODE_PLAYWRIGHT_ROOT = path.join(APP_ROOT, '.playwright-browsers');
+
+function getDefaultCodexBin() {
+  return IS_WINDOWS ? 'codex.cmd' : 'codex';
+}
+
+function getDefaultPm2Bin() {
+  const fromEnv = process.env.PM2_BIN;
+  if (fromEnv) {
+    return fromEnv;
+  }
+
+  const explicitName = IS_WINDOWS ? 'pm2.cmd' : 'pm2';
+  if (commandExists(explicitName)) {
+    return explicitName;
+  }
+
+  const bundledCandidate = path.join(path.dirname(process.execPath), explicitName);
+  if (existsSync(bundledCandidate)) {
+    return bundledCandidate;
+  }
+
+  throw new Error(
+    'PM2 binary not found. Install PM2 on the machine or pass --pm2-bin /absolute/path/to/pm2.',
+  );
+}
+
+function getCommandName(command) {
+  if (!IS_WINDOWS) {
+    return command;
+  }
+
+  if (path.extname(command) || command.includes(path.sep)) {
+    return command;
+  }
+
+  return `${command}.cmd`;
+}
+
+function printUsage() {
+  console.log(`Usage: node deploy/code-ai/install.mjs [options]
+
+Options:
+  --app-name NAME            Process name (default: code-ai-app)
+  --port PORT                Service port (default: 4000)
+  --pm2-bin PATH             PM2 binary/path
+  --codex-home PATH          Codex home for the default profile
+  --workspace PATH           Workspace directory for the default profile
+  --profile-id ID            Default profile id (default: default)
+  --profile-label LABEL      Default profile label (default: Default)
+  --profiles-json JSON       Full profiles JSON array, overrides single-profile flags
+  --storage-root PATH        Storage root for uploads, queue, and logs
+  --public-hosts CSV         Optional explicit public hosts
+  --open-access BOOL         true/false (default: true)
+  --allow-any-paths BOOL     true/false for absolute path access (default: true)
+  --extra-readable-roots CSV Extra relative-file search roots
+  --database-url URL         Optional Postgres URL
+  --session-secret VALUE     Session secret
+  --cookie-domain VALUE      Optional cookie domain
+  --device-password VALUE    Device unlock password
+  --codex-bin PATH           Codex CLI binary/path
+  --skip-npm-install         Skip npm install
+  --skip-build               Skip npm run build
+  --skip-browser-setup       Skip browser-mode Python/bootstrap setup
+  --skip-pm2                 Skip PM2 start/restart
+  --help, -h                 Show this help
+`);
+}
+
+function parseArgs(argv) {
+  const defaults = {
+    appName: process.env.PM2_APP_NAME || 'code-ai-app',
+    port: process.env.PORT || '4000',
+    pm2Bin: getDefaultPm2Bin(),
+    codexHome: process.env.CODEX_HOME_PATH || path.join(HOME_DIR, '.codex'),
+    workspace: process.env.WORKSPACE_PATH || APP_ROOT,
+    profileId: process.env.PROFILE_ID || 'default',
+    profileLabel: process.env.PROFILE_LABEL || 'Default',
+    profilesJson: process.env.CODEX_PROFILES_JSON || '',
+    storageRoot: process.env.CODEX_STORAGE_ROOT || path.join(APP_ROOT, '.code-ai'),
+    publicHosts: process.env.CODEX_PUBLIC_HOSTS || '',
+    openAccess: process.env.CODEX_OPEN_ACCESS || 'true',
+    allowAnyPaths: process.env.CODEX_ALLOW_ANY_PATHS || 'true',
+    extraReadableRoots: process.env.CODEX_ALLOWED_FILE_ROOTS || '',
+    databaseUrl: process.env.DATABASE_URL || '',
+    sessionSecret: process.env.SESSION_SECRET || 'code-ai-session-secret',
+    cookieDomain: process.env.SESSION_COOKIE_DOMAIN || '',
+    devicePassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || '403005Ashim@',
+    codexBin: process.env.CODEX_BIN || getDefaultCodexBin(),
+    skipNpmInstall: false,
+    skipBuild: false,
+    skipBrowserSetup: false,
+    skipPm2: false,
+  };
+
+  const options = { ...defaults };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+
+    const readValue = () => {
+      const value = argv[index + 1];
+      if (typeof value !== 'string') {
+        throw new Error(`Missing value for ${arg}`);
+      }
+      index += 1;
+      return value;
+    };
+
+    switch (arg) {
+      case '--app-name':
+        options.appName = readValue();
+        break;
+      case '--port':
+        options.port = readValue();
+        break;
+      case '--pm2-bin':
+        options.pm2Bin = readValue();
+        break;
+      case '--codex-home':
+        options.codexHome = readValue();
+        break;
+      case '--workspace':
+        options.workspace = readValue();
+        break;
+      case '--profile-id':
+        options.profileId = readValue();
+        break;
+      case '--profile-label':
+        options.profileLabel = readValue();
+        break;
+      case '--profiles-json':
+        options.profilesJson = readValue();
+        break;
+      case '--storage-root':
+        options.storageRoot = readValue();
+        break;
+      case '--public-hosts':
+        options.publicHosts = readValue();
+        break;
+      case '--open-access':
+        options.openAccess = readValue();
+        break;
+      case '--allow-any-paths':
+        options.allowAnyPaths = readValue();
+        break;
+      case '--extra-readable-roots':
+        options.extraReadableRoots = readValue();
+        break;
+      case '--database-url':
+        options.databaseUrl = readValue();
+        break;
+      case '--session-secret':
+        options.sessionSecret = readValue();
+        break;
+      case '--cookie-domain':
+        options.cookieDomain = readValue();
+        break;
+      case '--device-password':
+        options.devicePassword = readValue();
+        break;
+      case '--codex-bin':
+        options.codexBin = readValue();
+        break;
+      case '--skip-npm-install':
+        options.skipNpmInstall = true;
+        break;
+      case '--skip-build':
+        options.skipBuild = true;
+        break;
+      case '--skip-browser-setup':
+        options.skipBrowserSetup = true;
+        break;
+      case '--skip-pm2':
+        options.skipPm2 = true;
+        break;
+      case '--help':
+      case '-h':
+        printUsage();
+        process.exit(0);
+      default:
+        throw new Error(`Unknown option: ${arg}`);
+    }
+  }
+
+  return options;
+}
+
+function cleanServiceEnvironment(source = process.env) {
+  const environment = { ...source };
+  for (const key of [
+    'CODEX_CI',
+    'CODEX_HOME',
+    'CODEX_MANAGED_BY_NPM',
+    'CODEX_MANAGED_PACKAGE_ROOT',
+    'CODEX_THREAD_ID',
+  ]) {
+    delete environment[key];
+  }
+  environment.HOME = os.homedir();
+  if (typeof environment.PATH === 'string') {
+    environment.PATH = environment.PATH
+      .split(path.delimiter)
+      .filter((entry) => (
+        entry
+        && !entry.includes(`${path.sep}.code-ai${path.sep}local${path.sep}browser-mode${path.sep}sessions${path.sep}`)
+        && !entry.includes(`${path.sep}tmp${path.sep}arg0${path.sep}`)
+        && !entry.endsWith(`${path.sep}codex-path`)
+      ))
+      .join(path.delimiter);
+  }
+  return environment;
+}
+
+function run(command, args, options = {}) {
+  const inheritedEnvironment = options.cleanServiceEnvironment
+    ? cleanServiceEnvironment()
+    : process.env;
+  const result = spawnSync(command, args, {
+    cwd: options.cwd || APP_ROOT,
+    env: { ...inheritedEnvironment, ...(options.env || {}) },
+    stdio: options.capture ? 'pipe' : 'inherit',
+    encoding: 'utf8',
+    shell: false,
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    const details = options.capture
+      ? `${result.stdout || ''}${result.stderr || ''}`.trim()
+      : '';
+    throw new Error(`Command failed: ${command} ${args.join(' ')}${details ? `\n${details}` : ''}`);
+  }
+
+  return result;
+}
+
+function commandExists(command, versionArgs = ['--version']) {
+  const result = spawnSync(command, versionArgs, {
+    stdio: 'ignore',
+    shell: false,
+  });
+
+  return !result.error && result.status === 0;
+}
+
+function getPythonBootstrapCommand() {
+  const candidates = [
+    process.env.PYTHON_BIN,
+    process.env.PYTHON,
+    'python3',
+    'python',
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const result = spawnSync(candidate, ['--version'], {
+      stdio: 'ignore',
+      shell: false,
+    });
+    if (!result.error && result.status === 0) {
+      return candidate;
+    }
+  }
+
+  throw new Error('Python 3 was not found. Install Python 3 or pass PYTHON_BIN=/absolute/path/to/python3 before running the installer.');
+}
+
+function ensureBrowserModeRuntime() {
+  const bootstrapPython = getPythonBootstrapCommand();
+
+  if (!existsSync(BROWSER_MODE_PYTHON)) {
+    run(bootstrapPython, ['-m', 'venv', BROWSER_MODE_VENV_DIR], { cwd: APP_ROOT });
+  }
+
+  run(BROWSER_MODE_PYTHON, ['-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel'], { cwd: APP_ROOT });
+  run(BROWSER_MODE_PYTHON, ['-m', 'pip', 'install', '-r', BROWSER_MODE_REQUIREMENTS], { cwd: APP_ROOT });
+  run(BROWSER_MODE_PYTHON, ['-m', 'playwright', 'install', 'chromium'], {
+    cwd: APP_ROOT,
+    env: {
+      PLAYWRIGHT_BROWSERS_PATH: BROWSER_MODE_PLAYWRIGHT_ROOT,
+    },
+  });
+}
+
+function parseProfilesJson(rawValue) {
+  const parsed = JSON.parse(rawValue);
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error('CODEX_PROFILES_JSON must be a non-empty JSON array');
+  }
+  return JSON.stringify(parsed);
+}
+
+async function loadExistingEnv(envFilePath) {
+  if (!existsSync(envFilePath)) {
+    return new Map();
+  }
+
+  const content = await readFile(envFilePath, 'utf8');
+  const entries = new Map();
+
+  for (const line of content.split(/\r?\n/)) {
+    if (!line || line.trimStart().startsWith('#') || !line.includes('=')) {
+      continue;
+    }
+    const separatorIndex = line.indexOf('=');
+    const key = line.slice(0, separatorIndex).trim();
+    const value = line.slice(separatorIndex + 1);
+    if (key) {
+      entries.set(key, value);
+    }
+  }
+
+  return entries;
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const nodeCommand = process.execPath;
+  const npmCommand = getCommandName('npm');
+  const pm2Command = getCommandName(options.pm2Bin);
+  const codexCommand = options.codexBin;
+
+  if (!commandExists(nodeCommand)) {
+    throw new Error('Node.js was not found in this environment');
+  }
+  if (!commandExists(npmCommand)) {
+    throw new Error('npm was not found in this environment');
+  }
+  if (!commandExists(pm2Command)) {
+    throw new Error(`PM2 was not found at: ${options.pm2Bin}`);
+  }
+  if (!commandExists(codexCommand)) {
+    throw new Error(`Codex CLI was not found at: ${codexCommand}`);
+  }
+
+  const resolvedCodexHome = path.resolve(options.codexHome);
+  const resolvedWorkspace = path.resolve(options.workspace);
+  const resolvedStorageRoot = path.resolve(options.storageRoot);
+  const uploadRoot = path.join(resolvedStorageRoot, 'uploads');
+  const queueRoot = path.join(resolvedStorageRoot, 'queue');
+  const logRoot = path.join(resolvedStorageRoot, 'logs');
+
+  await mkdir(uploadRoot, { recursive: true });
+  await mkdir(queueRoot, { recursive: true });
+  await mkdir(logRoot, { recursive: true });
+
+  const profilesJson = options.profilesJson
+    ? parseProfilesJson(options.profilesJson)
+    : JSON.stringify([
+        {
+          id: options.profileId,
+          label: options.profileLabel,
+          codexHome: resolvedCodexHome,
+          workspaceCwd: resolvedWorkspace,
+          defaultProfile: true,
+        },
+      ]);
+
+  const envFilePath = path.join(APP_ROOT, '.env');
+  const envEntries = await loadExistingEnv(envFilePath);
+  const nextEntries = new Map(envEntries);
+
+  const envValues = {
+    NODE_ENV: 'production',
+    PORT: String(options.port),
+    PM2_APP_NAME: options.appName,
+    CODEX_OPEN_ACCESS: options.openAccess,
+    CODEX_PUBLIC_HOSTS: options.publicHosts,
+    CODEX_ALLOW_ANY_PATHS: options.allowAnyPaths,
+    CODEX_ALLOWED_FILE_ROOTS: options.extraReadableRoots,
+    DATABASE_URL: options.databaseUrl,
+    SESSION_SECRET: options.sessionSecret,
+    SESSION_COOKIE_DOMAIN: options.cookieDomain,
+    CODEX_DEVICE_ADMIN_PASSWORD: options.devicePassword,
+    CODEX_BIN: options.codexBin,
+    CODEX_APP_ROOT: APP_ROOT,
+    CODEX_STORAGE_ROOT: resolvedStorageRoot,
+    CODEX_UPLOAD_ROOT: uploadRoot,
+    CODEX_QUEUE_ROOT: queueRoot,
+    CODEX_LOG_ROOT: logRoot,
+    CODEX_PROFILES_JSON: profilesJson,
+  };
+
+  for (const [key, value] of Object.entries(envValues)) {
+    nextEntries.set(key, value);
+  }
+
+  const serializedEnv = [...nextEntries.entries()]
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+  await writeFile(envFilePath, `${serializedEnv}\n`, 'utf8');
+
+  if (!options.skipNpmInstall) {
+    run(npmCommand, ['install', '--include=dev'], {
+      cwd: APP_ROOT,
+      env: {
+        NODE_ENV: 'development',
+        npm_config_production: 'false',
+        NPM_CONFIG_PRODUCTION: 'false',
+      },
+    });
+  }
+
+  if (!options.skipBuild) {
+    run(npmCommand, ['run', 'build'], { cwd: APP_ROOT });
+  }
+
+  if (!options.skipBrowserSetup) {
+    ensureBrowserModeRuntime();
+  }
+
+  if (!options.skipPm2) {
+    // Re-evaluate the ecosystem file on every install. Service identity and
+    // port come from the freshly written .env, never from the invoking shell.
+    run(pm2Command, ['startOrReload', 'ecosystem.config.cjs', '--update-env'], {
+      cwd: APP_ROOT,
+      cleanServiceEnvironment: true,
+    });
+
+    try {
+      run(pm2Command, ['save'], { cwd: APP_ROOT, cleanServiceEnvironment: true });
+    } catch {
+      // PM2 save is best effort.
+    }
+  }
+
+  console.log(`
+code-ai installed.
+
+App root:        ${APP_ROOT}
+App name:        ${options.appName}
+Port:            ${options.port}
+Codex home:      ${resolvedCodexHome}
+Workspace:       ${resolvedWorkspace}
+Storage root:    ${resolvedStorageRoot}
+Allow any paths: ${options.allowAnyPaths}
+
+Next:
+1. Point your reverse proxy/domain to http://127.0.0.1:${options.port}
+2. Use deploy/code-ai/nginx-site.conf.template as the base snippet if you are on Linux/Nginx
+3. Open the app and verify the profile list and folder picker
+4. Browser mode runtime was ${options.skipBrowserSetup ? 'skipped' : 'prepared'} in ${BROWSER_MODE_VENV_DIR}
+`);
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : error);
+  process.exit(1);
+});

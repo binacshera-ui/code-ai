@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "CODE-AI Personal Chrome",
+  "version": "1.4.0",
+  "description": "Open the complete CODE-AI experience in Chrome's side panel and connect browser tools after one-time device approval.",
+  "icons": {
+    "16": "icon-128.png",
+    "32": "icon-128.png",
+    "48": "icon-128.png",
+    "128": "icon-128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "debugger",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess",
+    "notifications",
+    "scripting",
+    "sidePanel",
+    "storage",
+    "tabGroups",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "פתח CODE-AI"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; frame-src https: http://127.0.0.1:* http://localhost:*"
+  }
+}

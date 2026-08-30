@@ -1,0 +1,7 @@
+interface:
+  display_name: "Gemini UX Partner"
+  short_description: "Product UX reasoning with Gemini"
+  default_prompt: "Use $gemini-ux-partner to map this customer journey and produce an ethical product synthesis."
+
+policy:
+  allow_implicit_invocation: false

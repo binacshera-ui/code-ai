@@ -1,0 +1,10 @@
+# Case-insensitive fragments that must never appear in a standalone export.
+bina-cshera
+binacshera
+bina_
+bina-
+syncbina
+binabrowser
+bina session
+bina runtime
+bina 3
