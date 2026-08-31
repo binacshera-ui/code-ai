@@ -21,6 +21,7 @@ const STABLE_MS = 45_000;
 const SCHEDULED_GUARD_MS = 60_000;
 const HEALTH_TIMEOUT_MS = 120_000;
 const WAIT_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
+const FORCE_HANDOFF_MS = Math.max(0, Number(process.env.CODE_AI_FORCE_HANDOFF_MS) || 15_000);
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -294,6 +295,7 @@ async function cutover() {
   const startedAt = Date.now();
   let idleSince = null;
   let previousSummary = '';
+  const forceActiveCutover = process.argv.includes('--force-active');
   try {
     assertPreconditions();
     const current = await readPm2App();
@@ -301,6 +303,53 @@ async function cutover() {
       updateStatus('complete', { note: 'Target was already active', currentPid: current.pid });
       return;
     }
+
+    if (forceActiveCutover) {
+      if (!current || current.status !== 'online' || current.cwd !== OLD_ROOT) {
+        throw new Error(`Forced cutover expected the source runtime online; found ${current?.status || 'missing'} at ${current?.cwd || 'unknown'}`);
+      }
+
+      const queueBeforeStop = readQueueSummary();
+      updateStatus('force-preparing-target', {
+        previousPid: current.pid,
+        activeWorkWillBeCancelled: true,
+        queueCounts: queueBeforeStop.counts,
+        blockers: queueBeforeStop.blockers,
+        handoffDelayMs: FORCE_HANDOFF_MS,
+      });
+      log(`Forced cutover authorized; handoff delay ${FORCE_HANDOFF_MS}ms before preparing target and stopping ${queueBeforeStop.blockers} active queue item(s)`);
+      await sleep(FORCE_HANDOFF_MS);
+      await syncApplicationSource();
+      await run('npm', ['run', 'build'], { cwd: NEW_ROOT });
+      await syncRuntimeState();
+
+      updateStatus('force-stopping-source', {
+        previousPid: current.pid,
+        activeWorkWillBeCancelled: true,
+      });
+      log(`Stopping source PID ${current.pid}; the source shutdown will cancel active agent runs and persist queue state`);
+      await run(PM2_BIN, ['stop', APP_NAME]);
+      sourceStopped = true;
+
+      updateStatus('final-state-sync');
+      await syncRuntimeState();
+      await removePm2Registration();
+
+      updateStatus('starting-target');
+      await startEcosystem(NEW_ECOSYSTEM);
+      updateStatus('verifying-target');
+      const target = await waitForTargetHealth();
+      await run(PM2_BIN, ['save']);
+      updateStatus('complete', {
+        previousPid: current.pid,
+        currentPid: target.pid,
+        forcedActiveCutover: true,
+        completedAt: new Date().toISOString(),
+      });
+      log(`Forced cutover verified: ${OLD_ROOT} -> ${NEW_ROOT}; source directory preserved`);
+      return;
+    }
+
     updateStatus('armed', { stableWindowMs: STABLE_MS, waitTimeoutMs: WAIT_TIMEOUT_MS });
     log('Armed; source remains live while waiting for a stable idle window');
 
