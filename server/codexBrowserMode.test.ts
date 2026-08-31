@@ -4,7 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { ensureOverlaySymlink } from './codexBrowserMode.js';
+import {
+  ensureOverlaySymlink,
+  normalizePersistedBrowserModeRecord,
+} from './codexBrowserMode.js';
 
 async function readResolvedLink(targetPath: string) {
   const link = await fs.readlink(targetPath);
@@ -57,4 +60,43 @@ test('overlay symlink setup corrects a stale link target', async () => {
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test('persisted browser sessions are rebased after the Code AI repository moves', () => {
+  const legacyAppRoot = '/root/projects/legacy-monorepo/web/code-ai';
+  const sessionDir = path.join(
+    legacyAppRoot,
+    '.code-ai/local/browser-mode/sessions/developer/session-123',
+  );
+  const record = normalizePersistedBrowserModeRecord({
+    enabled: true,
+    headless: true,
+    profileSeed: 'seeded',
+    customProfileDir: null,
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+    pendingDisableNotice: false,
+    sessionDir,
+    profileDir: path.join(sessionDir, 'profile'),
+    screenshotsDir: path.join(sessionDir, 'screenshots'),
+    artifactsDir: path.join(sessionDir, 'artifacts'),
+    overlayCodexHome: path.join(sessionDir, 'codex-home-overlay'),
+    pythonDir: path.join(legacyAppRoot, 'server/browser-mode/python'),
+    serverScriptPath: path.join(legacyAppRoot, 'server/browser-mode/python/browser_mode_mcp_server.py'),
+    runtimeScriptPath: path.join(legacyAppRoot, 'server/browser-mode/python/browser_mode_runtime.py'),
+    extractorScriptPath: path.join(legacyAppRoot, 'server/browser-mode/python/browser_mode_extractor.py'),
+  });
+
+  assert.ok(record);
+  assert.equal(record.sessionDir, path.join(
+    process.cwd(),
+    '.code-ai/local/browser-mode/sessions/developer/session-123',
+  ));
+  assert.equal(record.profileDir, path.join(record.sessionDir, 'profile'));
+  assert.equal(record.serverScriptPath, path.join(
+    process.cwd(),
+    'server/browser-mode/python/browser_mode_mcp_server.py',
+  ));
+  assert.equal(record.sessionDir.includes(legacyAppRoot), false);
+  assert.equal(record.serverScriptPath.includes(legacyAppRoot), false);
 });

@@ -1045,6 +1045,15 @@ class BrowserViewerBridge {
 const viewerByKey = new Map<string, BrowserViewerBridge>();
 const viewerCreationBySessionDirectory = new Map<string, Promise<BrowserViewerBridge>>();
 
+export class BrowserModeDisabledError extends Error {
+  readonly code = 'BROWSER_MODE_DISABLED';
+
+  constructor() {
+    super('Browser mode is disabled for this session');
+    this.name = 'BrowserModeDisabledError';
+  }
+}
+
 async function resolveViewerBridge(
   profile: CodexProfileConfig,
   sessionKey: string,
@@ -1052,7 +1061,7 @@ async function resolveViewerBridge(
 ) {
   const record = await getSessionBrowserModeRecord(stateProfileId, sessionKey);
   if (!record || record.enabled !== true) {
-    throw new Error('Browser mode is not enabled for this session');
+    throw new BrowserModeDisabledError();
   }
 
   const prepared = await prepareCodexBrowserModeForRun(profile, stateProfileId, sessionKey, record);

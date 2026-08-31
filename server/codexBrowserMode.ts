@@ -13,7 +13,7 @@ export interface CodexSessionBrowserMode {
   customProfileDir?: string | null;
 }
 
-interface PersistedCodexSessionBrowserModeRecord extends CodexSessionBrowserMode {
+export interface PersistedCodexSessionBrowserModeRecord extends CodexSessionBrowserMode {
   createdAt: string;
   updatedAt: string;
   pendingDisableNotice: boolean;
@@ -141,15 +141,31 @@ async function ensureStateLoaded() {
     try {
       const raw = await fs.readFile(BROWSER_MODE_STATE_FILE, 'utf-8');
       const parsed = JSON.parse(raw) as Partial<BrowserModeState>;
-      const browserModeByKey = parsed.browserModeByKey && typeof parsed.browserModeByKey === 'object'
-        ? Object.fromEntries(
-          Object.entries(parsed.browserModeByKey)
-            .filter(([key]) => Boolean(key))
-            .map(([key, value]) => [key, normalizePersistedRecord(value)])
-            .filter((entry): entry is [string, PersistedCodexSessionBrowserModeRecord] => Boolean(entry[1]))
-        )
+      const persistedBrowserModeByKey = parsed.browserModeByKey && typeof parsed.browserModeByKey === 'object'
+        ? parsed.browserModeByKey
         : {};
+      let stateNeedsMigration = false;
+      const normalizedEntries: Array<[string, PersistedCodexSessionBrowserModeRecord]> = [];
+      for (const [key, value] of Object.entries(persistedBrowserModeByKey)) {
+        if (!key) {
+          stateNeedsMigration = true;
+          continue;
+        }
+        const normalized = normalizePersistedBrowserModeRecord(value);
+        if (!normalized) {
+          stateNeedsMigration = true;
+          continue;
+        }
+        normalizedEntries.push([key, normalized]);
+        if (JSON.stringify(value) !== JSON.stringify(normalized)) {
+          stateNeedsMigration = true;
+        }
+      }
+      const browserModeByKey = Object.fromEntries(normalizedEntries);
       state = { browserModeByKey };
+      if (stateNeedsMigration) {
+        await persistState();
+      }
     } catch (error: any) {
       if (error?.code !== 'ENOENT') {
         throw error;
@@ -170,7 +186,26 @@ async function persistState() {
   await persistTail;
 }
 
-function normalizePersistedRecord(value: unknown): PersistedCodexSessionBrowserModeRecord | null {
+function rebaseManagedSessionDir(sessionDir: string): string {
+  const resolvedSessionDir = path.resolve(sessionDir);
+  const marker = `${path.sep}local${path.sep}browser-mode${path.sep}sessions${path.sep}`;
+  const markerIndex = resolvedSessionDir.lastIndexOf(marker);
+  if (markerIndex < 0) {
+    return resolvedSessionDir;
+  }
+
+  const relativeParts = resolvedSessionDir
+    .slice(markerIndex + marker.length)
+    .split(path.sep)
+    .filter(Boolean);
+  if (relativeParts.length !== 2) {
+    return resolvedSessionDir;
+  }
+
+  return path.join(BROWSER_MODE_SESSIONS_ROOT, ...relativeParts);
+}
+
+export function normalizePersistedBrowserModeRecord(value: unknown): PersistedCodexSessionBrowserModeRecord | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -179,15 +214,22 @@ function normalizePersistedRecord(value: unknown): PersistedCodexSessionBrowserM
   const record = value as Record<string, unknown>;
   const createdAt = typeof record.createdAt === 'string' && record.createdAt.trim() ? record.createdAt.trim() : nowIso();
   const updatedAt = typeof record.updatedAt === 'string' && record.updatedAt.trim() ? record.updatedAt.trim() : createdAt;
-  const sessionDir = typeof record.sessionDir === 'string' && record.sessionDir.trim() ? path.resolve(record.sessionDir) : '';
-  const profileDir = typeof record.profileDir === 'string' && record.profileDir.trim() ? path.resolve(record.profileDir) : '';
-  const screenshotsDir = typeof record.screenshotsDir === 'string' && record.screenshotsDir.trim() ? path.resolve(record.screenshotsDir) : '';
-  const artifactsDir = typeof record.artifactsDir === 'string' && record.artifactsDir.trim() ? path.resolve(record.artifactsDir) : '';
-  const overlayCodexHome = typeof record.overlayCodexHome === 'string' && record.overlayCodexHome.trim() ? path.resolve(record.overlayCodexHome) : '';
-  const pythonDir = typeof record.pythonDir === 'string' && record.pythonDir.trim() ? path.resolve(record.pythonDir) : '';
-  const serverScriptPath = typeof record.serverScriptPath === 'string' && record.serverScriptPath.trim() ? path.resolve(record.serverScriptPath) : '';
-  const runtimeScriptPath = typeof record.runtimeScriptPath === 'string' && record.runtimeScriptPath.trim() ? path.resolve(record.runtimeScriptPath) : '';
-  const extractorScriptPath = typeof record.extractorScriptPath === 'string' && record.extractorScriptPath.trim() ? path.resolve(record.extractorScriptPath) : '';
+  const persistedSessionDir = typeof record.sessionDir === 'string' && record.sessionDir.trim()
+    ? record.sessionDir.trim()
+    : '';
+  const sessionDir = persistedSessionDir ? rebaseManagedSessionDir(persistedSessionDir) : '';
+  const managedPaths = sessionDir
+    ? {
+      profileDir: path.join(sessionDir, 'profile'),
+      screenshotsDir: path.join(sessionDir, 'screenshots'),
+      artifactsDir: path.join(sessionDir, 'artifacts'),
+      overlayCodexHome: path.join(sessionDir, 'codex-home-overlay'),
+      pythonDir: BROWSER_MODE_BUNDLED_PYTHON_ROOT,
+      serverScriptPath: BROWSER_MODE_SERVER_SCRIPT,
+      runtimeScriptPath: BROWSER_MODE_RUNTIME_SCRIPT,
+      extractorScriptPath: BROWSER_MODE_EXTRACTOR_SCRIPT,
+    }
+    : null;
   const customProfileDir = mode.profileSeed === 'custom'
     && typeof record.customProfileDir === 'string'
     && record.customProfileDir.trim()
@@ -196,14 +238,7 @@ function normalizePersistedRecord(value: unknown): PersistedCodexSessionBrowserM
 
   if (
     !sessionDir
-    || !profileDir
-    || !screenshotsDir
-    || !artifactsDir
-    || !overlayCodexHome
-    || !pythonDir
-    || !serverScriptPath
-    || !runtimeScriptPath
-    || !extractorScriptPath
+    || !managedPaths
     || (mode.profileSeed === 'custom' && !customProfileDir)
   ) {
     return null;
@@ -216,14 +251,7 @@ function normalizePersistedRecord(value: unknown): PersistedCodexSessionBrowserM
     updatedAt,
     pendingDisableNotice: record.pendingDisableNotice === true,
     sessionDir,
-    profileDir,
-    screenshotsDir,
-    artifactsDir,
-    overlayCodexHome,
-    pythonDir,
-    serverScriptPath,
-    runtimeScriptPath,
-    extractorScriptPath,
+    ...managedPaths,
   };
 }
 

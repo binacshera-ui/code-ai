@@ -187,6 +187,7 @@ import {
   validateSessionConversationSearchMode,
 } from './codexConversationSearchMode.js';
 import {
+  BrowserModeDisabledError,
   closeSessionBrowserViewer,
   inspectSessionBrowserViewerPoint,
   openSessionBrowserViewerLiveFrameReader,
@@ -3396,6 +3397,9 @@ router.post('/session-browser-mode', requireCodexAccess, async (req, res) => {
 
     const browserModeInput = await validateSessionBrowserMode(configuredProfile, req.body?.browserMode || null);
     const browserMode = await setSessionBrowserMode(profileId, sessionKey, browserModeInput);
+    if (browserMode.enabled !== true) {
+      await closeSessionBrowserViewer(profileId, sessionKey);
+    }
     res.json({ browserMode });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to update session browser mode' });
@@ -3960,7 +3964,11 @@ router.post('/session-browser-viewer/input', requireCodexAccess, async (req, res
 
     res.status(400).json({ error: 'Unsupported browser viewer input' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to queue browser viewer input' });
+    const browserModeDisabled = error instanceof BrowserModeDisabledError;
+    res.status(browserModeDisabled ? 409 : 500).json({
+      error: error.message || 'Failed to queue browser viewer input',
+      ...(browserModeDisabled ? { code: error.code } : {}),
+    });
   }
 });
 
@@ -4157,7 +4165,11 @@ router.post('/session-browser-viewer/action', requireCodexAccess, async (req, re
 
     res.json({ viewer });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to run session browser viewer action' });
+    const browserModeDisabled = error instanceof BrowserModeDisabledError;
+    res.status(browserModeDisabled ? 409 : 500).json({
+      error: error.message || 'Failed to run session browser viewer action',
+      ...(browserModeDisabled ? { code: error.code } : {}),
+    });
   }
 });
 

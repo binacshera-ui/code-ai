@@ -14061,6 +14061,7 @@ export function CodexMobileApp() {
   const [browserViewerUrlDraft, setBrowserViewerUrlDraft] = useState('');
   const browserViewerActionTailRef = useRef<Promise<void>>(Promise.resolve());
   const browserViewerPendingActionsRef = useRef(0);
+  const browserViewerGenerationRef = useRef(0);
   const [anchorDraftName, setAnchorDraftName] = useState('');
   const [anchorDraftDescription, setAnchorDraftDescription] = useState('');
   const [agentSessionDraftTitle, setAgentSessionDraftTitle] = useState('');
@@ -19183,6 +19184,9 @@ export function CodexMobileApp() {
       ...browserModeDraft,
       enabled: false,
     };
+    if (isBrowserViewerOpen) {
+      await closeBrowserViewerDialog();
+    }
     await persistSessionBrowserMode(nextMode);
     setIsBrowserModeDialogOpen(false);
     setIsModePickerDialogOpen(false);
@@ -19377,20 +19381,25 @@ export function CodexMobileApp() {
       return;
     }
 
+    const viewerGeneration = ++browserViewerGenerationRef.current;
     browserViewerActionTailRef.current = Promise.resolve();
     browserViewerPendingActionsRef.current = 0;
     setIsBrowserViewerLoading(true);
     setBrowserViewerError(null);
     try {
       const viewer = await fetchSessionBrowserViewer(profileId, currentQueueKey, initialUrl);
+      if (viewerGeneration !== browserViewerGenerationRef.current) return;
       setBrowserViewerState(viewer);
       setBrowserViewerUrlDraft(viewer.currentUrl || initialUrl || '');
       setIsBrowserViewerOpen(true);
     } catch (viewerError: any) {
+      if (viewerGeneration !== browserViewerGenerationRef.current) return;
       setBrowserViewerError(viewerError.message || 'Failed to open remote browser viewer');
       setIsBrowserViewerOpen(true);
     } finally {
-      setIsBrowserViewerLoading(false);
+      if (viewerGeneration === browserViewerGenerationRef.current) {
+        setIsBrowserViewerLoading(false);
+      }
     }
   }
 
@@ -19399,16 +19408,20 @@ export function CodexMobileApp() {
       return;
     }
 
+    const viewerGeneration = browserViewerGenerationRef.current;
     setIsBrowserViewerLoading(true);
     browserViewerPendingActionsRef.current += 1;
 
     const request = async () => {
+      if (viewerGeneration !== browserViewerGenerationRef.current) return;
       setBrowserViewerError(null);
       try {
         const viewer = await performSessionBrowserViewerAction(profileId, currentQueueKey, payload);
+        if (viewerGeneration !== browserViewerGenerationRef.current) return;
         setBrowserViewerState(viewer);
         setBrowserViewerUrlDraft(viewer.currentUrl || '');
       } catch (viewerError: any) {
+        if (viewerGeneration !== browserViewerGenerationRef.current) return;
         setBrowserViewerError(viewerError.message || 'Failed to control the remote browser');
         throw viewerError;
       } finally {
@@ -19456,6 +19469,7 @@ export function CodexMobileApp() {
   }
 
   async function closeBrowserViewerDialog() {
+    browserViewerGenerationRef.current += 1;
     if (profileId && currentQueueKey) {
       try {
         await closeSessionBrowserViewer(profileId, currentQueueKey);
