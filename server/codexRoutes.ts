@@ -67,11 +67,21 @@ import {
   createSessionTopic,
   deleteSessionTopic,
   deleteSessionTopicAssignment,
+  getSessionTopic,
   getSessionTopicMap,
   listTopicAssignmentSessionIds,
   listSessionTopics,
+  moveSessionTopic,
   setSessionTopic,
+  type CodexSessionTopic,
 } from './codexSessionTopics.js';
+import {
+  buildWorkspaceMovePrompt,
+  deleteSessionWorkspaceOverride,
+  getSessionWorkspaceMap,
+  setSessionWorkspaceOverride,
+  setSessionWorkspaceOverrides,
+} from './codexSessionWorkspaces.js';
 import {
   deleteSessionTrigger,
   getSessionTrigger,
@@ -168,6 +178,17 @@ import {
   rebindSessionPersonalChromeMode,
   setSessionPersonalChromeMode,
 } from './codexPersonalChromeMode.js';
+import {
+  buildSessionPhoneModePromptAdditions,
+  consumeSessionPhoneModeAfterDispatch,
+  deleteSessionPhoneMode,
+  getSessionPhoneMode,
+  getSessionPhoneModeRecord,
+  probePhoneModeConnection,
+  rebindSessionPhoneMode,
+  setSessionPhoneMode,
+  validateSessionPhoneMode,
+} from './codexPhoneMode.js';
 import {
   assertSessionProjectModeReady,
   buildProjectModeQueueSpecs,
@@ -623,6 +644,7 @@ async function decorateSessionSummaryListForClient(
   }
 
   const profile = findConfiguredProfile(profileId);
+  const workspaceMap = await getSessionWorkspaceMap(profileId);
   const links = await listAgentSessionLinksForSourceProfile(profileId);
   const recordsById = new Map<string, AgentSessionRecord>();
   await Promise.all([...new Set(links.map((link) => link.agentSessionId))].map(async (agentSessionId) => {
@@ -637,6 +659,7 @@ async function decorateSessionSummaryListForClient(
     const record = link ? recordsById.get(link.agentSessionId) || null : null;
     return {
       ...session,
+      cwd: workspaceMap[session.id]?.cwd || session.cwd,
       agentSession: link && record ? buildAgentSessionMeta(record, link) : null,
     };
   });
@@ -656,10 +679,14 @@ async function decorateSessionDetailForClient(
     return prepareSessionDetailForClient(session);
   }
 
-  const linked = await getAgentSessionLinkForSession(session.id);
+  const [linked, workspaceMap] = await Promise.all([
+    getAgentSessionLinkForSession(session.id),
+    getSessionWorkspaceMap(profileId),
+  ]);
   const linkedRecord = linked ? await getAgentSessionRecord(linked.agentSessionId) : null;
   const enriched = {
     ...session,
+    cwd: workspaceMap[session.id]?.cwd || session.cwd,
     agentSession: linked && linkedRecord ? buildAgentSessionMeta(linkedRecord, linked) : null,
   };
 
@@ -1101,6 +1128,10 @@ async function copySessionSidebarMetadataToForkSession(
     await setSessionCustomTitle(targetProfileId, targetSessionId, sourceCustomTitle);
   }
 
+  if (sourceSession.cwd) {
+    await setSessionWorkspaceOverride(targetProfileId, targetSessionId, sourceSession.cwd);
+  }
+
   return {
     hidden: nextHidden,
     topic: assignedTopic,
@@ -1168,10 +1199,52 @@ async function copySessionNotificationPreferenceToSession(
   );
 }
 
+async function findOrCreateMatchingTopicInFolder(
+  profileId: string,
+  sourceTopic: CodexSessionTopic,
+  cwd: string,
+): Promise<CodexSessionTopic> {
+  const topics = await listSessionTopics(profileId, cwd);
+  const existing = topics.find((topic) => (
+    topic.name === sourceTopic.name
+    && topic.icon === sourceTopic.icon
+    && topic.colorKey === sourceTopic.colorKey
+  ));
+  if (existing) {
+    return existing;
+  }
+  return createSessionTopic(profileId, cwd, {
+    name: sourceTopic.name,
+    icon: sourceTopic.icon,
+    colorKey: sourceTopic.colorKey,
+  });
+}
+
+async function enqueueWorkspaceMoveAnnouncement(
+  visibleProfileId: string,
+  sessionId: string,
+  cwd: string,
+) {
+  const effectiveSessionId = await resolveEffectiveSessionId(sessionId);
+  const effectiveProfileId = await resolveEffectiveProfileIdForSession(visibleProfileId, effectiveSessionId)
+    || visibleProfileId;
+  return enqueueCodexQueueItem({
+    profileId: effectiveProfileId,
+    sourceProfileId: visibleProfileId,
+    queueKey: effectiveSessionId,
+    clientRequestId: `workspace-move:${visibleProfileId}:${sessionId}:${randomUUID()}`,
+    sessionId: effectiveSessionId,
+    cwd,
+    prompt: buildWorkspaceMovePrompt(cwd),
+    promptPreview: `עברנו לתיקייה פעילה חדשה: ${cwd}`,
+  });
+}
+
 async function deleteSessionMetadata(profileId: string, sessionId: string) {
   await Promise.all([
     deleteSessionVisibility(profileId, sessionId),
     deleteSessionTopicAssignment(profileId, sessionId),
+    deleteSessionWorkspaceOverride(profileId, sessionId),
     deleteSessionCustomTitle(profileId, sessionId),
     deleteSessionInstruction(profileId, sessionId),
     clearSessionContextSelection(profileId, sessionId),
@@ -1182,6 +1255,7 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
     deleteSessionProjectMode(profileId, sessionId),
     deleteSessionConversationSearchMode(profileId, sessionId),
     deleteSessionPersonalChromeMode(profileId, sessionId),
+    deleteSessionPhoneMode(profileId, sessionId),
     deleteSessionFinalNotificationPreference(profileId, sessionId),
     deleteSessionTrigger(profileId, sessionId),
     deleteForkSessionMetadata(sessionId),
@@ -2479,6 +2553,168 @@ router.post('/topics', requireCodexAccess, async (req, res) => {
   }
 });
 
+router.post('/sessions/:sessionId/workspace', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = readRouteParam(req.params.sessionId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+    if (!profileId || !requestedCwd) {
+      res.status(400).json({ error: 'Profile id and target folder are required' });
+      return;
+    }
+    if (!findConfiguredProfile(profileId)) {
+      res.status(404).json({ error: 'הפרופיל שנבחר לא קיים.' });
+      return;
+    }
+
+    const cwd = (await resolveCodexFolderPath(requestedCwd, profileId)).resolvedPath;
+    const effectiveSessionId = await resolveEffectiveSessionId(sessionId);
+    const effectiveProfileId = await resolveEffectiveProfileIdForSession(profileId, effectiveSessionId)
+      || profileId;
+    const session = await getAgentSessionDetail(effectiveSessionId, effectiveProfileId, { tail: 1 });
+    const workspaceMap = await getSessionWorkspaceMap(profileId);
+    const previousCwd = workspaceMap[sessionId]?.cwd || session.cwd;
+    if (previousCwd === cwd) {
+      res.status(400).json({ error: 'השיחה כבר משויכת לתיקייה שנבחרה.' });
+      return;
+    }
+
+    const topicMap = await getSessionTopicMap(profileId);
+    const sourceTopic = topicMap[sessionId] || null;
+    let topic: CodexSessionTopic | null = sourceTopic;
+    if (sourceTopic && sourceTopic.cwd !== cwd) {
+      topic = await findOrCreateMatchingTopicInFolder(profileId, sourceTopic, cwd);
+      await setSessionTopic(profileId, sessionId, topic.id, cwd);
+    }
+
+    await setSessionWorkspaceOverride(profileId, sessionId, cwd);
+    if (effectiveProfileId !== profileId || effectiveSessionId !== sessionId) {
+      await setSessionWorkspaceOverride(effectiveProfileId, effectiveSessionId, cwd);
+    }
+
+    let queueItemId: string | null = null;
+    let announcementError: string | null = null;
+    try {
+      const queueItem = await enqueueWorkspaceMoveAnnouncement(profileId, sessionId, cwd);
+      queueItemId = queueItem.id;
+    } catch (error: any) {
+      announcementError = error?.message || 'הודעת המעבר לא נוספה לתור.';
+    }
+
+    res.json({
+      moved: true,
+      profileId,
+      sessionId,
+      previousCwd,
+      cwd,
+      topic,
+      affectedSessionIds: [sessionId],
+      queueItemIds: queueItemId ? [queueItemId] : [],
+      announcementErrors: announcementError ? [{ sessionId, reason: announcementError }] : [],
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to move session to another folder' });
+  }
+});
+
+router.post('/topics/:topicId/workspace', requireCodexAccess, async (req, res) => {
+  try {
+    const topicId = readRouteParam(req.params.topicId);
+    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
+      ? req.body.profileId.trim()
+      : undefined;
+    const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : undefined;
+    if (!profileId || !requestedCwd) {
+      res.status(400).json({ error: 'Profile id and target folder are required' });
+      return;
+    }
+    if (!findConfiguredProfile(profileId)) {
+      res.status(404).json({ error: 'הפרופיל שנבחר לא קיים.' });
+      return;
+    }
+
+    const currentTopic = await getSessionTopic(profileId, topicId);
+    if (!currentTopic) {
+      res.status(404).json({ error: 'הנושא שנבחר לא נמצא.' });
+      return;
+    }
+    const cwd = (await resolveCodexFolderPath(requestedCwd, profileId)).resolvedPath;
+    if (currentTopic.cwd === cwd) {
+      res.status(400).json({ error: 'הנושא כבר משויך לתיקייה שנבחרה.' });
+      return;
+    }
+
+    const affectedSessionIds = await listTopicAssignmentSessionIds(profileId, topicId);
+    const resolvableSessions: Array<{
+      sessionId: string;
+      effectiveSessionId: string;
+      effectiveProfileId: string;
+    }> = [];
+    const announcementErrors: Array<{ sessionId: string; reason: string }> = [];
+    for (const sessionId of affectedSessionIds) {
+      try {
+        const effectiveSessionId = await resolveEffectiveSessionId(sessionId);
+        const effectiveProfileId = await resolveEffectiveProfileIdForSession(profileId, effectiveSessionId)
+          || profileId;
+        await getAgentSessionDetail(effectiveSessionId, effectiveProfileId, { tail: 1 });
+        resolvableSessions.push({ sessionId, effectiveSessionId, effectiveProfileId });
+      } catch (error: any) {
+        announcementErrors.push({
+          sessionId,
+          reason: error?.message || 'לא ניתן היה לפתוח את הסשן לצורך הודעת מעבר.',
+        });
+      }
+    }
+
+    const movedTopic = await moveSessionTopic(profileId, topicId, cwd);
+    await setSessionWorkspaceOverrides(profileId, affectedSessionIds, cwd);
+    const effectiveAssignments = new Map<string, string[]>();
+    for (const record of resolvableSessions) {
+      const ids = effectiveAssignments.get(record.effectiveProfileId) || [];
+      ids.push(record.effectiveSessionId);
+      effectiveAssignments.set(record.effectiveProfileId, ids);
+    }
+    for (const [effectiveProfileId, effectiveSessionIds] of effectiveAssignments) {
+      if (effectiveProfileId === profileId && effectiveSessionIds.every((id) => affectedSessionIds.includes(id))) {
+        continue;
+      }
+      await setSessionWorkspaceOverrides(effectiveProfileId, effectiveSessionIds, cwd);
+    }
+
+    const queueItemIds: string[] = [];
+    for (const record of resolvableSessions) {
+      try {
+        const queueItem = await enqueueWorkspaceMoveAnnouncement(profileId, record.sessionId, cwd);
+        queueItemIds.push(queueItem.id);
+      } catch (error: any) {
+        announcementErrors.push({
+          sessionId: record.sessionId,
+          reason: error?.message || 'הודעת המעבר לא נוספה לתור.',
+        });
+      }
+    }
+
+    res.json({
+      moved: true,
+      profileId,
+      topic: movedTopic.topic,
+      previousCwd: currentTopic.cwd,
+      cwd,
+      affectedSessionIds,
+      queueItemIds,
+      announcementErrors,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to move topic to another folder' });
+  }
+});
+
 router.delete('/topics/:topicId', requireCodexAccess, async (req, res) => {
   try {
     const topicId = readRouteParam(req.params.topicId);
@@ -3712,6 +3948,50 @@ router.post('/session-personal-chrome-mode', requireCodexAccess, async (req, res
     res.json({ personalChromeMode });
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to update personal Chrome mode' });
+  }
+});
+
+router.get('/session-phone-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' ? req.query.profileId.trim() : '';
+    const sessionKey = typeof req.query.sessionKey === 'string' ? req.query.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    res.json({ phoneMode: await getSessionPhoneMode(profileId, sessionKey) });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load phone mode' });
+  }
+});
+
+router.post('/session-phone-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId.trim() : '';
+    const sessionKey = typeof req.body?.sessionKey === 'string' ? req.body.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    const profile = findConfiguredProfile(profileId);
+    if (!profile) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const validated = await validateSessionPhoneMode(profile, req.body?.phoneMode || null);
+    const phoneMode = await setSessionPhoneMode(profileId, sessionKey, validated);
+    res.json({ phoneMode });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update phone mode' });
+  }
+});
+
+router.get('/session-phone-mode/status', requireCodexAccess, async (_req, res) => {
+  try {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.json({ status: await probePhoneModeConnection() });
+  } catch (error: any) {
+    res.status(502).json({ error: error.message || 'Failed to contact the Reapre phone bridge' });
   }
 });
 
@@ -5128,6 +5408,12 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     const sessionPersonalChromeMode = sessionPersonalChromeModeRecord
       ? await getSessionPersonalChromeMode(visibleProfileId, sessionContextKey)
       : null;
+    const sessionPhoneModeRecord = sessionContextKey
+      ? await getSessionPhoneModeRecord(visibleProfileId, sessionContextKey)
+      : null;
+    const sessionPhoneMode = sessionPhoneModeRecord
+      ? await getSessionPhoneMode(visibleProfileId, sessionContextKey)
+      : null;
     if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
       return;
@@ -5146,6 +5432,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
     }
     if (sessionPersonalChromeModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב Chrome אישי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionPhoneModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב שליטה בטלפון זמין כרגע רק לסשני Codex.' });
       return;
     }
     const contextCwd = cwd || (
@@ -5218,6 +5508,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
           personalChromeMode: sessionPersonalChromeMode,
+          phoneMode: sessionPhoneMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -5255,6 +5546,10 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       }
       if (sessionPersonalChromeModeRecord?.enabled) {
         res.status(400).json({ error: 'לא ניתן לשלב מצב Chrome אישי עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionPhoneModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב שליטה בטלפון עם מצב סוכנים באותו שלב.' });
         return;
       }
       const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
@@ -5335,6 +5630,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
           personalChromeMode: sessionPersonalChromeMode,
+          phoneMode: sessionPhoneMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -5390,6 +5686,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
           personalChromeMode: sessionPersonalChromeMode,
+          phoneMode: sessionPhoneMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -5436,6 +5733,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
           personalChromeMode: sessionPersonalChromeMode,
+          phoneMode: sessionPhoneMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           scheduledAt,
           attachments: index === 0 ? attachments : [],
@@ -5481,6 +5779,7 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
       designMode: sessionDesignMode,
       uxMode: sessionUxMode,
       personalChromeMode: sessionPersonalChromeMode,
+      phoneMode: sessionPhoneMode,
       forkContext: hydratedForkDraft.forkContext,
       scheduledAt,
       attachments,
@@ -5696,6 +5995,10 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const sessionPersonalChromeMode = sessionPersonalChromeModeRecord
       ? await getSessionPersonalChromeMode(visibleProfileId, sessionContextKey)
       : null;
+    const sessionPhoneModeRecord = await getSessionPhoneModeRecord(visibleProfileId, sessionContextKey);
+    const sessionPhoneMode = sessionPhoneModeRecord
+      ? await getSessionPhoneMode(visibleProfileId, sessionContextKey)
+      : null;
     if (sessionBrowserModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב דפדפן אמיתי זמין כרגע רק לסשני Codex.' });
       return;
@@ -5714,6 +6017,10 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     }
     if (sessionPersonalChromeModeRecord?.enabled && configuredProfile.provider !== 'codex') {
       res.status(400).json({ error: 'מצב Chrome אישי זמין כרגע רק לסשני Codex.' });
+      return;
+    }
+    if (sessionPhoneModeRecord?.enabled && configuredProfile.provider !== 'codex') {
+      res.status(400).json({ error: 'מצב שליטה בטלפון זמין כרגע רק לסשני Codex.' });
       return;
     }
     const contextCwd = cwd || (sessionId
@@ -5736,6 +6043,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
     const personalChromeModePromptSuffix = sessionPersonalChromeModeRecord
       ? buildSessionPersonalChromePromptAdditions(sessionPersonalChromeModeRecord)
       : null;
+    const phoneModePromptSuffix = sessionPhoneModeRecord
+      ? buildSessionPhoneModePromptAdditions(sessionPhoneModeRecord)
+      : null;
     const providerPromptWithAdditions = [
       providerPrompt,
       additionsPromptSuffix,
@@ -5743,6 +6053,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       designModePromptSuffix,
       uxModePromptSuffix,
       personalChromeModePromptSuffix,
+      phoneModePromptSuffix,
     ]
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .join('\n\n');
@@ -5811,6 +6122,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
           personalChromeMode: sessionPersonalChromeMode,
+          phoneMode: sessionPhoneMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           attachments: index === 0 ? attachments : [],
         }));
@@ -5847,6 +6159,10 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       }
       if (sessionPersonalChromeModeRecord?.enabled) {
         res.status(400).json({ error: 'לא ניתן לשלב מצב Chrome אישי עם מצב סוכנים באותו שלב.' });
+        return;
+      }
+      if (sessionPhoneModeRecord?.enabled) {
+        res.status(400).json({ error: 'לא ניתן לשלב מצב שליטה בטלפון עם מצב סוכנים באותו שלב.' });
         return;
       }
       const sourceProfile = resolveVisibleSourceProfile(visibleProfileId);
@@ -5991,6 +6307,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
           personalChromeMode: sessionPersonalChromeMode,
+          phoneMode: sessionPhoneMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           attachments: index === 0 ? attachments : [],
         });
@@ -6054,6 +6371,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
           personalChromeMode: sessionPersonalChromeMode,
+          phoneMode: sessionPhoneMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           attachments: index === 0 ? attachments : [],
         });
@@ -6108,6 +6426,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           designMode: sessionDesignMode,
           uxMode: sessionUxMode,
           personalChromeMode: sessionPersonalChromeMode,
+          phoneMode: sessionPhoneMode,
           forkContext: index === 0 ? hydratedForkDraft.forkContext : undefined,
           attachments: index === 0 ? attachments : [],
           goalMode: {
@@ -6151,6 +6470,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         personalChromeMode: sessionPersonalChromeMode,
         personalChromeModeProfileId: visibleProfileId,
         personalChromeModeSessionKey: supportSessionKey,
+        phoneMode: sessionPhoneMode,
+        phoneModeProfileId: visibleProfileId,
+        phoneModeSessionKey: supportSessionKey,
         finalNotification: {
           profileId: visibleProfileId,
           sessionKey: supportSessionKey,
@@ -6174,6 +6496,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         await rebindSessionReminders(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionBrowserMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionPersonalChromeMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionPhoneMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionDesignMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionUxMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionProjectMode(visibleProfileId, sessionId, result.sessionId);
@@ -6186,6 +6509,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         await rebindSessionReminders(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionBrowserMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionPersonalChromeMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionPhoneMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionDesignMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionUxMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionProjectMode(visibleProfileId, supportSessionKey, result.sessionId);
@@ -6206,6 +6530,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       }
       if (sessionPersonalChromeModeRecord && sessionPersonalChromeModeRecord.enabled !== true) {
         await consumeSessionPersonalChromeModeAfterDispatch(visibleProfileId, result.sessionId);
+      }
+      if (sessionPhoneModeRecord && sessionPhoneModeRecord.enabled !== true) {
+        await consumeSessionPhoneModeAfterDispatch(visibleProfileId, result.sessionId);
       }
       await deleteSessionContextSelection(visibleProfileId, supportSessionKey);
       const session = await decorateSessionDetailForClient(
@@ -6247,6 +6574,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       designMode: sessionDesignMode,
       uxMode: sessionUxMode,
       personalChromeMode: sessionPersonalChromeMode,
+      phoneMode: sessionPhoneMode,
       forkContext: hydratedForkDraft.forkContext,
       attachments,
       recurrence,

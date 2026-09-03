@@ -49,13 +49,25 @@ import {
   rebindSessionPersonalChromeMode,
   type CodexSessionPersonalChromeMode,
 } from './codexPersonalChromeMode.js';
+import {
+  buildSessionPhoneModePromptAdditions,
+  consumeSessionPhoneModeAfterDispatch,
+  rebindSessionPhoneMode,
+  type CodexSessionPhoneMode,
+} from './codexPhoneMode.js';
 import { rebindSessionProjectMode } from './codexProjectMode.js';
 import { rebindSessionConversationSearchMode } from './codexConversationSearchMode.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
 import { getSessionTopicMap, setSessionTopic } from './codexSessionTopics.js';
 import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
+import { rebindSessionWorkspaceOverride } from './codexSessionWorkspaces.js';
 import { rebindSupportSessionRecord } from './supportAgentService.js';
-import { rebindSessionFinalNotificationPreference } from './codexFinalNotifications.js';
+import {
+  enqueueFinalResponseNotification,
+  enqueueSessionOutcomeNotification,
+  rebindSessionFinalNotificationPreference,
+  type SessionNotificationOutcome,
+} from './codexFinalNotifications.js';
 import {
   getAgentSessionRecord,
   recordAgentSessionLinkedSession,
@@ -111,6 +123,7 @@ export interface CodexQueueItem {
   actionRestriction: CodexSessionActionRestriction | null;
   browserMode: CodexSessionBrowserMode | null;
   personalChromeMode: CodexSessionPersonalChromeMode | null;
+  phoneMode: CodexSessionPhoneMode | null;
   designMode: CodexSessionDesignMode | null;
   uxMode: CodexSessionUxMode | null;
   goalMode: CodexQueueGoalMode | null;
@@ -199,6 +212,7 @@ interface EnqueueCodexQueueInput {
   actionRestriction?: CodexSessionActionRestriction | null;
   browserMode?: CodexSessionBrowserMode | null;
   personalChromeMode?: CodexSessionPersonalChromeMode | null;
+  phoneMode?: CodexSessionPhoneMode | null;
   designMode?: CodexSessionDesignMode | null;
   uxMode?: CodexSessionUxMode | null;
   goalMode?: CodexQueueGoalMode | null;
@@ -220,6 +234,53 @@ interface EnqueueCodexQueueInput {
 
 const QUEUE_ROOT = CODEX_APP_CONFIG.queueRoot;
 const STATE_FILE = path.join(QUEUE_ROOT, 'state.json');
+
+function queueNotificationDedupeKey(item: CodexQueueItem): string {
+  return `${item.id}:${item.startedAt || `attempt-${item.attempts}`}`;
+}
+
+function queueNotificationSessionKey(item: CodexQueueItem): string {
+  return item.sessionId || state.sessionBindings[item.queueKey] || item.queueKey;
+}
+
+async function enqueueQueueOutcomeNotification(
+  item: CodexQueueItem,
+  outcome: SessionNotificationOutcome,
+  options: {
+    finalMessage?: string | null;
+    reason?: string | null;
+    sessionTitle?: string | null;
+  } = {},
+): Promise<void> {
+  const sessionKey = queueNotificationSessionKey(item);
+  const notificationProfileId = item.sourceProfileId || item.profileId;
+  const provider = CODEX_APP_CONFIG.profiles.find((profile) => profile.id === item.profileId)?.provider || null;
+  const common = {
+    profileId: notificationProfileId,
+    preferenceSessionKey: sessionKey,
+    sessionId: sessionKey,
+    sessionTitle: options.sessionTitle || item.promptPreview || null,
+    provider,
+    dedupeKey: queueNotificationDedupeKey(item),
+  };
+
+  try {
+    if (outcome === 'completed') {
+      await enqueueFinalResponseNotification({
+        ...common,
+        finalMessage: options.finalMessage || item.finalMessage || '',
+      });
+      return;
+    }
+    await enqueueSessionOutcomeNotification({
+      ...common,
+      outcome,
+      reason: options.reason || item.error,
+    });
+  } catch (error) {
+    console.error(`❌ Failed to enqueue ${outcome} queue notification for ${item.id}:`, error);
+  }
+}
 const STATE_BACKUP_FILE = `${STATE_FILE}.bak`;
 const WORKER_POLL_MS = 1500;
 const MAX_PARALLEL_QUEUE_ITEMS = Math.max(
@@ -373,6 +434,9 @@ function cloneQueueItem(item: CodexQueueItem): CodexQueueItem {
     personalChromeMode: item.personalChromeMode
       ? { ...item.personalChromeMode }
       : null,
+    phoneMode: item.phoneMode
+      ? { ...item.phoneMode }
+      : null,
     designMode: item.designMode
       ? {
         enabled: item.designMode.enabled === true,
@@ -465,6 +529,17 @@ function normalizePersonalChromeMode(value: unknown): CodexSessionPersonalChrome
     bindingId: typeof candidate.bindingId === 'string' && candidate.bindingId.trim()
       ? candidate.bindingId.trim()
       : null,
+  };
+}
+
+function normalizePhoneMode(value: unknown): CodexSessionPhoneMode | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Partial<CodexSessionPhoneMode>;
+  return {
+    enabled: candidate.enabled === true,
+    accessPolicy: candidate.accessPolicy === 'free' ? 'free' : 'careful',
+    includeCallArchive: candidate.includeCallArchive !== false,
+    verboseLogs: candidate.verboseLogs !== false,
   };
 }
 
@@ -1174,6 +1249,11 @@ async function loadState() {
 
   const now = Date.now();
   let changed = recoveredFromCorruption;
+  const recoveredInterruptedItems: Array<{
+    item: CodexQueueItem;
+    outcome: Exclude<SessionNotificationOutcome, 'completed'>;
+    reason: string;
+  }> = [];
 
   state.items = state.items
     .filter((item) => {
@@ -1217,6 +1297,7 @@ async function loadState() {
         actionRestriction: normalizeActionRestriction(item.actionRestriction),
         browserMode: normalizeBrowserMode(item.browserMode),
         personalChromeMode: normalizePersonalChromeMode(item.personalChromeMode),
+        phoneMode: normalizePhoneMode(item.phoneMode),
         designMode: normalizeDesignMode(item.designMode),
         uxMode: normalizeUxMode(item.uxMode),
         goalMode: normalizeGoalMode(item.goalMode),
@@ -1278,6 +1359,13 @@ async function loadState() {
           next.error = wasScheduledStopInProgress ? null : 'Interrupted by server restart before completion.';
           next.finalMessage = null;
         }
+        recoveredInterruptedItems.push({
+          item: next,
+          outcome: wasScheduledStopInProgress ? 'cancelled' : 'interrupted',
+          reason: wasScheduledStopInProgress
+            ? 'The run was being stopped when the code-ai service restarted.'
+            : 'The code-ai service restarted before the run completed.',
+        });
         changed = true;
       }
 
@@ -1287,6 +1375,11 @@ async function loadState() {
         next.updatedAt = next.completedAt;
         next.error = null;
         next.finalMessage = null;
+        recoveredInterruptedItems.push({
+          item: next,
+          outcome: 'cancelled',
+          reason: 'The code-ai service restarted while the run was stopping.',
+        });
         changed = true;
       }
 
@@ -1300,6 +1393,11 @@ async function loadState() {
 
   if (changed) {
     await persistState();
+  }
+  for (const recovered of recoveredInterruptedItems) {
+    await enqueueQueueOutcomeNotification(recovered.item, recovered.outcome, {
+      reason: recovered.reason,
+    });
   }
 }
 
@@ -1468,6 +1566,7 @@ async function createStopContinuationItem(
     actionRestriction: sourceItem.actionRestriction,
     browserMode: sourceItem.browserMode,
     personalChromeMode: sourceItem.personalChromeMode,
+    phoneMode: sourceItem.phoneMode,
     designMode: sourceItem.designMode,
     uxMode: sourceItem.uxMode,
     goalMode: sourceItem.goalMode,
@@ -1616,6 +1715,7 @@ async function refreshDueStopPolicies() {
   const now = Date.now();
   let changed = false;
   const decisionSources: CodexQueueItem[] = [];
+  const stoppedBeforeStart: CodexQueueItem[] = [];
 
   for (const item of state.items) {
     const policy = item.stopPolicy;
@@ -1660,6 +1760,7 @@ async function refreshDueStopPolicies() {
       } else {
         decisionSources.push(item);
       }
+      stoppedBeforeStart.push(item);
       changed = true;
       continue;
     }
@@ -1692,6 +1793,14 @@ async function refreshDueStopPolicies() {
 
   if (changed) {
     await persistState();
+  }
+
+  for (const stoppedItem of stoppedBeforeStart) {
+    await enqueueQueueOutcomeNotification(stoppedItem, 'cancelled', {
+      reason: stoppedItem.stopPolicy?.mode === 'conditional'
+        ? 'The scheduled run was stopped and is waiting for a continuation decision.'
+        : 'The scheduled run reached its configured stop time before it started.',
+    });
   }
 
   for (const sourceItem of decisionSources) {
@@ -1777,6 +1886,7 @@ async function rebindQueueItemsToSession(profileId: string, queueKey: string, se
   await rebindSessionInstruction(profileId, queueKey, sessionId);
   await rebindSessionContextSelection(profileId, queueKey, sessionId);
   await rebindSessionReminders(profileId, queueKey, sessionId);
+  await rebindSessionWorkspaceOverride(profileId, queueKey, sessionId);
   await rebindSupportSessionRecord(profileId, queueKey, sessionId).catch(() => undefined);
 
   for (const candidate of state.items) {
@@ -1833,6 +1943,8 @@ async function copySessionSidebarMetadataToRecoveredSession(
   if (sourceTitle) {
     await setSessionCustomTitle(profileId, targetSessionId, sourceTitle);
   }
+
+  await rebindSessionWorkspaceOverride(profileId, sourceSessionId, targetSessionId);
 }
 
 async function persistPlannerOutputFromDisk(item: CodexQueueItem, sessionId: string) {
@@ -1945,6 +2057,9 @@ async function processQueueItem(item: CodexQueueItem) {
   const personalChromeModePrompt = item.personalChromeMode
     ? buildSessionPersonalChromePromptAdditions(item.personalChromeMode)
     : null;
+  const phoneModePrompt = item.phoneMode
+    ? buildSessionPhoneModePromptAdditions(item.phoneMode)
+    : null;
   const designModePrompt = item.designMode
     ? buildSessionDesignModePromptAdditions(item.designMode)
     : null;
@@ -1956,6 +2071,7 @@ async function processQueueItem(item: CodexQueueItem) {
     restrictionPrompt?.trim() || null,
     browserModePrompt?.trim() || null,
     personalChromeModePrompt?.trim() || null,
+    phoneModePrompt?.trim() || null,
     designModePrompt?.trim() || null,
     uxModePrompt?.trim() || null,
   ]
@@ -2014,6 +2130,9 @@ async function processQueueItem(item: CodexQueueItem) {
         personalChromeMode: item.personalChromeMode,
         personalChromeModeProfileId: item.sourceProfileId || item.profileId,
         personalChromeModeSessionKey: resolvedSessionId || item.queueKey,
+        phoneMode: item.phoneMode,
+        phoneModeProfileId: item.sourceProfileId || item.profileId,
+        phoneModeSessionKey: resolvedSessionId || item.queueKey,
         designMode: item.designMode,
         designModeProfileId: item.sourceProfileId || item.profileId,
         designModeSessionKey: resolvedSessionId || item.queueKey,
@@ -2023,12 +2142,16 @@ async function processQueueItem(item: CodexQueueItem) {
         finalNotification: {
           profileId: item.sourceProfileId || item.profileId,
           sessionKey: resolvedSessionId || item.queueKey,
-          dedupeKey: isRecurringItem(item)
-            ? `${item.id}:${item.startedAt || item.attempts}`
-            : item.id,
+          dedupeKey: queueNotificationDedupeKey(item),
+          deferUntilQueueTerminal: true,
         },
         onSessionStarted: async (startedSessionId) => {
           await bindCodexQueueItemToStartedSession(item.id, startedSessionId);
+          await rebindSessionFinalNotificationPreference(
+            item.sourceProfileId || item.profileId,
+            item.queueKey,
+            startedSessionId,
+          );
         },
       }
     );
@@ -2037,6 +2160,7 @@ async function processQueueItem(item: CodexQueueItem) {
       await copySessionSidebarMetadataToRecoveredSession(item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionBrowserMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionPersonalChromeMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
+      await rebindSessionPhoneMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionDesignMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionUxMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionProjectMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
@@ -2051,6 +2175,7 @@ async function processQueueItem(item: CodexQueueItem) {
     await rebindQueueItemsToSession(item.profileId, item.queueKey, result.sessionId);
     await rebindSessionBrowserMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionPersonalChromeMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
+    await rebindSessionPhoneMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionDesignMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionUxMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionProjectMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
@@ -2060,6 +2185,9 @@ async function processQueueItem(item: CodexQueueItem) {
     }
     if (item.personalChromeMode && item.personalChromeMode.enabled !== true) {
       await consumeSessionPersonalChromeModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
+    }
+    if (item.phoneMode && item.phoneMode.enabled !== true) {
+      await consumeSessionPhoneModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
     }
     if (item.designMode && item.designMode.enabled !== true) {
       await consumeSessionDesignModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
@@ -2074,6 +2202,10 @@ async function processQueueItem(item: CodexQueueItem) {
         markHardStopResolved(item);
       }
       await persistState();
+      await enqueueQueueOutcomeNotification(item, 'cancelled', {
+        reason: 'The recurring run was stopped at its configured stop time.',
+        sessionTitle: result.sessionTitle,
+      });
       if (item.stopPolicy.mode === 'conditional') {
         await ensureConditionalStopDecisionItem(item);
       }
@@ -2110,6 +2242,10 @@ async function processQueueItem(item: CodexQueueItem) {
         await deleteForkDraftSession(item.queueKey);
       }
       await persistState();
+      await enqueueQueueOutcomeNotification(item, 'completed', {
+        finalMessage: result.finalMessage,
+        sessionTitle: result.sessionTitle,
+      });
       return;
     }
 
@@ -2152,6 +2288,10 @@ async function processQueueItem(item: CodexQueueItem) {
       await resolveConditionalStopDecision(item, result.finalMessage, result.sessionId);
     }
     await persistState();
+    await enqueueQueueOutcomeNotification(item, 'completed', {
+      finalMessage: result.finalMessage,
+      sessionTitle: result.sessionTitle,
+    });
   } catch (error: any) {
     if (isAgentRunCancelledError(error)) {
       markQueueItemStopped(item);
@@ -2171,6 +2311,11 @@ async function processQueueItem(item: CodexQueueItem) {
         await failConditionalStopDecision(item, 'The scheduled continuation decision was cancelled');
       }
       await persistState();
+      await enqueueQueueOutcomeNotification(item, 'cancelled', {
+        reason: item.stopPolicy?.status === 'stopping'
+          ? 'The run was stopped at its configured stop time.'
+          : 'The run was cancelled before it completed.',
+      });
       if (item.stopPolicy?.status === 'stopping' && item.stopPolicy.mode === 'conditional') {
         await ensureConditionalStopDecisionItem(item);
       }
@@ -2183,6 +2328,9 @@ async function processQueueItem(item: CodexQueueItem) {
         markHardStopResolved(item);
       }
       await persistState();
+      await enqueueQueueOutcomeNotification(item, 'cancelled', {
+        reason: 'The run was stopped at its configured stop time.',
+      });
       if (item.stopPolicy.mode === 'conditional') {
         await ensureConditionalStopDecisionItem(item);
       }
@@ -2194,6 +2342,9 @@ async function processQueueItem(item: CodexQueueItem) {
         error: error?.message || 'Codex job failed',
       });
       await persistState();
+      await enqueueQueueOutcomeNotification(item, 'failed', {
+        reason: error?.message || 'The recurring run failed before completion.',
+      });
       return;
     }
 
@@ -2213,6 +2364,11 @@ async function processQueueItem(item: CodexQueueItem) {
       await failConditionalStopDecision(item, item.error || 'The scheduled continuation decision failed');
     }
     await persistState();
+    const failureMessage = error?.message || 'Codex job failed';
+    const outcome: Exclude<SessionNotificationOutcome, 'completed'> = /\b(abort(?:ed)?|interrupt(?:ed)?|terminat(?:ed|ion)|disconnect(?:ed)?|closed?|restart)\b/iu.test(failureMessage)
+      ? 'interrupted'
+      : 'failed';
+    await enqueueQueueOutcomeNotification(item, outcome, { reason: failureMessage });
   }
 }
 
@@ -2558,6 +2714,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
     actionRestriction: normalizeActionRestriction(input.actionRestriction),
     browserMode: normalizeBrowserMode(input.browserMode),
     personalChromeMode: normalizePersonalChromeMode(input.personalChromeMode),
+    phoneMode: normalizePhoneMode(input.phoneMode),
     designMode: normalizeDesignMode(input.designMode),
     uxMode: normalizeUxMode(input.uxMode),
     goalMode: normalizeGoalMode(input.goalMode),
@@ -2699,6 +2856,11 @@ export async function cancelCodexQueueItem(itemId: string): Promise<CodexQueueIt
     await failConditionalStopDecision(item, 'The scheduled continuation decision was cancelled');
   }
   await persistState();
+  await enqueueQueueOutcomeNotification(item, 'cancelled', {
+    reason: item.startedAt
+      ? 'The run was cancelled before it completed.'
+      : 'The queued task was cancelled before it started.',
+  });
   return cloneQueueItem(item);
 }
 

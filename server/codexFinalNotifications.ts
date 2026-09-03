@@ -11,6 +11,7 @@ const DELIVERY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const RETRY_DELAYS_MS = [5_000, 30_000, 2 * 60_000, 10 * 60_000, 60 * 60_000];
 
 type DeliveryStatus = 'pending' | 'sending' | 'delivered' | 'failed';
+export type SessionNotificationOutcome = 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
 interface PersistedSessionFinalNotificationDelivery {
   id: string;
@@ -20,6 +21,9 @@ interface PersistedSessionFinalNotificationDelivery {
   preferenceSessionKey: string;
   sessionTitle: string | null;
   provider: string | null;
+  outcome: SessionNotificationOutcome;
+  serverId: string | null;
+  serverLabel: string | null;
   finalMessage: string | null;
   status: DeliveryStatus;
   attempts: number;
@@ -52,6 +56,22 @@ export interface EnqueueFinalResponseNotificationInput {
   finalMessage: string;
   sessionTitle?: string | null;
   provider?: string | null;
+  outcome?: SessionNotificationOutcome;
+  serverId?: string | null;
+  serverLabel?: string | null;
+  dedupeKey?: string | null;
+}
+
+export interface EnqueueSessionOutcomeNotificationInput {
+  profileId: string;
+  preferenceSessionKey: string;
+  sessionId: string;
+  outcome: Exclude<SessionNotificationOutcome, 'completed'>;
+  reason?: string | null;
+  sessionTitle?: string | null;
+  provider?: string | null;
+  serverId?: string | null;
+  serverLabel?: string | null;
   dedupeKey?: string | null;
 }
 
@@ -79,6 +99,9 @@ interface BuildNtfyRequestInput {
   sessionId: string;
   sessionTitle?: string | null;
   provider?: string | null;
+  outcome?: SessionNotificationOutcome;
+  serverId?: string | null;
+  serverLabel?: string | null;
   finalMessage: string;
   publicOrigin?: string;
 }
@@ -161,6 +184,12 @@ function normalizeText(value: unknown, maxLength: number): string | null {
   return normalized ? normalized.slice(0, maxLength) : null;
 }
 
+function normalizeOutcome(value: unknown): SessionNotificationOutcome {
+  return value === 'failed' || value === 'cancelled' || value === 'interrupted'
+    ? value
+    : 'completed';
+}
+
 function normalizeDelivery(value: unknown): PersistedSessionFinalNotificationDelivery | null {
   if (!value || typeof value !== 'object') return null;
   const candidate = value as Partial<PersistedSessionFinalNotificationDelivery>;
@@ -183,6 +212,9 @@ function normalizeDelivery(value: unknown): PersistedSessionFinalNotificationDel
     preferenceSessionKey,
     sessionTitle: normalizeText(candidate.sessionTitle, 240),
     provider: normalizeText(candidate.provider, 40),
+    outcome: normalizeOutcome(candidate.outcome),
+    serverId: normalizeText(candidate.serverId, 64),
+    serverLabel: normalizeText(candidate.serverLabel, 120),
     finalMessage: typeof candidate.finalMessage === 'string' ? candidate.finalMessage : null,
     status,
     attempts: Number.isInteger(candidate.attempts) ? Math.max(0, Number(candidate.attempts)) : 0,
@@ -357,18 +389,53 @@ function truncateUtf8(value: string, maxBytes: number): string {
   return value.slice(0, lower).trimEnd();
 }
 
-function buildSessionLink(publicOrigin: string, profileId: string, sessionId: string): string {
-  return `${publicOrigin.replace(/\/$/u, '')}/session/${encodeURIComponent(profileId)}/${encodeURIComponent(sessionId)}`;
+function buildSessionLink(
+  publicOrigin: string,
+  profileId: string,
+  sessionId: string,
+  serverId?: string | null,
+): string {
+  const normalizedOrigin = publicOrigin.replace(/\/$/u, '');
+  const route = sessionId.startsWith('draft:')
+    ? `/session/${encodeURIComponent(profileId)}/draft/${encodeURIComponent(sessionId)}`
+    : `/session/${encodeURIComponent(profileId)}/${encodeURIComponent(sessionId)}`;
+  const url = new URL(route, `${normalizedOrigin}/`);
+  if (serverId?.trim() && serverId.trim().toLowerCase() !== 'local') {
+    url.searchParams.set('server', serverId.trim().toLowerCase());
+  }
+  return url.toString();
 }
 
 function safeFilenamePart(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/gu, '-').replace(/^-+|-+$/gu, '').slice(0, 48) || 'session';
 }
 
-function buildNotificationTitle(sessionTitle: string | null | undefined, provider: string | null | undefined): string {
+function buildNotificationTitle(
+  sessionTitle: string | null | undefined,
+  provider: string | null | undefined,
+  outcome: SessionNotificationOutcome,
+  serverLabel?: string | null,
+): string {
   const title = sanitizeHeaderText(sessionTitle || '', 100);
   const providerLabel = provider === 'claude' ? 'Claude' : provider === 'gemini' ? 'Gemini' : 'Codex';
-  return title ? `${providerLabel} סיים · ${title}` : `${providerLabel} סיים את המשימה`;
+  const outcomeLabel = outcome === 'failed'
+    ? 'נכשל'
+    : outcome === 'cancelled'
+      ? 'נעצר'
+      : outcome === 'interrupted'
+        ? 'נקטע'
+        : 'סיים';
+  const sourceLabel = sanitizeHeaderText(serverLabel || '', 60);
+  const suffix = [sourceLabel, title].filter(Boolean).join(' · ');
+  return suffix
+    ? `${providerLabel} ${outcomeLabel} · ${suffix}`
+    : `${providerLabel} ${outcomeLabel} את המשימה`;
+}
+
+function getOutcomeTags(outcome: SessionNotificationOutcome): string {
+  if (outcome === 'completed') return 'white_check_mark,robot_face';
+  if (outcome === 'cancelled') return 'stop_sign,robot_face';
+  return 'warning,robot_face';
 }
 
 function buildAttachmentPreview(finalMessage: string): string {
@@ -387,12 +454,21 @@ export function buildNtfyRequest(input: BuildNtfyRequestInput): NtfyRequestDescr
   const finalMessage = input.finalMessage;
   if (!finalMessage.trim()) throw new Error('Cannot send an empty final response to ntfy');
   const publicOrigin = normalizeHttpUrl(input.publicOrigin) || defaultPublicOrigin();
+  const outcome = normalizeOutcome(input.outcome);
   const commonHeaders: Record<string, string> = {
-    Title: encodeNtfyHeader(buildNotificationTitle(input.sessionTitle, input.provider)),
-    Tags: 'white_check_mark,robot_face',
-    Click: buildSessionLink(publicOrigin, input.profileId, input.sessionId),
+    Title: encodeNtfyHeader(buildNotificationTitle(
+      input.sessionTitle,
+      input.provider,
+      outcome,
+      input.serverLabel,
+    )),
+    Tags: getOutcomeTags(outcome),
+    Click: buildSessionLink(publicOrigin, input.profileId, input.sessionId, input.serverId),
     'X-Sequence-ID': input.sequenceId,
   };
+  if (outcome !== 'completed') {
+    commonHeaders.Priority = 'high';
+  }
   if (input.accessToken?.trim()) {
     commonHeaders.Authorization = `Bearer ${input.accessToken.trim()}`;
   }
@@ -459,6 +535,9 @@ async function deliverNotification(
     sessionId: delivery.sessionId,
     sessionTitle: delivery.sessionTitle,
     provider: delivery.provider,
+    outcome: delivery.outcome,
+    serverId: delivery.serverId,
+    serverLabel: delivery.serverLabel,
     finalMessage: delivery.finalMessage,
     publicOrigin: config.publicOrigin,
   });
@@ -557,6 +636,12 @@ export async function enqueueFinalResponseNotification(
     return { queued: false, reason: 'duplicate' };
   }
   const timestamp = nowIso();
+  const serverId = normalizeText(input.serverId, 64)
+    || normalizeText(process.env.CODEX_SERVER_ID, 64)
+    || 'local';
+  const serverLabel = normalizeText(input.serverLabel, 120)
+    || normalizeText(process.env.CODEX_SERVER_LABEL, 120)
+    || normalizeText(process.env.CODEX_LOCAL_SERVER_LABEL, 120);
   state.deliveriesById[id] = {
     id,
     sequenceId: `code-ai-${id.slice(0, 24)}`,
@@ -565,6 +650,9 @@ export async function enqueueFinalResponseNotification(
     preferenceSessionKey: input.preferenceSessionKey,
     sessionTitle: normalizeText(input.sessionTitle, 240),
     provider: normalizeText(input.provider, 40),
+    outcome: normalizeOutcome(input.outcome),
+    serverId,
+    serverLabel,
     finalMessage: input.finalMessage,
     status: 'pending',
     attempts: 0,
@@ -578,6 +666,46 @@ export async function enqueueFinalResponseNotification(
   await persistState();
   scheduleWorker(0);
   return { queued: true, reason: 'queued' };
+}
+
+export function buildSessionOutcomeMessage(
+  outcome: Exclude<SessionNotificationOutcome, 'completed'>,
+  reason?: string | null,
+  serverLabel?: string | null,
+): string {
+  const heading = outcome === 'cancelled'
+    ? 'המשימה הופסקה לפני שהושלמה.'
+    : outcome === 'interrupted'
+      ? 'המשימה נקטעה לפני שהתקבלה תשובה סופית.'
+      : 'המשימה נעצרה עקב שגיאה לפני שהושלמה.';
+  const normalizedReason = normalizeText(reason, 3_000);
+  const normalizedServerLabel = normalizeText(serverLabel, 120);
+  return [
+    heading,
+    normalizedServerLabel ? `שרת: ${normalizedServerLabel}` : null,
+    normalizedReason ? `סיבה: ${normalizedReason}` : null,
+    'אפשר לפתוח את השיחה וללחוץ על „המשך במשימה”.',
+  ].filter(Boolean).join('\n\n');
+}
+
+export async function enqueueSessionOutcomeNotification(
+  input: EnqueueSessionOutcomeNotificationInput,
+): Promise<{ queued: boolean; reason: 'queued' | 'disabled' | 'duplicate' }> {
+  const serverLabel = normalizeText(input.serverLabel, 120)
+    || normalizeText(process.env.CODEX_SERVER_LABEL, 120)
+    || normalizeText(process.env.CODEX_LOCAL_SERVER_LABEL, 120);
+  return enqueueFinalResponseNotification({
+    profileId: input.profileId,
+    preferenceSessionKey: input.preferenceSessionKey,
+    sessionId: input.sessionId,
+    sessionTitle: input.sessionTitle,
+    provider: input.provider,
+    outcome: input.outcome,
+    serverId: input.serverId,
+    serverLabel,
+    finalMessage: buildSessionOutcomeMessage(input.outcome, input.reason, serverLabel),
+    dedupeKey: input.dedupeKey,
+  });
 }
 
 export async function startCodexFinalNotificationWorker(): Promise<void> {

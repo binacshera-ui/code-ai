@@ -20,6 +20,7 @@ test('real sessions use a canonical path on both surfaces', () => {
   assert.deepEqual(
     readSessionRoute(`https://code-ai.example/session/developer2/${sessionId}`),
     {
+      serverId: null,
       profileId: 'developer2',
       sessionKey: sessionId,
       sessionId,
@@ -43,12 +44,12 @@ test('draft tabs receive distinct persistent route keys', () => {
 
 test('canonicalization preserves embed state and removes legacy routing query params', () => {
   const href = buildSessionHref(
-    'https://code-ai.example/chat?embed=workbench&profile=developer&session=old#composer',
+    'https://code-ai.example/chat?embed=workbench&server=beam-10g&profile=developer&session=old#composer',
     'developer',
     'new-session',
     'session'
   );
-  assert.equal(href, '/chat/session/developer/new-session?embed=workbench#composer');
+  assert.equal(href, '/chat/session/developer/new-session?embed=workbench&server=beam-10g#composer');
   assert.equal(getSessionRouteSurface(href), 'chat');
 });
 
@@ -56,6 +57,7 @@ test('legacy query links remain readable during migration', () => {
   assert.deepEqual(
     readSessionRoute('https://code-ai.example/?profile=developer&session=legacy-session'),
     {
+      serverId: null,
       profileId: 'developer',
       sessionKey: 'legacy-session',
       sessionId: 'legacy-session',

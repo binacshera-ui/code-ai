@@ -248,6 +248,47 @@ export async function listTopicAssignmentSessionIds(profileId: string, topicId: 
   return sessionIds;
 }
 
+export async function getSessionTopic(
+  profileId: string,
+  topicId: string,
+): Promise<CodexSessionTopic | null> {
+  await ensureStateLoaded();
+  const topic = state.topics.find((candidate) => (
+    candidate.id === topicId
+    && candidate.profileId === profileId
+  ));
+  return topic ? cloneTopic(topic) : null;
+}
+
+export async function moveSessionTopic(
+  profileId: string,
+  topicId: string,
+  cwd: string,
+): Promise<{ topic: CodexSessionTopic; affectedSessionIds: string[] }> {
+  await ensureStateLoaded();
+  const topic = state.topics.find((candidate) => (
+    candidate.id === topicId
+    && candidate.profileId === profileId
+  ));
+  if (!topic) {
+    throw new Error('Topic was not found');
+  }
+
+  const normalizedCwd = cwd.trim();
+  if (!normalizedCwd) {
+    throw new Error('Topic folder is required');
+  }
+
+  const affectedSessionIds = await listTopicAssignmentSessionIds(profileId, topicId);
+  topic.cwd = normalizedCwd;
+  topic.updatedAt = nowIso();
+  await persistState();
+  return {
+    topic: cloneTopic(topic),
+    affectedSessionIds,
+  };
+}
+
 export async function deleteSessionTopic(
   profileId: string,
   topicId: string

@@ -5,10 +5,12 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'fs/promises';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { parseEnv } from 'node:util';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(SCRIPT_DIR, '..');
 const DEFAULT_REGISTRY = path.join(APP_ROOT, '.code-ai', 'remote-hosts.json');
+const LOCAL_ENV_PATH = path.join(APP_ROOT, '.env');
 const SAFE_ID = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 const SAFE_SSH_TARGET = /^[a-zA-Z0-9_.:@-]+$/;
 const SAFE_REMOTE_PATH = /^\/[a-zA-Z0-9_./-]+$/;
@@ -152,6 +154,26 @@ function envLine(name, value) {
   return `${name}=${normalized}`;
 }
 
+async function readNotificationEnvironment() {
+  const fileEnvironment = existsSync(LOCAL_ENV_PATH)
+    ? parseEnv(await readFile(LOCAL_ENV_PATH, 'utf8'))
+    : {};
+  const readValue = (name) => process.env[name] ?? fileEnvironment[name] ?? '';
+  const endpoint = String(readValue('CODEX_NTFY_URL')).trim();
+  if (!endpoint) return [];
+  return [
+    envLine('CODEX_NTFY_URL', endpoint),
+    envLine('CODEX_NTFY_ENABLED', String(readValue('CODEX_NTFY_ENABLED') || 'true')),
+    envLine('CODEX_NTFY_DEFAULT_ENABLED', String(readValue('CODEX_NTFY_DEFAULT_ENABLED') || 'true')),
+    ...(String(readValue('CODEX_NTFY_ACCESS_TOKEN')).trim()
+      ? [envLine('CODEX_NTFY_ACCESS_TOKEN', String(readValue('CODEX_NTFY_ACCESS_TOKEN')).trim())]
+      : []),
+    ...(String(readValue('CODEX_PUBLIC_ORIGIN')).trim()
+      ? [envLine('CODEX_PUBLIC_ORIGIN', String(readValue('CODEX_PUBLIC_ORIGIN')).trim())]
+      : []),
+  ];
+}
+
 async function loadRegistry(registryPath) {
   if (!existsSync(registryPath)) {
     return { version: 1, hosts: [] };
@@ -176,6 +198,7 @@ async function saveRegistry(registryPath, registry) {
 
 async function main() {
   const options = readArgs(process.argv.slice(2));
+  const notificationEnvironment = await readNotificationEnvironment();
   const registry = await loadRegistry(options.registry);
   const previous = registry.hosts.find((host) => host.id === options.id);
   const token = typeof previous?.token === 'string' && previous.token.length >= 24
@@ -251,6 +274,9 @@ async function main() {
     envLine('CODEX_PROFILES_JSON_BASE64', Buffer.from(options.profilesJson, 'utf8').toString('base64')),
     envLine('CODEX_BIN', '/usr/local/bin/codex'),
     envLine('CODEX_REMOTE_AGENT_TOKEN', token),
+    envLine('CODEX_SERVER_ID', options.id),
+    envLine('CODEX_SERVER_LABEL', options.label),
+    ...notificationEnvironment,
     envLine('SESSION_SECRET', sessionSecret),
     '',
   ].join('\n');

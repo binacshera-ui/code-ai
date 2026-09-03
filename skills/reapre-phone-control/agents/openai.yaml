@@ -1,0 +1,9 @@
+interface:
+  display_name: "שליטה בטלפון Reapre"
+  short_description: "בדיקה ושליטה בטוחה בטלפון ובלוגי שיחות"
+  default_prompt: "Use $reapre-phone-control to check my phone through Reapre, collect evidence and logs, and perform only the actions I explicitly requested."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "phone_mode"
+      description: "Session-scoped Reapre Android control and call intelligence"

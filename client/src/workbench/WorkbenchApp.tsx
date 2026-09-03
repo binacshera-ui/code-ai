@@ -108,6 +108,7 @@ function isViewerReadyPlaceholder(value: string | null | undefined) {
 function buildChatFrameSource() {
   const route = readSessionRoute();
   const params = new URLSearchParams({ embed: 'workbench' });
+  if (route?.serverId) params.set('server', route.serverId);
   if (route?.profileId && route.sessionKey && route.kind) {
     return `${buildSessionPath(route.profileId, route.sessionKey, route.kind, 'chat')}?${params.toString()}`;
   }

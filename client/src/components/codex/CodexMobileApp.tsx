@@ -72,6 +72,7 @@ import {
   Server,
   Settings2,
   ShieldCheck,
+  Smartphone,
   SquarePen,
   SquareTerminal,
   Tag,
@@ -126,6 +127,11 @@ import {
   type PersonalChromeModeValue,
   type PersonalChromePairingValue,
 } from './PersonalChromeModeDialog';
+import {
+  PhoneModeDialog,
+  type PhoneModeStatusValue,
+  type PhoneModeValue,
+} from './PhoneModeDialog';
 import { ConversationShareDialog } from './ConversationShareDialog';
 import {
   ConversationSearchModeDialog,
@@ -169,6 +175,7 @@ import {
 } from './timelinePresentation';
 import { shouldAcceptSessionSnapshot } from './sessionTimelineSync';
 import { selectPendingDraftConversations } from './pendingDraftConversations';
+import { observeQueueStatusTransitions } from './queueCompletionToast';
 
 const IS_WORKBENCH_EMBED = typeof window !== 'undefined'
   && window.parent !== window
@@ -384,6 +391,34 @@ interface CodexSessionCopyResponse {
   sourceProfileId: string;
   targetProfileId: string;
 }
+
+interface CodexWorkspaceMoveResponse {
+  moved: true;
+  profileId: string;
+  cwd: string;
+  previousCwd: string | null;
+  affectedSessionIds: string[];
+  queueItemIds: string[];
+  announcementErrors: Array<{
+    sessionId: string;
+    reason: string;
+  }>;
+  sessionId?: string;
+  topic?: CodexSessionTopic | null;
+}
+
+type WorkspaceMoveTarget = {
+  kind: 'session';
+  sessionId: string;
+  label: string;
+  cwd: string | null;
+} | {
+  kind: 'topic';
+  topicId: string;
+  label: string;
+  cwd: string;
+  sessionCount: number;
+};
 
 interface CodexConversationShareResponse {
   files: CodexUploadedAttachment[];
@@ -926,6 +961,7 @@ type CodexSessionUxMode = CodexSessionUxModeValue;
 type CodexSessionProjectMode = CodexSessionProjectModeValue;
 type CodexSessionConversationSearchMode = CodexSessionConversationSearchModeValue;
 type CodexSessionPersonalChromeMode = PersonalChromeModeValue;
+type CodexSessionPhoneMode = PhoneModeValue;
 
 interface CodexSessionTasksResponse {
   tasks: CodexSessionTask[];
@@ -963,6 +999,10 @@ interface CodexSessionConversationSearchModeResponse {
 
 interface CodexSessionPersonalChromeModeResponse {
   personalChromeMode: CodexSessionPersonalChromeMode;
+}
+
+interface CodexSessionPhoneModeResponse {
+  phoneMode: CodexSessionPhoneMode;
 }
 
 interface CodexSessionBrowserViewerTab {
@@ -1324,6 +1364,10 @@ function createEmptySessionPersonalChromeMode(): CodexSessionPersonalChromeMode 
   };
 }
 
+function createEmptySessionPhoneMode(): CodexSessionPhoneMode {
+  return { enabled: false, accessPolicy: 'careful', includeCallArchive: true, verboseLogs: true };
+}
+
 function createDefaultSessionFinalNotificationPreference(): CodexSessionFinalNotificationPreference {
   return {
     enabled: true,
@@ -1500,6 +1544,19 @@ function normalizeSessionPersonalChromeModeValue(
   };
 }
 
+function normalizeSessionPhoneModeValue(
+  value: Partial<CodexSessionPhoneMode> | null | undefined,
+): CodexSessionPhoneMode {
+  const fallback = createEmptySessionPhoneMode();
+  if (!value) return fallback;
+  return {
+    enabled: value.enabled === true,
+    accessPolicy: value.accessPolicy === 'free' ? 'free' : 'careful',
+    includeCallArchive: value.includeCallArchive !== false,
+    verboseLogs: value.verboseLogs !== false,
+  };
+}
+
 function getBrowserModeProfileSeedLabel(mode: CodexSessionBrowserMode): string {
   if (mode.profileSeed === 'custom') {
     return 'Custom profile';
@@ -1612,6 +1669,17 @@ function writeStoredServerId(serverId: string): void {
 
 function setActiveCodeAiServerId(serverId: string): void {
   activeCodeAiServerId = serverId.trim().toLowerCase() || LOCAL_SERVER_ID;
+}
+
+function writeCurrentServerRoute(serverId: string): void {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (serverId && serverId !== LOCAL_SERVER_ID) {
+    url.searchParams.set('server', serverId);
+  } else {
+    url.searchParams.delete('server');
+  }
+  window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
 }
 
 function buildSessionDetailClientCacheKey(serverId: string, profileId: string, sessionId: string): string {
@@ -3662,6 +3730,40 @@ async function saveSessionPersonalChromeMode(
   return normalizeSessionPersonalChromeModeValue(data.personalChromeMode);
 }
 
+async function fetchSessionPhoneMode(profileId: string, sessionKey: string): Promise<CodexSessionPhoneMode> {
+  const data = await fetchJson<CodexSessionPhoneModeResponse>(`/api/codex/session-phone-mode?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`);
+  return normalizeSessionPhoneModeValue(data.phoneMode);
+}
+
+async function saveSessionPhoneMode(profileId: string, sessionKey: string, phoneMode: CodexSessionPhoneMode): Promise<CodexSessionPhoneMode> {
+  const data = await fetchJson<CodexSessionPhoneModeResponse>('/api/codex/session-phone-mode', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profileId, sessionKey, phoneMode }),
+  });
+  return normalizeSessionPhoneModeValue(data.phoneMode);
+}
+
+function unwrapPhoneStatus(value: unknown): Record<string, any> {
+  if (!value || typeof value !== 'object') return {};
+  const record = value as Record<string, any>;
+  return record.data && typeof record.data === 'object' ? record.data : record;
+}
+
+async function fetchPhoneModeStatus(): Promise<PhoneModeStatusValue> {
+  const response = await fetchJson<{ status: Record<string, unknown> }>('/api/codex/session-phone-mode/status', { cache: 'no-store' });
+  const device = unwrapPhoneStatus(response.status?.device);
+  const battery = unwrapPhoneStatus(response.status?.battery);
+  const deviceInfo = device.device && typeof device.device === 'object' ? device.device : device;
+  const connected = Object.keys(device).length > 0 && device.success !== false && typeof device.error !== 'string';
+  return {
+    connected,
+    checkedAt: new Date().toISOString(),
+    deviceName: [deviceInfo.manufacturer, deviceInfo.modelName || deviceInfo.model].filter(Boolean).join(' ') || null,
+    batteryPercent: Number.isFinite(Number(battery.percent)) ? Number(battery.percent) : null,
+    charging: typeof battery.state === 'string' ? battery.state === 'charging' || battery.state === 'full' : null,
+    error: connected ? null : String(device.error || 'הטלפון אינו מחובר לגשר Reapre'),
+  };
+}
+
 async function fetchPersonalChromeDevices(): Promise<PersonalChromeDeviceValue[]> {
   const data = await fetchJson<{ devices: PersonalChromeDeviceValue[] }>('/api/codex/browser-extension/devices', { cache: 'no-store' });
   return Array.isArray(data.devices) ? data.devices : [];
@@ -4085,6 +4187,30 @@ async function copySessionsToProfileRequest(
       targetProfileId,
       sessionIds,
     }),
+  });
+}
+
+async function moveSessionToWorkspaceRequest(
+  profileId: string,
+  sessionId: string,
+  cwd: string,
+): Promise<CodexWorkspaceMoveResponse> {
+  return fetchJson<CodexWorkspaceMoveResponse>(`/api/codex/sessions/${encodeURIComponent(sessionId)}/workspace`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profileId, cwd }),
+  });
+}
+
+async function moveTopicToWorkspaceRequest(
+  profileId: string,
+  topicId: string,
+  cwd: string,
+): Promise<CodexWorkspaceMoveResponse> {
+  return fetchJson<CodexWorkspaceMoveResponse>(`/api/codex/topics/${encodeURIComponent(topicId)}/workspace`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profileId, cwd }),
   });
 }
 
@@ -5101,13 +5227,14 @@ const StatusRow = memo(function StatusRow({
               onClick={onContinue}
               disabled={isContinueLoading}
               className={cn(
-                'flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors active:scale-95 disabled:opacity-50',
+                'flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full px-3 text-[11px] font-semibold transition-colors active:scale-95 disabled:opacity-50',
                 iconToneClass
               )}
               title="המשך את הסבב עד הסוף"
               aria-label="המשך את הסבב עד הסוף"
             >
-              {isContinueLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <StatusIcon className="h-4 w-4" />}
+              {isContinueLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+              <span>{isContinueLoading ? 'ממשיך…' : 'המשך במשימה'}</span>
             </button>
           ) : (
             <div className={cn('flex h-7 w-7 shrink-0 items-center justify-center rounded-full', iconToneClass)}>
@@ -6567,6 +6694,8 @@ function SidebarPanel({
   selectedSessionCopyCount,
   isCopyingSessions,
   sessionCopyNotice,
+  isMovingWorkspace,
+  workspaceMoveNotice,
   sessionTaskSummaries,
   sessionSubtaskSummaries,
   search,
@@ -6596,6 +6725,8 @@ function SidebarPanel({
   onToggleWorkspaceMode,
   onToggleSessionCopyMode,
   onConfirmCopySessions,
+  onMoveSessionToWorkspace,
+  onMoveTopicToWorkspace,
   onManageTopic,
   onManageSessionTasks,
   onToggleArchived,
@@ -6627,6 +6758,8 @@ function SidebarPanel({
   selectedSessionCopyCount: number;
   isCopyingSessions: boolean;
   sessionCopyNotice: string | null;
+  isMovingWorkspace: boolean;
+  workspaceMoveNotice: string | null;
   sessionTaskSummaries: Record<string, { assignedCount: number; completedCount: number }>;
   sessionSubtaskSummaries: Record<string, { totalCount: number; completedCount: number }>;
   search: string;
@@ -6656,6 +6789,8 @@ function SidebarPanel({
   onToggleWorkspaceMode: () => void;
   onToggleSessionCopyMode: () => void;
   onConfirmCopySessions: () => void;
+  onMoveSessionToWorkspace: (sessionId: string) => void;
+  onMoveTopicToWorkspace: (topicId: string) => void;
   onManageTopic: (session: CodexSessionSummary) => void;
   onManageSessionTasks: (session: CodexSessionSummary) => void;
   onToggleArchived: () => void;
@@ -6681,6 +6816,31 @@ function SidebarPanel({
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>(() => readBooleanMapFromStorage(collapsedFoldersStorageKey));
   const [collapsedTopics, setCollapsedTopics] = useState<Record<string, boolean>>(() => readBooleanMapFromStorage(collapsedTopicsStorageKey));
   const [expandedNativeAgentParents, setExpandedNativeAgentParents] = useState<Record<string, boolean>>({});
+  const movableTopics = useMemo(() => {
+    const byId = new Map<string, { topic: CodexSessionTopic; sessionCount: number }>();
+    for (const session of sessions) {
+      if (!session.topic) {
+        continue;
+      }
+      const current = byId.get(session.topic.id);
+      byId.set(session.topic.id, {
+        topic: session.topic,
+        sessionCount: (current?.sessionCount || 0) + 1,
+      });
+    }
+    return [...byId.values()].sort((left, right) => left.topic.name.localeCompare(right.topic.name, 'he'));
+  }, [sessions]);
+  const [workspaceMoveTopicId, setWorkspaceMoveTopicId] = useState('');
+  const selectedWorkspaceMoveSession = selectedSessionId
+    ? sessions.find((session) => session.id === selectedSessionId) || null
+    : null;
+
+  useEffect(() => {
+    if (movableTopics.some((entry) => entry.topic.id === workspaceMoveTopicId)) {
+      return;
+    }
+    setWorkspaceMoveTopicId(movableTopics[0]?.topic.id || '');
+  }, [movableTopics, workspaceMoveTopicId]);
 
   useEffect(() => {
     setCollapsedFolders(readBooleanMapFromStorage(collapsedFoldersStorageKey));
@@ -7159,6 +7319,56 @@ function SidebarPanel({
                 )}
               </>
             )}
+            {selectedProfile && (
+              <>
+                <div className="mt-4 text-[11px] font-semibold tracking-[0.18em] text-slate-500">
+                  העברה לתיקייה אחרת
+                </div>
+                <div className="mt-2 rounded-xl border border-slate-100 bg-white/80 px-3 py-2 text-[11px] leading-5 text-slate-500">
+                  ההעברה משנה את הסדר וה־workspace הפעיל בלבד; קבצים לא מוזזים בדיסק. לכל שיחה תישלח הודעה עם הנתיב החדש.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => selectedWorkspaceMoveSession && onMoveSessionToWorkspace(selectedWorkspaceMoveSession.id)}
+                  disabled={!selectedWorkspaceMoveSession || isMovingWorkspace}
+                  className="mt-2 flex w-full items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-right text-sm text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {selectedWorkspaceMoveSession
+                      ? `העבר את השיחה: ${selectedWorkspaceMoveSession.title}`
+                      : 'בחר שיחה מהרשימה כדי להעביר אותה'}
+                  </span>
+                  {isMovingWorkspace ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <FolderTree className="h-4 w-4 shrink-0" />}
+                </button>
+                <select
+                  value={workspaceMoveTopicId}
+                  onChange={(event) => setWorkspaceMoveTopicId(event.target.value)}
+                  disabled={movableTopics.length === 0 || isMovingWorkspace}
+                  className="mt-2 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-3 text-right text-sm text-slate-700 outline-none transition focus:border-indigo-300 disabled:opacity-50"
+                >
+                  {movableTopics.length === 0 && <option value="">אין נושאים להעברה</option>}
+                  {movableTopics.map(({ topic, sessionCount }) => (
+                    <option key={topic.id} value={topic.id}>
+                      {topic.icon} {topic.name} · {sessionCount} שיחות
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => workspaceMoveTopicId && onMoveTopicToWorkspace(workspaceMoveTopicId)}
+                  disabled={!workspaceMoveTopicId || isMovingWorkspace}
+                  className="mt-2 flex w-full items-center justify-between gap-2 rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2 text-right text-sm text-indigo-700 transition-colors hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <span>העבר נושא עם כל השיחות שבתוכו</span>
+                  {isMovingWorkspace ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderOpen className="h-4 w-4" />}
+                </button>
+                {workspaceMoveNotice && (
+                  <div className="mt-2 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs leading-6 text-emerald-700">
+                    {workspaceMoveNotice}
+                  </div>
+                )}
+              </>
+            )}
               <button
                 onClick={onRefresh}
                 disabled={isRefreshing}
@@ -7283,6 +7493,7 @@ function SidebarPanel({
 }
 
 function FolderPickerDialog({
+  title = 'בחר תיקייה לשיחה חדשה',
   browser,
   isLoading,
   error,
@@ -7298,6 +7509,7 @@ function FolderPickerDialog({
   onSelectCurrent,
   onSelectFolder,
 }: {
+  title?: string;
   browser: CodexFolderBrowseResult | null;
   isLoading: boolean;
   error: string | null;
@@ -7332,7 +7544,7 @@ function FolderPickerDialog({
                 Folder Picker
               </div>
               <div className="mt-1 text-lg font-semibold text-slate-800">
-                בחר תיקייה לשיחה חדשה
+                {title}
               </div>
               {browser && (
                 <div className="mt-1 truncate text-xs text-slate-500" dir="ltr" title={browser.currentPath}>
@@ -11739,6 +11951,7 @@ function ModePickerDialog({
   selectedActionRestriction,
   selectedBrowserMode,
   selectedPersonalChromeMode,
+  selectedPhoneMode,
   selectedProjectMode,
   selectedConversationSearchMode,
   selectedDesignMode,
@@ -11752,6 +11965,7 @@ function ModePickerDialog({
   onOpenActionRestriction,
   onOpenBrowserMode,
   onOpenPersonalChromeMode,
+  onOpenPhoneMode,
   onOpenProjectMode,
   onOpenConversationSearchMode,
   onOpenDesignMode,
@@ -11767,6 +11981,7 @@ function ModePickerDialog({
   selectedActionRestriction: CodexSessionActionRestriction | null;
   selectedBrowserMode: CodexSessionBrowserMode;
   selectedPersonalChromeMode: CodexSessionPersonalChromeMode;
+  selectedPhoneMode: CodexSessionPhoneMode;
   selectedProjectMode: CodexSessionProjectMode;
   selectedConversationSearchMode: CodexSessionConversationSearchMode;
   selectedDesignMode: CodexSessionDesignMode;
@@ -11780,6 +11995,7 @@ function ModePickerDialog({
   onOpenActionRestriction: () => void;
   onOpenBrowserMode: () => void;
   onOpenPersonalChromeMode: () => void;
+  onOpenPhoneMode: () => void;
   onOpenProjectMode: () => void;
   onOpenConversationSearchMode: () => void;
   onOpenDesignMode: () => void;
@@ -12047,6 +12263,30 @@ function ModePickerDialog({
             <div className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-full', selectedPersonalChromeMode.enabled ? 'bg-indigo-100 text-indigo-700' : 'bg-white text-indigo-500')}>
               <Chrome className="h-4 w-4" />
             </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenPhoneMode}
+            disabled={currentProvider !== 'codex'}
+            className={cn(
+              'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
+              selectedPhoneMode.enabled
+                ? 'border-teal-200 bg-teal-50/80'
+                : 'border-slate-100 bg-slate-50/80 hover:border-teal-200 hover:bg-teal-50/50',
+              currentProvider !== 'codex' && 'cursor-not-allowed opacity-60'
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-800">שליטה בטלפון</div>
+                {selectedPhoneMode.enabled && <span className="rounded-full bg-teal-600 px-2 py-0.5 text-[10px] font-medium text-white">פעיל</span>}
+                <span className="rounded-full bg-white/90 px-2 py-0.5 text-[10px] font-medium text-slate-500">Reapre MCP</span>
+              </div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">שליטה ב־Android האישי, אבחון חי וחיפוש בארכיון השיחות והתמלולים.</div>
+              <div className="mt-2 text-[11px] leading-5 text-slate-400">{selectedPhoneMode.enabled ? `${selectedPhoneMode.accessPolicy === 'free' ? 'גישה חופשית' : 'גישה זהירה'} · ${selectedPhoneMode.includeCallArchive ? 'ארכיון שיחות פעיל' : 'ללא ארכיון'}` : currentProvider === 'codex' ? 'בחר מדיניות גישה והפעל לסשן.' : 'זמין רק כאשר הפרופיל הפעיל הוא Codex.'}</div>
+            </div>
+            <div className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-full', selectedPhoneMode.enabled ? 'bg-teal-100 text-teal-700' : 'bg-white text-teal-600')}><Smartphone className="h-4 w-4" /></div>
           </button>
 
           <button
@@ -13875,7 +14115,9 @@ export function CodexMobileApp() {
   const initialSessionRouteRef = useRef<SessionRoute | null>(readSessionRoute());
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [servers, setServers] = useState<CodeAiServerSummary[]>([]);
-  const [serverId, setServerId] = useState(readStoredServerId);
+  const [serverId, setServerId] = useState(
+    () => initialSessionRouteRef.current?.serverId || readStoredServerId()
+  );
   const [isServerSwitching, setIsServerSwitching] = useState(false);
   const [profiles, setProfiles] = useState<CodexProfile[]>([]);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(readWorkspaceMode);
@@ -13895,6 +14137,9 @@ export function CodexMobileApp() {
   const [markedSessionIdsForCopy, setMarkedSessionIdsForCopy] = useState<string[]>([]);
   const [isCopyingSessions, setIsCopyingSessions] = useState(false);
   const [sessionCopyNotice, setSessionCopyNotice] = useState<string | null>(null);
+  const [workspaceMoveTarget, setWorkspaceMoveTarget] = useState<WorkspaceMoveTarget | null>(null);
+  const [isMovingWorkspace, setIsMovingWorkspace] = useState(false);
+  const [workspaceMoveNotice, setWorkspaceMoveNotice] = useState<string | null>(null);
   const [sessionCompletionToast, setSessionCompletionToast] = useState<{
     queueItemId: string;
     sessionId: string | null;
@@ -13925,6 +14170,7 @@ export function CodexMobileApp() {
   const [isProjectModeDialogOpen, setIsProjectModeDialogOpen] = useState(false);
   const [isConversationSearchModeDialogOpen, setIsConversationSearchModeDialogOpen] = useState(false);
   const [isPersonalChromeModeDialogOpen, setIsPersonalChromeModeDialogOpen] = useState(false);
+  const [isPhoneModeDialogOpen, setIsPhoneModeDialogOpen] = useState(false);
   const [isAgentSessionDialogOpen, setIsAgentSessionDialogOpen] = useState(false);
   const [isTaskBoardOpen, setIsTaskBoardOpen] = useState(false);
   const [isSessionTaskDialogOpen, setIsSessionTaskDialogOpen] = useState(false);
@@ -13994,6 +14240,7 @@ export function CodexMobileApp() {
   const [sessionPersonalChromeMode, setSessionPersonalChromeMode] = useState<CodexSessionPersonalChromeMode>(
     createEmptySessionPersonalChromeMode()
   );
+  const [sessionPhoneMode, setSessionPhoneMode] = useState<CodexSessionPhoneMode>(createEmptySessionPhoneMode());
   const [instructionDraft, setInstructionDraft] = useState('');
   const [projectAnchors, setProjectAnchors] = useState<CodexProjectAnchor[]>([]);
   const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
@@ -14013,6 +14260,7 @@ export function CodexMobileApp() {
   const [isSessionProjectModeLoading, setIsSessionProjectModeLoading] = useState(false);
   const [isSessionConversationSearchModeLoading, setIsSessionConversationSearchModeLoading] = useState(false);
   const [isSessionPersonalChromeModeLoading, setIsSessionPersonalChromeModeLoading] = useState(false);
+  const [isSessionPhoneModeLoading, setIsSessionPhoneModeLoading] = useState(false);
   const [isSessionContextSelectionSaving, setIsSessionContextSelectionSaving] = useState(false);
   const [isSessionBrowserModeSaving, setIsSessionBrowserModeSaving] = useState(false);
   const [isSessionDesignModeSaving, setIsSessionDesignModeSaving] = useState(false);
@@ -14020,6 +14268,7 @@ export function CodexMobileApp() {
   const [isSessionProjectModeSaving, setIsSessionProjectModeSaving] = useState(false);
   const [isSessionConversationSearchModeSaving, setIsSessionConversationSearchModeSaving] = useState(false);
   const [isSessionPersonalChromeModeSaving, setIsSessionPersonalChromeModeSaving] = useState(false);
+  const [isSessionPhoneModeSaving, setIsSessionPhoneModeSaving] = useState(false);
   const [isBrowserViewerLoading, setIsBrowserViewerLoading] = useState(false);
   const [isProjectAnchorsLoading, setIsProjectAnchorsLoading] = useState(false);
   const [isUnifiedSkillsLoading, setIsUnifiedSkillsLoading] = useState(false);
@@ -14051,6 +14300,8 @@ export function CodexMobileApp() {
   const [projectModeDraft, setProjectModeDraft] = useState<CodexSessionProjectMode>(createEmptySessionProjectMode());
   const [conversationSearchModeDraft, setConversationSearchModeDraft] = useState<CodexSessionConversationSearchMode>(createEmptySessionConversationSearchMode());
   const [personalChromeModeDraft, setPersonalChromeModeDraft] = useState<CodexSessionPersonalChromeMode>(createEmptySessionPersonalChromeMode());
+  const [phoneModeDraft, setPhoneModeDraft] = useState<CodexSessionPhoneMode>(createEmptySessionPhoneMode());
+  const [phoneModeStatus, setPhoneModeStatus] = useState<PhoneModeStatusValue | null>(null);
   const [personalChromeDevices, setPersonalChromeDevices] = useState<PersonalChromeDeviceValue[]>([]);
   const [personalChromePairing, setPersonalChromePairing] = useState<PersonalChromePairingValue | null>(null);
   const [personalChromeError, setPersonalChromeError] = useState<string | null>(null);
@@ -14185,6 +14436,7 @@ export function CodexMobileApp() {
   const latestSessionProjectModeLoadTokenRef = useRef(0);
   const latestSessionConversationSearchModeLoadTokenRef = useRef(0);
   const latestSessionPersonalChromeModeLoadTokenRef = useRef(0);
+  const latestSessionPhoneModeLoadTokenRef = useRef(0);
   const extensionEnrollmentBootstrapRef = useRef<{
     key: string;
     state: 'pending' | 'completed' | 'failed';
@@ -14203,7 +14455,6 @@ export function CodexMobileApp() {
   const activeProfileRef = useRef(profileId);
   const activeSelectedSessionIdRef = useRef<string | null>(selectedSessionId);
   const selectedSessionRef = useRef<CodexSessionDetail | null>(selectedSession);
-  const queueTerminalStatusHydratedRef = useRef(false);
   const queueStatusByIdRef = useRef<Record<string, CodexQueueServerItem['status']>>({});
   const sessionCompletionToastTimerRef = useRef<number | null>(null);
   const isTranscriptNearBottomRef = useRef(true);
@@ -14316,6 +14567,45 @@ export function CodexMobileApp() {
 
     return item.queueKey === currentQueueKey;
   })), [currentQueueKey, queueItems, selectedSessionId]);
+  const latestConversationQueueItem = useMemo(() => {
+    const relatedItems = queueItems.filter((item) => {
+      if (selectedSessionId) {
+        return item.sessionId === selectedSessionId || item.queueKey === selectedSessionId;
+      }
+      return item.queueKey === currentQueueKey;
+    });
+    return relatedItems.sort((left, right) => {
+      const leftTime = new Date(left.completedAt || left.updatedAt || left.createdAt).getTime();
+      const rightTime = new Date(right.completedAt || right.updatedAt || right.createdAt).getTime();
+      return rightTime - leftTime;
+    })[0] || null;
+  }, [currentQueueKey, queueItems, selectedSessionId]);
+  const interruptedQueueItem = latestConversationQueueItem
+    && (latestConversationQueueItem.status === 'failed' || latestConversationQueueItem.status === 'cancelled')
+    ? latestConversationQueueItem
+    : null;
+  const latestAbortedTimelineEntryId = useMemo(() => {
+    const timeline = selectedSession?.timeline || [];
+    let latestFinalIndex = -1;
+    let latestAbortedIndex = -1;
+    for (let index = 0; index < timeline.length; index += 1) {
+      const entry = timeline[index];
+      if (entry.entryType === 'message' && entry.role === 'assistant' && entry.kind === 'final') {
+        latestFinalIndex = index;
+      }
+      if (entry.entryType === 'status' && entry.status === 'aborted') {
+        latestAbortedIndex = index;
+      }
+    }
+    return latestAbortedIndex > latestFinalIndex
+      ? timeline[latestAbortedIndex]?.id || null
+      : null;
+  }, [selectedSession?.timeline]);
+  const canContinueInterruptedSession = Boolean(
+    selectedSessionId
+    && currentSessionActiveQueueCount === 0
+    && (interruptedQueueItem || latestAbortedTimelineEntryId)
+  );
   const stopScheduleDialogItem = stopScheduleTarget
     ? queueItems.find((item) => item.id === stopScheduleTarget.id) || stopScheduleTarget
     : null;
@@ -14588,7 +14878,11 @@ export function CodexMobileApp() {
   }, []);
 
   useEffect(() => {
-    const nextStatuses: Record<string, CodexQueueServerItem['status']> = {};
+    const observation = observeQueueStatusTransitions(
+      queueStatusByIdRef.current,
+      queueItems,
+    );
+    queueStatusByIdRef.current = observation.nextStatuses;
     const nextToastCandidates: Array<{
       queueItemId: string;
       sessionId: string | null;
@@ -14598,20 +14892,7 @@ export function CodexMobileApp() {
       updatedAt: string;
     }> = [];
 
-    for (const item of queueItems) {
-      nextStatuses[item.id] = item.status;
-      if (!queueTerminalStatusHydratedRef.current) {
-        continue;
-      }
-      if (item.status !== 'completed' && item.status !== 'failed' && item.status !== 'cancelled') {
-        continue;
-      }
-
-      const previousStatus = queueStatusByIdRef.current[item.id];
-      if (previousStatus === item.status) {
-        continue;
-      }
-
+    for (const item of observation.newTerminalItems) {
       const linkedSession = item.sessionId ? sessionsById[item.sessionId] : null;
       const title = linkedSession?.title || item.promptPreview || 'שיחה ללא כותרת';
       const message = item.status === 'completed'
@@ -14627,13 +14908,6 @@ export function CodexMobileApp() {
         message,
         updatedAt: item.updatedAt,
       });
-    }
-
-    queueStatusByIdRef.current = nextStatuses;
-
-    if (!queueTerminalStatusHydratedRef.current) {
-      queueTerminalStatusHydratedRef.current = true;
-      return;
     }
 
     if (nextToastCandidates.length === 0) {
@@ -15370,12 +15644,15 @@ export function CodexMobileApp() {
       `/api/codex/servers${refresh ? '?refresh=1' : ''}`
     );
     const availableServers = data.servers.filter((server) => server.enabled);
+    const routeServerId = initialSessionRouteRef.current?.serverId || '';
     const storedServerId = readStoredServerId();
-    const selectedServerId = availableServers.some((server) => server.id === storedServerId)
-      ? storedServerId
-      : availableServers.some((server) => server.id === serverId)
-        ? serverId
-        : LOCAL_SERVER_ID;
+    const selectedServerId = availableServers.some((server) => server.id === routeServerId)
+      ? routeServerId
+      : availableServers.some((server) => server.id === storedServerId)
+        ? storedServerId
+        : availableServers.some((server) => server.id === serverId)
+          ? serverId
+          : LOCAL_SERVER_ID;
     setServers(data.servers);
     return {
       servers: data.servers,
@@ -15390,6 +15667,7 @@ export function CodexMobileApp() {
       activeServerRef.current = loaded.selectedServerId;
       setActiveCodeAiServerId(loaded.selectedServerId);
       writeStoredServerId(loaded.selectedServerId);
+      writeCurrentServerRoute(loaded.selectedServerId);
       setServerId(loaded.selectedServerId);
       await loadProfiles(loaded.selectedServerId);
     } catch (loadError: any) {
@@ -15503,9 +15781,53 @@ export function CodexMobileApp() {
     const preferredLaunchPath = getClientPathCollectionRoot(
       effectiveDraftCwd || selectedSession?.cwd || currentProfile?.workspaceCwd || null
     );
+    setWorkspaceMoveTarget(null);
     setIsFolderPickerOpen(true);
     setFolderPathInput(preferredLaunchPath || effectiveDraftCwd || selectedSession?.cwd || currentProfile?.workspaceCwd || '');
     void loadFolderPicker(preferredLaunchPath, { resetHistory: true });
+  }
+
+  function openWorkspaceMovePicker(target: WorkspaceMoveTarget) {
+    const preferredLaunchPath = getClientPathCollectionRoot(target.cwd || currentProfile?.workspaceCwd || null)
+      || target.cwd
+      || currentProfile?.workspaceCwd
+      || null;
+    setError(null);
+    setWorkspaceMoveNotice(null);
+    setWorkspaceMoveTarget(target);
+    setIsFolderPickerOpen(true);
+    setFolderPathInput(preferredLaunchPath || '');
+    void loadFolderPicker(preferredLaunchPath, { resetHistory: true });
+  }
+
+  function beginSessionWorkspaceMove(sessionId: string) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session) {
+      setError('השיחה שנבחרה לא נמצאה ברשימה.');
+      return;
+    }
+    openWorkspaceMovePicker({
+      kind: 'session',
+      sessionId: session.id,
+      label: session.title,
+      cwd: session.cwd,
+    });
+  }
+
+  function beginTopicWorkspaceMove(topicId: string) {
+    const topicSessions = sessions.filter((session) => session.topic?.id === topicId);
+    const topic = topicSessions[0]?.topic;
+    if (!topic) {
+      setError('הנושא שנבחר לא נמצא ברשימה.');
+      return;
+    }
+    openWorkspaceMovePicker({
+      kind: 'topic',
+      topicId: topic.id,
+      label: topic.name,
+      cwd: topic.cwd,
+      sessionCount: topicSessions.length,
+    });
   }
 
   function handleChooseFolderFromSidebar() {
@@ -15542,7 +15864,50 @@ export function CodexMobileApp() {
     void loadFolderPicker(nextPath);
   }
 
-  function selectFolderForDraft(folderPath: string) {
+  async function selectFolder(folderPath: string) {
+    const moveTarget = workspaceMoveTarget;
+    if (moveTarget) {
+      if (moveTarget.cwd === folderPath) {
+        setFolderBrowserError('זהו כבר הנתיב הפעיל. בחר תיקייה אחרת.');
+        return;
+      }
+      setIsFolderPickerOpen(false);
+      setIsMovingWorkspace(true);
+      setError(null);
+      try {
+        const response = moveTarget.kind === 'session'
+          ? await moveSessionToWorkspaceRequest(profileId, moveTarget.sessionId, folderPath)
+          : await moveTopicToWorkspaceRequest(profileId, moveTarget.topicId, folderPath);
+        const movedCount = response.affectedSessionIds.length;
+        const queuedCount = response.queueItemIds.length;
+        const failedAnnouncements = response.announcementErrors.length;
+        const targetLabel = moveTarget.kind === 'session'
+          ? `השיחה „${moveTarget.label}” הועברה`
+          : `הנושא „${moveTarget.label}” וכל ${movedCount} השיחות שבו הועברו`;
+        setWorkspaceMoveNotice([
+          `${targetLabel} אל ${response.cwd}.`,
+          queuedCount > 0 ? `נשלחו ${queuedCount} הודעות מעבר לסשנים.` : '',
+          failedAnnouncements > 0 ? `${failedAnnouncements} הודעות לא נשלחו; פרטי השגיאה זמינים בראש המסך.` : '',
+        ].filter(Boolean).join(' '));
+        if (failedAnnouncements > 0) {
+          setError(response.announcementErrors.map((entry) => entry.reason).join(' • '));
+        }
+        await Promise.all([
+          loadSessionsOnly(profileId, { silent: true }),
+          loadQueueItems(profileId, { silent: true }),
+        ]);
+        if (selectedSessionId && response.affectedSessionIds.includes(selectedSessionId)) {
+          await loadSessionDetail(selectedSessionId, profileId, { silent: true });
+        }
+      } catch (moveError: any) {
+        setError(moveError.message || 'העברת השיחה לתיקייה אחרת נכשלה.');
+      } finally {
+        setWorkspaceMoveTarget(null);
+        setIsMovingWorkspace(false);
+      }
+      return;
+    }
+
     setDraftCwd(folderPath);
     setIsFolderPickerOpen(false);
   }
@@ -16463,6 +16828,11 @@ export function CodexMobileApp() {
     setSessionPersonalChromeMode(emptyPersonalChromeMode);
     setPersonalChromeModeDraft(emptyPersonalChromeMode);
     setIsPersonalChromeModeDialogOpen(false);
+    const emptyPhoneMode = createEmptySessionPhoneMode();
+    setSessionPhoneMode(emptyPhoneMode);
+    setPhoneModeDraft(emptyPhoneMode);
+    setPhoneModeStatus(null);
+    setIsPhoneModeDialogOpen(false);
     setSessionFinalNotification(createDefaultSessionFinalNotificationPreference());
     setIsFinalNotificationDialogOpen(false);
     clearDraftAttachments();
@@ -16590,6 +16960,11 @@ export function CodexMobileApp() {
     setPersonalChromePairing(null);
     setPersonalChromeError(null);
     setIsPersonalChromeModeDialogOpen(false);
+    const emptyPhoneMode = createEmptySessionPhoneMode();
+    setSessionPhoneMode(emptyPhoneMode);
+    setPhoneModeDraft(emptyPhoneMode);
+    setPhoneModeStatus(null);
+    setIsPhoneModeDialogOpen(false);
     setActiveToolEntry(null);
     closeFilePreview();
     clearDraftAttachments();
@@ -16610,6 +16985,7 @@ export function CodexMobileApp() {
     activeServerRef.current = normalizedServerId;
     setActiveCodeAiServerId(normalizedServerId);
     writeStoredServerId(normalizedServerId);
+    writeCurrentServerRoute(normalizedServerId);
     setServerId(normalizedServerId);
     resetWorkspaceForServerChange();
 
@@ -18821,6 +19197,60 @@ export function CodexMobileApp() {
     }
   }
 
+  async function loadCurrentSessionPhoneMode(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
+    if (!nextProfileId || !nextSessionKey) {
+      const emptyMode = createEmptySessionPhoneMode();
+      setSessionPhoneMode(emptyMode);
+      setPhoneModeDraft(emptyMode);
+      return;
+    }
+    const requestToken = ++latestSessionPhoneModeLoadTokenRef.current;
+    setIsSessionPhoneModeLoading(true);
+    try {
+      const mode = await fetchSessionPhoneMode(nextProfileId, nextSessionKey);
+      if (requestToken !== latestSessionPhoneModeLoadTokenRef.current) return;
+      setSessionPhoneMode(mode);
+      setPhoneModeDraft(mode);
+    } catch (phoneModeError: any) {
+      if (requestToken === latestSessionPhoneModeLoadTokenRef.current) {
+        const emptyMode = createEmptySessionPhoneMode();
+        setSessionPhoneMode(emptyMode);
+        setPhoneModeDraft(emptyMode);
+        setError(phoneModeError.message || 'Failed to load phone mode');
+      }
+    } finally {
+      if (requestToken === latestSessionPhoneModeLoadTokenRef.current) setIsSessionPhoneModeLoading(false);
+    }
+  }
+
+  async function persistSessionPhoneMode(nextMode: CodexSessionPhoneMode): Promise<boolean> {
+    if (!profileId || !currentQueueKey) return false;
+    setIsSessionPhoneModeSaving(true);
+    try {
+      const saved = await saveSessionPhoneMode(profileId, currentQueueKey, nextMode);
+      setSessionPhoneMode(saved);
+      setPhoneModeDraft(saved);
+      return true;
+    } catch (phoneModeError: any) {
+      setError(phoneModeError.message || 'Failed to save phone mode');
+      void loadCurrentSessionPhoneMode(profileId, currentQueueKey);
+      return false;
+    } finally {
+      setIsSessionPhoneModeSaving(false);
+    }
+  }
+
+  async function refreshPhoneModeStatus() {
+    setIsSessionPhoneModeLoading(true);
+    try {
+      setPhoneModeStatus(await fetchPhoneModeStatus());
+    } catch (statusError: any) {
+      setPhoneModeStatus({ connected: false, checkedAt: new Date().toISOString(), deviceName: null, batteryPercent: null, charging: null, error: statusError.message || 'בדיקת הטלפון נכשלה' });
+    } finally {
+      setIsSessionPhoneModeLoading(false);
+    }
+  }
+
   function buildNextSessionContextSelection(
     overrides: Partial<CodexSessionContextSelection>
   ): CodexSessionContextSelection {
@@ -19372,6 +19802,30 @@ export function CodexMobileApp() {
     const saved = await persistSessionPersonalChromeMode({ ...personalChromeModeDraft, enabled: false });
     if (saved) {
       setIsPersonalChromeModeDialogOpen(false);
+      setIsModePickerDialogOpen(false);
+    }
+  }
+
+  function openPhoneModeDialog() {
+    setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(false);
+    setPhoneModeDraft(sessionPhoneMode);
+    setIsPhoneModeDialogOpen(true);
+    void refreshPhoneModeStatus();
+  }
+
+  async function savePhoneModeDraft() {
+    const saved = await persistSessionPhoneMode(phoneModeDraft);
+    if (saved) {
+      setIsPhoneModeDialogOpen(false);
+      setIsModePickerDialogOpen(false);
+    }
+  }
+
+  async function disablePhoneMode() {
+    const saved = await persistSessionPhoneMode({ ...phoneModeDraft, enabled: false });
+    if (saved) {
+      setIsPhoneModeDialogOpen(false);
       setIsModePickerDialogOpen(false);
     }
   }
@@ -20362,6 +20816,7 @@ export function CodexMobileApp() {
     void loadCurrentSessionProjectMode(profileId, currentQueueKey);
     void loadCurrentSessionConversationSearchMode(profileId, currentQueueKey);
     void loadCurrentSessionPersonalChromeMode(profileId, currentQueueKey);
+    void loadCurrentSessionPhoneMode(profileId, currentQueueKey);
     void loadCurrentSessionReminders(profileId, currentQueueKey);
   }, [currentQueueKey, profileId]);
 
@@ -20687,6 +21142,8 @@ export function CodexMobileApp() {
       selectedSessionCopyCount={markedSessionIdsForCopy.length}
       isCopyingSessions={isCopyingSessions}
       sessionCopyNotice={sessionCopyNotice}
+      isMovingWorkspace={isMovingWorkspace}
+      workspaceMoveNotice={workspaceMoveNotice}
       sessionTaskSummaries={sessionTaskSummaries}
       sessionSubtaskSummaries={sessionSubtaskSummaries}
       search={search}
@@ -20721,6 +21178,8 @@ export function CodexMobileApp() {
       onToggleWorkspaceMode={handleToggleWorkspaceMode}
       onToggleSessionCopyMode={toggleSessionCopyMode}
       onConfirmCopySessions={() => void handleCopyMarkedSessions()}
+      onMoveSessionToWorkspace={beginSessionWorkspaceMove}
+      onMoveTopicToWorkspace={beginTopicWorkspaceMove}
       onManageTopic={(session) => void openTopicManager(session)}
       onManageSessionTasks={openSessionTaskDialog}
       onToggleArchived={() => setShowArchived((current) => !current)}
@@ -21113,7 +21572,9 @@ export function CodexMobileApp() {
                 <StatusRow
                   key={block.entry.id}
                   entry={block.entry}
-                  onContinue={block.entry.status === 'aborted' && selectedSessionId
+                  onContinue={block.entry.id === latestAbortedTimelineEntryId
+                    && canContinueInterruptedSession
+                    && !interruptedQueueItem
                     ? () => void continueAbortedSession()
                     : undefined}
                   isContinueLoading={isContinuingAbortedSession}
@@ -21144,6 +21605,37 @@ export function CodexMobileApp() {
               />
             );
           })}
+
+          {canContinueInterruptedSession && interruptedQueueItem && (
+            <div className="rounded-[1.25rem] border border-amber-200 bg-amber-50/80 px-4 py-4 text-right shadow-sm" dir="rtl">
+              <div className="flex items-start gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+                  <Pause className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-semibold text-amber-950">
+                    {interruptedQueueItem.status === 'failed' ? 'המשימה נקטעה לפני שהושלמה' : 'המשימה הופסקה לפני שהושלמה'}
+                  </div>
+                  {interruptedQueueItem.error && (
+                    <div className="mt-1 line-clamp-3 text-xs leading-5 text-amber-800">
+                      {interruptedQueueItem.error}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void continueAbortedSession()}
+                    disabled={isContinuingAbortedSession || isSending}
+                    className="mt-3 inline-flex h-10 items-center gap-2 rounded-full bg-amber-700 px-4 text-xs font-semibold text-white transition hover:bg-amber-800 active:scale-[0.98] disabled:opacity-50"
+                  >
+                    {isContinuingAbortedSession
+                      ? <Loader2 className="h-4 w-4 animate-spin" />
+                      : <RotateCcw className="h-4 w-4" />}
+                    <span>{isContinuingAbortedSession ? 'ממשיך את המשימה…' : 'המשך במשימה'}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {isCurrentConversationRunning && !isSending && (
             <div className="flex w-full justify-end px-1 py-1">
@@ -21288,7 +21780,7 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionProjectMode.enabled || sessionConversationSearchMode.enabled || sessionDesignMode.enabled || sessionUxMode.enabled || sessionPersonalChromeMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionProjectModeLoading || isSessionConversationSearchModeLoading || isSessionDesignModeLoading || isSessionUxModeLoading || isSessionPersonalChromeModeLoading) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionProjectMode.enabled || sessionConversationSearchMode.enabled || sessionDesignMode.enabled || sessionUxMode.enabled || sessionPersonalChromeMode.enabled || sessionPhoneMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionProjectModeLoading || isSessionConversationSearchModeLoading || isSessionDesignModeLoading || isSessionUxModeLoading || isSessionPersonalChromeModeLoading || isSessionPhoneModeLoading) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
                 {isProfessionalModeSelected && (
                   <button
@@ -21340,6 +21832,12 @@ export function CodexMobileApp() {
                   >
                     <Chrome className="h-3.5 w-3.5" />
                     <span className="truncate">Chrome אישי · {sessionPersonalChromeMode.deviceName || 'מכשיר מזווג'} · {getPersonalChromeApprovalPolicyLabel(sessionPersonalChromeMode.approvalPolicy)}</span>
+                  </button>
+                )}
+                {sessionPhoneMode.enabled && (
+                  <button type="button" onClick={openPhoneModeDialog} className="inline-flex max-w-full items-center gap-1 rounded-full border border-teal-200 bg-teal-50 px-3 py-1.5 text-[11px] font-medium text-teal-700 transition hover:bg-teal-100">
+                    <Smartphone className="h-3.5 w-3.5" />
+                    <span className="truncate">טלפון · {sessionPhoneMode.accessPolicy === 'free' ? 'גישה חופשית' : 'גישה זהירה'}</span>
                   </button>
                 )}
                 {sessionProjectMode.enabled && (
@@ -22906,6 +23404,7 @@ export function CodexMobileApp() {
         selectedActionRestriction={selectedActionRestriction}
         selectedBrowserMode={sessionBrowserMode}
         selectedPersonalChromeMode={sessionPersonalChromeMode}
+        selectedPhoneMode={sessionPhoneMode}
         selectedProjectMode={sessionProjectMode}
         selectedConversationSearchMode={sessionConversationSearchMode}
         selectedDesignMode={sessionDesignMode}
@@ -22919,6 +23418,7 @@ export function CodexMobileApp() {
         onOpenActionRestriction={openActionRestrictionDialog}
         onOpenBrowserMode={openBrowserModeDialog}
         onOpenPersonalChromeMode={openPersonalChromeModeDialog}
+        onOpenPhoneMode={openPhoneModeDialog}
         onOpenProjectMode={openProjectModeDialog}
         onOpenConversationSearchMode={openConversationSearchModeDialog}
         onOpenDesignMode={openDesignModeDialog}
@@ -23044,6 +23544,20 @@ export function CodexMobileApp() {
         onRevokeDevice={(deviceId) => void revokePersonalChromeDeviceFromDialog(deviceId)}
         onSave={() => void savePersonalChromeModeDraft()}
         onDisable={() => void disablePersonalChromeMode()}
+      />
+
+      <PhoneModeDialog
+        isOpen={isPhoneModeDialogOpen}
+        provider={currentProfile?.provider || null}
+        value={phoneModeDraft}
+        status={phoneModeStatus}
+        isLoading={isSessionPhoneModeLoading}
+        isSaving={isSessionPhoneModeSaving}
+        onClose={() => { setIsPhoneModeDialogOpen(false); setPhoneModeDraft(sessionPhoneMode); }}
+        onChange={setPhoneModeDraft}
+        onRefresh={() => void refreshPhoneModeStatus()}
+        onSave={() => void savePhoneModeDraft()}
+        onDisable={() => void disablePhoneMode()}
       />
 
       <BrowserViewerDialog
@@ -23298,22 +23812,30 @@ export function CodexMobileApp() {
 
       {isFolderPickerOpen && (
         <FolderPickerDialog
+          title={workspaceMoveTarget
+            ? workspaceMoveTarget.kind === 'session'
+              ? `העבר את השיחה „${workspaceMoveTarget.label}” לתיקייה`
+              : `העבר את הנושא „${workspaceMoveTarget.label}” וכל השיחות`
+            : 'בחר תיקייה לשיחה חדשה'}
           browser={folderBrowser}
           isLoading={isFolderBrowserLoading}
           error={folderBrowserError}
           pathValue={folderPathInput}
           canGoBack={folderBackStackRef.current.length > 0}
           canGoForward={folderForwardStackRef.current.length > 0}
-          onClose={() => setIsFolderPickerOpen(false)}
+          onClose={() => {
+            setIsFolderPickerOpen(false);
+            setWorkspaceMoveTarget(null);
+          }}
           onPathChange={setFolderPathInput}
           onOpenPath={openFolderPathFromInput}
           onNavigateBack={navigateFolderPickerBack}
           onNavigateForward={navigateFolderPickerForward}
           onNavigateTo={(path) => void loadFolderPicker(path, { pushHistory: true })}
-          onSelectFolder={selectFolderForDraft}
+          onSelectFolder={(path) => void selectFolder(path)}
           onSelectCurrent={() => {
             if (folderBrowser?.currentPath) {
-              selectFolderForDraft(folderBrowser.currentPath);
+              void selectFolder(folderBrowser.currentPath);
             }
           }}
         />
@@ -23386,19 +23908,10 @@ export function CodexMobileApp() {
       />
 
       {sessionCompletionToast && (
-        <button
-          type="button"
-          onClick={() => {
-            const sessionId = sessionCompletionToast.sessionId;
-            setSessionCompletionToast(null);
-            if (sessionCompletionToastTimerRef.current) {
-              window.clearTimeout(sessionCompletionToastTimerRef.current);
-              sessionCompletionToastTimerRef.current = null;
-            }
-            if (sessionId) {
-              void handleOpenSession(sessionId);
-            }
-          }}
+        <div
+          role="status"
+          aria-live="polite"
+          dir="rtl"
           className={cn(
             'fixed inset-x-0 top-[max(0.9rem,env(safe-area-inset-top))] z-[82] mx-auto flex w-[min(92vw,24rem)] items-center justify-between gap-3 rounded-full border px-4 py-3 text-right shadow-[0_16px_42px_-26px_rgba(15,23,42,0.28)] backdrop-blur-sm transition hover:shadow-[0_18px_48px_-24px_rgba(15,23,42,0.34)]',
             sessionCompletionToast.status === 'completed'
@@ -23408,21 +23921,53 @@ export function CodexMobileApp() {
                 : 'border-amber-100 bg-white/92 text-amber-700'
           )}
         >
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[11px] font-semibold leading-5">{sessionCompletionToast.title}</div>
-            <div className="truncate text-[11px] leading-5 opacity-80">{sessionCompletionToast.message}</div>
-          </div>
-          <div className={cn(
-            'shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold',
-            sessionCompletionToast.status === 'completed'
-              ? 'bg-emerald-50 text-emerald-700'
-              : sessionCompletionToast.status === 'failed'
-                ? 'bg-rose-50 text-rose-700'
-                : 'bg-amber-50 text-amber-700'
-          )}>
-            פתח
-          </div>
-        </button>
+          <button
+            type="button"
+            onClick={() => {
+              const sessionId = sessionCompletionToast.sessionId;
+              setSessionCompletionToast(null);
+              if (sessionCompletionToastTimerRef.current) {
+                window.clearTimeout(sessionCompletionToastTimerRef.current);
+                sessionCompletionToastTimerRef.current = null;
+              }
+              if (sessionId) {
+                void handleOpenSession(sessionId);
+              }
+            }}
+            className="flex min-w-0 flex-1 items-center justify-between gap-3 text-right"
+            aria-label={`פתח את השיחה: ${sessionCompletionToast.title}`}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[11px] font-semibold leading-5">{sessionCompletionToast.title}</div>
+              <div className="truncate text-[11px] leading-5 opacity-80">{sessionCompletionToast.message}</div>
+            </div>
+            <div className={cn(
+              'shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold',
+              sessionCompletionToast.status === 'completed'
+                ? 'bg-emerald-50 text-emerald-700'
+                : sessionCompletionToast.status === 'failed'
+                  ? 'bg-rose-50 text-rose-700'
+                  : 'bg-amber-50 text-amber-700'
+            )}>
+              פתח
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSessionCompletionToast(null);
+              if (sessionCompletionToastTimerRef.current) {
+                window.clearTimeout(sessionCompletionToastTimerRef.current);
+                sessionCompletionToastTimerRef.current = null;
+              }
+            }}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100/80 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
+            aria-label="סגור התראה"
+            title="סגור התראה"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
       )}
 
       {pendingDeleteAgentSession && (

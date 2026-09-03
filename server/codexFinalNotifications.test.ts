@@ -5,6 +5,7 @@ import test from 'node:test';
 import { gunzipSync } from 'node:zlib';
 import {
   buildNtfyRequest,
+  buildSessionOutcomeMessage,
   copySessionFinalNotificationPreference,
   deleteSessionFinalNotificationPreference,
   deliverNtfyRequestForTest,
@@ -19,14 +20,25 @@ import {
 const TEST_ENDPOINT = 'https://ntfy.test/code-ai-test';
 const TEST_ORIGIN = 'https://code-ai.test';
 
-function buildRequest(finalMessage: string) {
+function buildRequest(
+  finalMessage: string,
+  options: {
+    outcome?: 'completed' | 'failed' | 'cancelled' | 'interrupted';
+    serverId?: string;
+    serverLabel?: string;
+    sessionId?: string;
+  } = {},
+) {
   return buildNtfyRequest({
     endpoint: TEST_ENDPOINT,
     sequenceId: 'sequence-1',
     profileId: 'developer',
-    sessionId: 'session-123',
+    sessionId: options.sessionId || 'session-123',
     sessionTitle: 'בדיקת מערכת',
     provider: 'codex',
+    outcome: options.outcome,
+    serverId: options.serverId,
+    serverLabel: options.serverLabel,
     finalMessage,
     publicOrigin: TEST_ORIGIN,
   });
@@ -69,6 +81,41 @@ test('short final responses are sent as Markdown notification bodies', () => {
   assert.equal(request.headers.Click, `${TEST_ORIGIN}/session/developer/session-123`);
   assert.equal(request.headers['X-Sequence-ID'], 'sequence-1');
   assert.match(request.headers.Title, /^=\?UTF-8\?B\?/u);
+});
+
+test('interrupted runs use a high-priority warning and reopen the selected remote server', () => {
+  const message = buildSessionOutcomeMessage(
+    'interrupted',
+    'Interrupted by server restart before completion.',
+    'BEAM 10G',
+  );
+  const request = buildRequest(message, {
+    outcome: 'interrupted',
+    serverId: 'beam-10g',
+    serverLabel: 'BEAM 10G',
+  });
+
+  assert.equal(request.method, 'POST');
+  assert.equal(request.headers.Tags, 'warning,robot_face');
+  assert.equal(request.headers.Priority, 'high');
+  assert.equal(request.headers.Click, `${TEST_ORIGIN}/session/developer/session-123?server=beam-10g`);
+  assert.match(Buffer.from(request.body).toString('utf8'), /המשימה נקטעה/u);
+  assert.match(Buffer.from(request.body).toString('utf8'), /BEAM 10G/u);
+  assert.match(Buffer.from(request.body).toString('utf8'), /המשך במשימה/u);
+});
+
+test('cancelled draft tasks link back to their draft conversation', () => {
+  const request = buildRequest('המשימה הופסקה.', {
+    outcome: 'cancelled',
+    serverId: 'personal-windows',
+    sessionId: 'draft:phone-task',
+  });
+
+  assert.equal(request.headers.Tags, 'stop_sign,robot_face');
+  assert.equal(
+    request.headers.Click,
+    `${TEST_ORIGIN}/session/developer/draft/draft%3Aphone-task?server=personal-windows`,
+  );
 });
 
 test('long final responses are preserved in a text attachment without truncation', () => {

@@ -84,14 +84,34 @@ import type { CodexSessionBrowserMode } from './codexBrowserMode.js';
 import type { CodexSessionDesignMode } from './codexDesignMode.js';
 import type { CodexSessionUxMode } from './codexUxMode.js';
 import type { CodexSessionPersonalChromeMode } from './codexPersonalChromeMode.js';
-import { enqueueFinalResponseNotification } from './codexFinalNotifications.js';
+import type { CodexSessionPhoneMode } from './codexPhoneMode.js';
+import {
+  enqueueFinalResponseNotification,
+  enqueueSessionOutcomeNotification,
+  type SessionNotificationOutcome,
+} from './codexFinalNotifications.js';
 import type { ProviderSessionStartedHandler } from './providerProcessLifecycle.js';
+import {
+  getSessionWorkspaceMap,
+  getSessionWorkspaceOverride,
+} from './codexSessionWorkspaces.js';
 
 export type AgentProfile = CodexProfile;
 
 export interface AgentRunResult {
   sessionId: string;
   finalMessage: string;
+  sessionTitle: string | null;
+}
+
+function classifyFailedRunNotificationOutcome(error: unknown): Exclude<SessionNotificationOutcome, 'completed'> {
+  if (isAgentRunCancelledError(error)) {
+    return 'cancelled';
+  }
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /\b(abort(?:ed)?|interrupt(?:ed)?|terminat(?:ed|ion)|disconnect(?:ed)?|closed?|restart)\b/iu.test(message)
+    ? 'interrupted'
+    : 'failed';
 }
 
 function resolveLatestAssistantEntryId(
@@ -209,14 +229,19 @@ export async function listAgentSessions(
 ): Promise<CodexSessionSummary[]> {
   const profile = resolveProfile(profileId);
   await prepareInternalProfileHome(profile);
+  let sessions: CodexSessionSummary[];
   if (profile.provider === 'claude') {
-    return listClaudeSessions(profile.id, query, limit, options?.allowExtendedLimit);
-  }
-  if (profile.provider === 'gemini') {
-    return listGeminiSessions(profile.id, query, limit, options?.allowExtendedLimit);
+    sessions = await listClaudeSessions(profile.id, query, limit, options?.allowExtendedLimit);
+  } else if (profile.provider === 'gemini') {
+    sessions = await listGeminiSessions(profile.id, query, limit, options?.allowExtendedLimit);
+  } else {
+    sessions = await listCodexSessions(profile.id, query, limit, options?.allowExtendedLimit);
   }
 
-  return listCodexSessions(profile.id, query, limit, options?.allowExtendedLimit);
+  const workspaceMap = await getSessionWorkspaceMap(profile.id);
+  return sessions.map((session) => workspaceMap[session.id]
+    ? { ...session, cwd: workspaceMap[session.id]!.cwd }
+    : session);
 }
 
 export async function getAgentSessionDetail(
@@ -230,14 +255,17 @@ export async function getAgentSessionDetail(
 ): Promise<CodexSessionDetail> {
   const profile = resolveProfile(profileId);
   await prepareInternalProfileHome(profile);
+  let session: CodexSessionDetail;
   if (profile.provider === 'claude') {
-    return getClaudeSessionDetail(sessionId, profile.id, options);
-  }
-  if (profile.provider === 'gemini') {
-    return getGeminiSessionDetail(sessionId, profile.id, options);
+    session = await getClaudeSessionDetail(sessionId, profile.id, options);
+  } else if (profile.provider === 'gemini') {
+    session = await getGeminiSessionDetail(sessionId, profile.id, options);
+  } else {
+    session = await getCodexSessionDetail(sessionId, profile.id, options);
   }
 
-  return getCodexSessionDetail(sessionId, profile.id, options);
+  const workspaceOverride = await getSessionWorkspaceOverride(profile.id, sessionId);
+  return workspaceOverride ? { ...session, cwd: workspaceOverride.cwd } : session;
 }
 
 export async function getAgentModelCatalog(profileId?: string): Promise<CodexModelCatalog> {
@@ -376,6 +404,9 @@ export async function runAgentPrompt(
     personalChromeMode?: CodexSessionPersonalChromeMode | null;
     personalChromeModeProfileId?: string | null;
     personalChromeModeSessionKey?: string | null;
+    phoneMode?: CodexSessionPhoneMode | null;
+    phoneModeProfileId?: string | null;
+    phoneModeSessionKey?: string | null;
     designMode?: CodexSessionDesignMode | null;
     designModeProfileId?: string | null;
     designModeSessionKey?: string | null;
@@ -387,6 +418,7 @@ export async function runAgentPrompt(
       profileId?: string | null;
       sessionKey?: string | null;
       dedupeKey?: string | null;
+      deferUntilQueueTerminal?: boolean;
     };
   } = {}
 ): Promise<AgentRunResult> {
@@ -407,15 +439,23 @@ export async function runAgentPrompt(
     cwd: resolvedCwd,
     captureWholeRepo: options.actionRestriction?.enabled === true,
   }).catch(() => null);
+  let startedSessionId = sessionId?.trim() || null;
+  const providerRunOptions = {
+    ...options,
+    onSessionStarted: async (nextSessionId: string) => {
+      startedSessionId = nextSessionId;
+      await options.onSessionStarted?.(nextSessionId);
+    },
+  };
 
   try {
-    let result: AgentRunResult;
+    let result: Pick<AgentRunResult, 'sessionId' | 'finalMessage'>;
     if (profile.provider === 'claude') {
-      result = await runClaudePrompt(prompt, sessionId, profile.id, attachments, options);
+      result = await runClaudePrompt(prompt, sessionId, profile.id, attachments, providerRunOptions);
     } else if (profile.provider === 'gemini') {
-      result = await runGeminiPrompt(prompt, sessionId, profile.id, attachments, options);
+      result = await runGeminiPrompt(prompt, sessionId, profile.id, attachments, providerRunOptions);
     } else {
-      result = await runCodexPrompt(prompt, sessionId, profile.id, attachments, options);
+      result = await runCodexPrompt(prompt, sessionId, profile.id, attachments, providerRunOptions);
     }
 
     const afterDetail = await getAgentSessionDetail(result.sessionId, profile.id, { tail: 160 }).catch(() => null);
@@ -438,34 +478,79 @@ export async function runAgentPrompt(
 
     await discardSessionChangeCapture(capture);
 
-    const notificationProfileId = options.finalNotification?.profileId?.trim()
-      || options.browserModeProfileId?.trim()
-      || options.designModeProfileId?.trim()
-      || options.uxModeProfileId?.trim()
-      || profile.id;
-    const notificationSessionKey = options.finalNotification?.sessionKey?.trim()
-      || options.browserModeSessionKey?.trim()
-      || options.designModeSessionKey?.trim()
-      || options.uxModeSessionKey?.trim()
-      || sessionId
-      || result.sessionId;
-    await enqueueFinalResponseNotification({
-      profileId: notificationProfileId,
-      preferenceSessionKey: notificationSessionKey,
-      sessionId: result.sessionId,
-      sessionTitle: afterDetail?.title || null,
-      provider: profile.provider,
-      finalMessage: result.finalMessage,
-      dedupeKey: options.finalNotification?.dedupeKey?.trim()
-        || options.runId?.trim()
-        || entryId,
-    }).catch((notificationError) => {
-      console.error('❌ Failed to enqueue final-response notification:', notificationError);
-    });
+    if (!options.finalNotification?.deferUntilQueueTerminal) {
+      const notificationProfileId = options.finalNotification?.profileId?.trim()
+        || options.browserModeProfileId?.trim()
+        || options.personalChromeModeProfileId?.trim()
+        || options.phoneModeProfileId?.trim()
+        || options.designModeProfileId?.trim()
+        || options.uxModeProfileId?.trim()
+        || profile.id;
+      const notificationSessionKey = options.finalNotification?.sessionKey?.trim()
+        || options.browserModeSessionKey?.trim()
+        || options.personalChromeModeSessionKey?.trim()
+        || options.phoneModeSessionKey?.trim()
+        || options.designModeSessionKey?.trim()
+        || options.uxModeSessionKey?.trim()
+        || sessionId
+        || result.sessionId;
+      await enqueueFinalResponseNotification({
+        profileId: notificationProfileId,
+        preferenceSessionKey: notificationSessionKey,
+        sessionId: result.sessionId,
+        sessionTitle: afterDetail?.title || null,
+        provider: profile.provider,
+        finalMessage: result.finalMessage,
+        dedupeKey: options.finalNotification?.dedupeKey?.trim()
+          || options.runId?.trim()
+          || entryId,
+      }).catch((notificationError) => {
+        console.error('❌ Failed to enqueue final-response notification:', notificationError);
+      });
+    }
 
-    return result;
+    return {
+      ...result,
+      sessionTitle: afterDetail?.title || null,
+    };
   } catch (error) {
     await discardSessionChangeCapture(capture);
+    if (!options.finalNotification?.deferUntilQueueTerminal) {
+      const notificationProfileId = options.finalNotification?.profileId?.trim()
+        || options.browserModeProfileId?.trim()
+        || options.personalChromeModeProfileId?.trim()
+        || options.phoneModeProfileId?.trim()
+        || options.designModeProfileId?.trim()
+        || options.uxModeProfileId?.trim()
+        || profile.id;
+      const notificationSessionKey = options.finalNotification?.sessionKey?.trim()
+        || options.browserModeSessionKey?.trim()
+        || options.personalChromeModeSessionKey?.trim()
+        || options.phoneModeSessionKey?.trim()
+        || options.designModeSessionKey?.trim()
+        || options.uxModeSessionKey?.trim()
+        || sessionId
+        || startedSessionId;
+      const notificationSessionId = startedSessionId || sessionId || notificationSessionKey;
+      if (notificationSessionKey && notificationSessionId) {
+        const notificationDetail = startedSessionId
+          ? await getAgentSessionDetail(startedSessionId, profile.id, { tail: 1 }).catch(() => null)
+          : null;
+        await enqueueSessionOutcomeNotification({
+          profileId: notificationProfileId,
+          preferenceSessionKey: notificationSessionKey,
+          sessionId: notificationSessionId,
+          sessionTitle: notificationDetail?.title || null,
+          provider: profile.provider,
+          outcome: classifyFailedRunNotificationOutcome(error),
+          reason: error instanceof Error ? error.message : String(error || 'Unknown provider failure'),
+          dedupeKey: options.finalNotification?.dedupeKey?.trim()
+            || options.runId?.trim(),
+        }).catch((notificationError) => {
+          console.error('❌ Failed to enqueue interrupted-run notification:', notificationError);
+        });
+      }
+    }
     throw error;
   }
 }

@@ -35,6 +35,10 @@ import {
   type CodexSessionPersonalChromeMode,
 } from './codexPersonalChromeMode.js';
 import {
+  prepareCodexPhoneModeForRun,
+  type CodexSessionPhoneMode,
+} from './codexPhoneMode.js';
+import {
   buildProviderRunQueueKey,
   notifyProviderSessionStarted,
   getProviderProcessSpawnOptions,
@@ -5028,6 +5032,9 @@ export async function runCodexPrompt(
     personalChromeMode?: CodexSessionPersonalChromeMode | null;
     personalChromeModeProfileId?: string | null;
     personalChromeModeSessionKey?: string | null;
+    phoneMode?: CodexSessionPhoneMode | null;
+    phoneModeProfileId?: string | null;
+    phoneModeSessionKey?: string | null;
     designMode?: CodexSessionDesignMode | null;
     designModeProfileId?: string | null;
     designModeSessionKey?: string | null;
@@ -5044,7 +5051,7 @@ export async function runCodexPrompt(
     throw new Error('Prompt must not be empty');
   }
 
-  const runCwdOverride = !sessionId && options.cwd?.trim() ? options.cwd.trim() : null;
+  const runCwdOverride = options.cwd?.trim() || null;
   const runCwd = runCwdOverride || await resolveRunCwd(profile, sessionId);
   const { promptText, imagePaths } = buildPromptWithAttachments(trimmedPrompt, attachments, {
     cwdContext: runCwd,
@@ -5147,6 +5154,28 @@ export async function runCodexPrompt(
       throw personalChromeError;
     }
 
+    const phoneModeSessionKey = options.phoneModeSessionKey?.trim()
+      || sessionId?.trim()
+      || null;
+    const phoneModeStateProfileId = options.phoneModeProfileId?.trim() || profile.id;
+    const personalChromeAwareProfile = preparedPersonalChromeMode
+      ? { ...browserAwareProfile, codexHome: preparedPersonalChromeMode.envCodeXHome }
+      : browserAwareProfile;
+    let preparedPhoneMode: Awaited<ReturnType<typeof prepareCodexPhoneModeForRun>> = null;
+    try {
+      preparedPhoneMode = phoneModeSessionKey
+        ? await prepareCodexPhoneModeForRun(
+          personalChromeAwareProfile,
+          phoneModeStateProfileId,
+          phoneModeSessionKey,
+          options.phoneMode || null,
+        )
+        : null;
+    } catch (phoneModeError) {
+      releaseSharedBrowserRuntime();
+      throw phoneModeError;
+    }
+
     return new Promise<CodexRunResult>((resolve, reject) => {
       let child: ChildProcessWithoutNullStreams;
       try {
@@ -5154,7 +5183,7 @@ export async function runCodexPrompt(
           cwd: runCwd,
           env: buildCodexProcessEnv(
             profile,
-            preparedPersonalChromeMode?.envCodeXHome || preparedBrowserMode?.envCodeXHome || preparedUxMode?.envCodeXHome || preparedDesignMode?.envCodeXHome || null,
+            preparedPhoneMode?.envCodeXHome || preparedPersonalChromeMode?.envCodeXHome || preparedBrowserMode?.envCodeXHome || preparedUxMode?.envCodeXHome || preparedDesignMode?.envCodeXHome || null,
           ),
           stdio: ['pipe', 'pipe', 'pipe'],
           windowsHide: true,

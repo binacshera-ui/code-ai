@@ -184,8 +184,20 @@ async function main() {
     defaultProfile: true,
   }];
   const storageRoot = options.storageRoot || path.join(os.homedir(), '.code-ai-remote', hostId);
+  const notificationEnvironment = Object.fromEntries(
+    [
+      'CODEX_NTFY_URL',
+      'CODEX_NTFY_ENABLED',
+      'CODEX_NTFY_DEFAULT_ENABLED',
+      'CODEX_NTFY_ACCESS_TOKEN',
+      'CODEX_PUBLIC_ORIGIN',
+    ]
+      .map((name) => [name, pairing[name]?.trim() || ''])
+      .filter(([, value]) => Boolean(value))
+  );
   const childEnv = {
     ...process.env,
+    ...notificationEnvironment,
     NODE_ENV: 'production',
     HOST: '127.0.0.1',
     PORT: String(sidecarPort),
@@ -199,6 +211,8 @@ async function main() {
     CODEX_PROFILES_JSON_BASE64: Buffer.from(JSON.stringify(profiles), 'utf8').toString('base64'),
     CODEX_BIN: options.codexBin,
     CODEX_REMOTE_AGENT_TOKEN: token,
+    CODEX_SERVER_ID: hostId,
+    CODEX_SERVER_LABEL: hostLabel,
     SESSION_SECRET: randomBytes(32).toString('hex'),
   };
 

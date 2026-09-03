@@ -2,6 +2,7 @@ export type SessionRouteKind = 'session' | 'draft';
 export type SessionRouteSurface = 'workbench' | 'chat';
 
 export interface SessionRoute {
+  serverId: string | null;
   profileId: string | null;
   sessionKey: string | null;
   sessionId: string | null;
@@ -48,6 +49,7 @@ function toRouteUrl(input?: string | SessionRouteLocation): URL | null {
 export function readSessionRoute(input?: string | SessionRouteLocation): SessionRoute | null {
   const url = toRouteUrl(input);
   if (!url) return null;
+  const serverId = safeQueryRouteToken(url.searchParams.get('server'));
 
   const segments = url.pathname.split('/').filter(Boolean);
   const sessionMarkerIndex = segments.indexOf('session');
@@ -59,6 +61,7 @@ export function readSessionRoute(input?: string | SessionRouteLocation): Session
     );
     if (profileId && sessionKey) {
       return {
+        serverId,
         profileId,
         sessionKey,
         sessionId: draftRoute ? null : sessionKey,
@@ -75,6 +78,7 @@ export function readSessionRoute(input?: string | SessionRouteLocation): Session
   if (!profileId && !sessionId && !draftKey) return null;
   const sessionKey = sessionId || draftKey;
   return {
+    serverId,
     profileId,
     sessionKey,
     sessionId,

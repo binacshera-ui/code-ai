@@ -4,10 +4,12 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(SCRIPT_DIR, '..');
 const DEFAULT_REGISTRY = path.join(APP_ROOT, '.code-ai', 'remote-hosts.json');
+const LOCAL_ENV_PATH = path.join(APP_ROOT, '.env');
 const SAFE_ID = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 const SAFE_SSH_TARGET = /^[a-zA-Z0-9_.:@-]+$/;
 
@@ -126,8 +128,29 @@ function envLine(name, value) {
   return `${name}=${normalized}`;
 }
 
+async function readNotificationEnvironment() {
+  const fileEnvironment = existsSync(LOCAL_ENV_PATH)
+    ? parseEnv(await readFile(LOCAL_ENV_PATH, 'utf8'))
+    : {};
+  const readValue = (name) => process.env[name] ?? fileEnvironment[name] ?? '';
+  const endpoint = String(readValue('CODEX_NTFY_URL')).trim();
+  if (!endpoint) return [];
+  return [
+    envLine('CODEX_NTFY_URL', endpoint),
+    envLine('CODEX_NTFY_ENABLED', String(readValue('CODEX_NTFY_ENABLED') || 'true')),
+    envLine('CODEX_NTFY_DEFAULT_ENABLED', String(readValue('CODEX_NTFY_DEFAULT_ENABLED') || 'true')),
+    ...(String(readValue('CODEX_NTFY_ACCESS_TOKEN')).trim()
+      ? [envLine('CODEX_NTFY_ACCESS_TOKEN', String(readValue('CODEX_NTFY_ACCESS_TOKEN')).trim())]
+      : []),
+    ...(String(readValue('CODEX_PUBLIC_ORIGIN')).trim()
+      ? [envLine('CODEX_PUBLIC_ORIGIN', String(readValue('CODEX_PUBLIC_ORIGIN')).trim())]
+      : []),
+  ];
+}
+
 async function main() {
   const options = readArgs(process.argv.slice(2));
+  const notificationEnvironment = await readNotificationEnvironment();
   const registry = await loadRegistry(options.registry);
   const existing = registry.hosts.find((host) => host.id === options.id);
   const requestedPorts = new Set([
@@ -178,6 +201,9 @@ async function main() {
     envLine('CODEX_REMOTE_HOST_ID', options.id),
     envLine('CODEX_REMOTE_HOST_LABEL', options.label),
     envLine('CODEX_REMOTE_AGENT_TOKEN', token),
+    envLine('CODEX_SERVER_ID', options.id),
+    envLine('CODEX_SERVER_LABEL', options.label),
+    ...notificationEnvironment,
     envLine('CODEX_REMOTE_CONTROL_TARGET', options.controlTarget),
     envLine('CODEX_REMOTE_REVERSE_PORT', options.reversePort),
     envLine('CODEX_REMOTE_SIDECAR_PORT', options.sidecarPort),
