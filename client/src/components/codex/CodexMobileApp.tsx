@@ -5,6 +5,7 @@ import {
   memo,
   startTransition,
   Suspense,
+  useCallback,
   useDeferredValue,
   useEffect,
   useEffectEvent,
@@ -15430,6 +15431,7 @@ export function CodexMobileApp() {
   const [thinkingPulseIndex, setThinkingPulseIndex] = useState(0);
   const [isComposerDragActive, setIsComposerDragActive] = useState(false);
   const mainScrollRef = useRef<HTMLElement | null>(null);
+  const [mainScrollElement, setMainScrollElement] = useState<HTMLElement | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -15443,6 +15445,10 @@ export function CodexMobileApp() {
   const sessionDetailPrefetchInFlightRef = useRef<Map<string, Promise<CodexSessionDetail | null>>>(new Map());
   const sendInFlightRef = useRef(false);
   const sendDedupRef = useRef<{ fingerprint: string; requestId: string; expiresAt: number } | null>(null);
+  const bindMainScrollElement = useCallback((element: HTMLElement | null) => {
+    mainScrollRef.current = element;
+    setMainScrollElement(element);
+  }, []);
   const lastSessionsPollAtRef = useRef(0);
   const lastSessionDetailPollAtRef = useRef(0);
   const latestSessionLoadTokenRef = useRef(0);
@@ -16293,7 +16299,7 @@ export function CodexMobileApp() {
   }, []);
 
   useEffect(() => {
-    const viewport = mainScrollRef.current;
+    const viewport = mainScrollElement;
     if (!viewport) {
       return;
     }
@@ -16352,10 +16358,10 @@ export function CodexMobileApp() {
     return () => {
       viewport.removeEventListener('scroll', updateViewportScrollState);
     };
-  }, []);
+  }, [mainScrollElement]);
 
   useEffect(() => {
-    const viewport = mainScrollRef.current;
+    const viewport = mainScrollElement;
     if (!viewport || typeof ResizeObserver === 'undefined') {
       return;
     }
@@ -16379,7 +16385,7 @@ export function CodexMobileApp() {
     return () => {
       observer.disconnect();
     };
-  }, []);
+  }, [mainScrollElement]);
 
   useEffect(() => {
     transcriptScrollModeRef.current = 'follow-live';
@@ -16437,7 +16443,7 @@ export function CodexMobileApp() {
   }
 
   useLayoutEffect(() => {
-    const viewport = mainScrollRef.current;
+    const viewport = mainScrollElement;
     if (!viewport || lastTranscriptSignatureRef.current === transcriptSignature) {
       return;
     }
@@ -16492,7 +16498,7 @@ export function CodexMobileApp() {
       });
       return () => window.cancelAnimationFrame(nextPageFrame);
     }
-  }, [transcriptConversationKey, transcriptSignature, visibleTimelineEntries]);
+  }, [mainScrollElement, transcriptConversationKey, transcriptSignature, visibleTimelineEntries]);
 
   function scrollTranscriptToTop() {
     transcriptScrollModeRef.current = 'reading-history';
@@ -22848,7 +22854,7 @@ export function CodexMobileApp() {
           </>
         )}
 
-        <main ref={mainScrollRef} dir="ltr" className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-hide">
+        <main ref={bindMainScrollElement} dir="ltr" className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-hide">
           {hiddenTimelineCount > 0 && (
             <div className="flex justify-center">
               <div className="flex w-full max-w-xl flex-col items-center justify-center gap-3">

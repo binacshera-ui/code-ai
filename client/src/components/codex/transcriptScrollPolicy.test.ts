@@ -23,6 +23,12 @@ test('the first upward movement leaves live-follow mode even while still near th
 test('reading mode resumes live-follow only after returning to the bottom', () => {
   assert.equal(resolveTranscriptScrollIntent({
     mode: 'reading-history',
+    previousScrollTop: 980,
+    scrollTop: 980,
+    distanceFromBottom: 20,
+  }).mode, 'reading-history');
+  assert.equal(resolveTranscriptScrollIntent({
+    mode: 'reading-history',
     previousScrollTop: 500,
     scrollTop: 550,
     distanceFromBottom: 300,

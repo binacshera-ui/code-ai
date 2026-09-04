@@ -24,7 +24,12 @@ export function resolveTranscriptScrollIntent(input: {
     };
   }
 
-  if (input.distanceFromBottom <= RESUME_FOLLOW_DISTANCE_PX) {
+  const scrolledDown = input.scrollTop > input.previousScrollTop + UPWARD_SCROLL_EPSILON_PX;
+  if (
+    input.mode === 'reading-history'
+    && scrolledDown
+    && input.distanceFromBottom <= RESUME_FOLLOW_DISTANCE_PX
+  ) {
     return {
       mode: 'follow-live',
       enteredReadingMode: false,
@@ -32,7 +37,7 @@ export function resolveTranscriptScrollIntent(input: {
   }
 
   return {
-    mode: input.mode,
+    mode: input.mode === 'reading-history' ? 'reading-history' : 'follow-live',
     enteredReadingMode: false,
   };
 }
