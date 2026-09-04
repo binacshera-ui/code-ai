@@ -95,6 +95,17 @@ type FetchLike = (
 
 const accountUsageCache = new Map<string, AccountUsageCacheEntry>();
 
+export function clearCodexAccountUsageCache(profile: CodexAccountUsageProfile): void {
+  const resolvedHome = path.resolve(profile.codexHome);
+  for (const cacheKey of accountUsageCache.keys()) {
+    const separatorIndex = cacheKey.indexOf('\u0000');
+    const cachedHome = separatorIndex >= 0 ? cacheKey.slice(separatorIndex + 1) : '';
+    if (cacheKey.startsWith(`${profile.id}\u0000`) || cachedHome === resolvedHome) {
+      accountUsageCache.delete(cacheKey);
+    }
+  }
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -471,8 +482,7 @@ export async function consumeCodexRateLimitResetCredit(
     throw new Error('התקבלה תשובת Full Reset לא מוכרת.');
   }
 
-  const cacheKey = `${profile.id}\u0000${path.resolve(profile.codexHome)}`;
-  accountUsageCache.delete(cacheKey);
+  clearCodexAccountUsageCache(profile);
   return {
     outcome: outcome as CodexResetConsumptionResult['outcome'],
     windowsReset: readCount(payload?.windows_reset),

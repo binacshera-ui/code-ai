@@ -41,6 +41,7 @@ import {
   Command,
   Copy,
   Download,
+  ExternalLink,
   Eye,
   Factory,
   File as FileIcon,
@@ -55,8 +56,10 @@ import {
   Gamepad2,
   GitBranch,
   LayoutGrid,
+  KeyRound,
   ListPlus,
   Loader2,
+  LogIn,
   LogOut,
   Menu,
   MessageSquareShare,
@@ -860,6 +863,26 @@ interface CodexRateLimitSnapshotResponse {
   resetCredits?: CodexResetCreditsSnapshotResponse | null;
   accountUsageFetchedAt?: string | null;
   accountUsageError?: string | null;
+}
+
+type CodexDeviceAuthStateResponse =
+  | 'idle'
+  | 'starting'
+  | 'waiting'
+  | 'authenticated'
+  | 'failed'
+  | 'cancelled';
+
+interface CodexDeviceAuthSnapshotResponse {
+  state: CodexDeviceAuthStateResponse;
+  flowId: string | null;
+  profileId: string;
+  verificationUrl: string | null;
+  userCode: string | null;
+  startedAt: string | null;
+  expiresAt: string | null;
+  completedAt: string | null;
+  error: string | null;
 }
 
 interface SessionChangeFileRecordResponse {
@@ -1952,24 +1975,30 @@ function formatApproximateMessageRange(value: [number, number] | null): string |
 
 function CodexUsagePopover({
   snapshot,
+  profileId,
   profileLabel,
+  canManageCodexAccount,
   selectedModelSlug,
   selectedSessionId,
   loading,
   requestError,
   anchorElement,
   onConsumeReset,
+  onAccountChanged,
   onRefresh,
   onClose,
 }: {
   snapshot: CodexRateLimitSnapshotResponse | null;
+  profileId: string;
   profileLabel: string | null;
+  canManageCodexAccount: boolean;
   selectedModelSlug: string | null;
   selectedSessionId: string | null;
   loading: boolean;
   requestError: string | null;
   anchorElement: HTMLButtonElement | null;
   onConsumeReset: (creditId: string, idempotencyKey: string) => Promise<CodexResetConsumptionResponse>;
+  onAccountChanged: (snapshot?: CodexRateLimitSnapshotResponse | null) => void | Promise<void>;
   onRefresh: () => void;
   onClose: () => void;
 }) {
@@ -1977,6 +2006,11 @@ function CodexUsagePopover({
   const [pendingReset, setPendingReset] = useState<{ creditId: string; idempotencyKey: string } | null>(null);
   const [isConsumingReset, setIsConsumingReset] = useState(false);
   const [resetActionNotice, setResetActionNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+  const [accountAuth, setAccountAuth] = useState<CodexDeviceAuthSnapshotResponse | null>(null);
+  const [isAccountActionPending, setIsAccountActionPending] = useState(false);
+  const [isLogoutConfirming, setIsLogoutConfirming] = useState(false);
+  const [accountActionNotice, setAccountActionNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+  const handledAuthenticatedFlowRef = useRef<string | null>(null);
 
   useLayoutEffect(() => {
     if (!anchorElement) {
@@ -2017,6 +2051,58 @@ function CodexUsagePopover({
       window.visualViewport?.removeEventListener('scroll', updatePlacement);
     };
   }, [anchorElement]);
+
+  useEffect(() => {
+    handledAuthenticatedFlowRef.current = null;
+    setAccountAuth(null);
+    setAccountActionNotice(null);
+    setIsLogoutConfirming(false);
+    if (!canManageCodexAccount || !profileId) {
+      return;
+    }
+
+    let disposed = false;
+    const pollAuthStatus = async () => {
+      try {
+        const next = await fetchCodexAccountAuthStatus(profileId);
+        if (!disposed) {
+          setAccountAuth(next);
+        }
+      } catch (authError: any) {
+        if (!disposed) {
+          setAccountActionNotice({
+            tone: 'error',
+            text: authError?.message || 'לא ניתן לטעון את מצב החיבור לחשבון.',
+          });
+        }
+      }
+    };
+
+    void pollAuthStatus();
+    const intervalId = window.setInterval(() => void pollAuthStatus(), 1_500);
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+    };
+  }, [canManageCodexAccount, profileId]);
+
+  useEffect(() => {
+    if (
+      accountAuth?.state !== 'authenticated'
+      || !accountAuth.flowId
+      || handledAuthenticatedFlowRef.current === accountAuth.flowId
+    ) {
+      return;
+    }
+    handledAuthenticatedFlowRef.current = accountAuth.flowId;
+    setAccountActionNotice({ tone: 'success', text: 'החשבון חובר בהצלחה. נתוני המכסה מתרעננים…' });
+    void Promise.resolve(onAccountChanged()).catch((authRefreshError: any) => {
+      setAccountActionNotice({
+        tone: 'error',
+        text: authRefreshError?.message || 'החשבון חובר, אך רענון נתוני המכסה נכשל.',
+      });
+    });
+  }, [accountAuth?.flowId, accountAuth?.state, onAccountChanged]);
 
   const quotaGroups = snapshot?.quotaGroups?.length
     ? snapshot.quotaGroups
@@ -2069,6 +2155,79 @@ function CodexUsagePopover({
       });
     } finally {
       setIsConsumingReset(false);
+    }
+  };
+
+  const beginDeviceAuth = async () => {
+    if (isAccountActionPending) {
+      return;
+    }
+    setIsAccountActionPending(true);
+    setIsLogoutConfirming(false);
+    setAccountActionNotice(null);
+    try {
+      setAccountAuth(await startCodexDeviceAuthRequest(profileId));
+    } catch (authError: any) {
+      setAccountActionNotice({
+        tone: 'error',
+        text: authError?.message || 'לא ניתן להתחיל התחברות עם קוד מכשיר.',
+      });
+    } finally {
+      setIsAccountActionPending(false);
+    }
+  };
+
+  const cancelDeviceAuth = async () => {
+    if (isAccountActionPending) {
+      return;
+    }
+    setIsAccountActionPending(true);
+    setAccountActionNotice(null);
+    try {
+      const next = await cancelCodexDeviceAuthRequest(profileId, accountAuth?.flowId || null);
+      setAccountAuth(next);
+      setAccountActionNotice({ tone: 'success', text: 'ניסיון ההתחברות בוטל.' });
+    } catch (authError: any) {
+      setAccountActionNotice({
+        tone: 'error',
+        text: authError?.message || 'לא ניתן לבטל את ניסיון ההתחברות.',
+      });
+    } finally {
+      setIsAccountActionPending(false);
+    }
+  };
+
+  const copyDeviceCode = async () => {
+    if (!accountAuth?.userCode) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(accountAuth.userCode);
+      setAccountActionNotice({ tone: 'success', text: 'קוד המכשיר הועתק.' });
+    } catch {
+      setAccountActionNotice({ tone: 'error', text: 'לא ניתן להעתיק אוטומטית. אפשר לסמן ולהעתיק את הקוד.' });
+    }
+  };
+
+  const confirmAccountDisconnect = async () => {
+    if (isAccountActionPending) {
+      return;
+    }
+    setIsAccountActionPending(true);
+    setAccountActionNotice(null);
+    try {
+      const nextSnapshot = await disconnectCodexAccountRequest(profileId);
+      setAccountAuth(null);
+      setIsLogoutConfirming(false);
+      await onAccountChanged(nextSnapshot);
+      setAccountActionNotice({ tone: 'success', text: 'חשבון Codex נותק מהמכשיר הזה.' });
+    } catch (authError: any) {
+      setAccountActionNotice({
+        tone: 'error',
+        text: authError?.message || 'ניתוק חשבון Codex נכשל.',
+      });
+    } finally {
+      setIsAccountActionPending(false);
     }
   };
 
@@ -2127,20 +2286,33 @@ function CodexUsagePopover({
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 text-[10px] font-semibold text-slate-700">
                 <User className="h-3.5 w-3.5 text-sky-500" />
-                חשבון מחובר
+                {snapshot?.account?.authenticated ? 'חשבון מחובר' : 'חשבון Codex'}
+                <span className={cn(
+                  'h-1.5 w-1.5 rounded-full',
+                  snapshot?.account?.authenticated ? 'bg-emerald-400' : 'bg-slate-300'
+                )} />
               </div>
               <div className="mt-1 truncate text-[11px] font-medium text-slate-800" dir="ltr">
-                {snapshot?.account?.email || snapshot?.account?.accountIdMasked || profileLabel || 'לא זוהה חשבון'}
+                {snapshot?.account?.email
+                  || snapshot?.account?.accountIdMasked
+                  || (snapshot?.account?.authenticated ? profileLabel : null)
+                  || 'לא מחובר'}
               </div>
               {snapshot?.account?.email && snapshot.account.accountIdMasked && (
-                <div className="mt-0.5 truncate text-[8px] text-slate-400" dir="ltr">
-                  {snapshot.account.accountIdMasked}
+                <div className="mt-0.5 flex items-center gap-1 text-[8px] text-slate-400">
+                  <span>מזהה חשבון:</span>
+                  <span className="truncate" dir="ltr">{snapshot.account.accountIdMasked}</span>
                 </div>
               )}
             </div>
             <div className="shrink-0 text-left">
-              <div className="rounded-full border border-sky-100 bg-white px-2 py-1 text-[9px] font-semibold uppercase text-sky-700">
-                {snapshot?.planType || 'ללא תוכנית'}
+              <div className={cn(
+                'rounded-full border bg-white px-2 py-1 text-[9px] font-semibold uppercase',
+                snapshot?.account?.authenticated
+                  ? 'border-emerald-100 text-emerald-700'
+                  : 'border-slate-200 text-slate-500'
+              )}>
+                {snapshot?.account?.authenticated ? snapshot?.planType || 'מחובר' : 'מנותק'}
               </div>
               <div className="mt-1 text-[8px] text-slate-400">{profileLabel || 'Codex'}</div>
             </div>
@@ -2149,6 +2321,139 @@ function CodexUsagePopover({
             <div className="truncate">מודל: <span dir="ltr">{selectedModelSlug || 'ברירת מחדל'}</span></div>
             <div>עודכן: {formatCompactTimestamp(snapshot?.accountUsageFetchedAt || snapshot?.updatedAt || null)}</div>
           </div>
+
+          {canManageCodexAccount && (
+            <div className="mt-2 border-t border-slate-100 pt-2">
+              {!snapshot?.account?.authenticated && accountAuth?.state !== 'starting' && accountAuth?.state !== 'waiting' && (
+                <button
+                  type="button"
+                  onClick={() => void beginDeviceAuth()}
+                  disabled={isAccountActionPending || (loading && !snapshot)}
+                  className="flex w-full items-center justify-center gap-1.5 rounded-[0.65rem] border border-sky-200 bg-sky-50 px-2 py-1.5 text-[9px] font-semibold text-sky-700 transition hover:bg-sky-100 disabled:cursor-wait disabled:opacity-50"
+                >
+                  {isAccountActionPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <LogIn className="h-3 w-3" />}
+                  התחבר עם קוד מכשיר
+                </button>
+              )}
+
+              {!snapshot?.account?.authenticated && (accountAuth?.state === 'starting' || accountAuth?.state === 'waiting') && (
+                <div className="rounded-[0.75rem] border border-sky-200 bg-gradient-to-br from-sky-50 to-indigo-50/70 p-2.5">
+                  <div className="flex items-center gap-1.5 text-[9px] font-semibold text-sky-800">
+                    <KeyRound className="h-3.5 w-3.5" />
+                    {accountAuth.state === 'starting' ? 'מפיק קוד מכשיר…' : 'קוד מכשיר חד־פעמי'}
+                  </div>
+
+                  {accountAuth.userCode ? (
+                    <div className="mt-2 flex items-stretch gap-1.5" dir="ltr">
+                      <div className="flex min-w-0 flex-1 select-all items-center justify-center rounded-[0.65rem] border border-sky-200 bg-white px-2 py-2 font-mono text-[17px] font-bold tracking-[0.16em] text-slate-800 shadow-sm">
+                        {accountAuth.userCode}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void copyDeviceCode()}
+                        className="flex w-9 shrink-0 items-center justify-center rounded-[0.65rem] border border-sky-200 bg-white text-sky-600 transition hover:bg-sky-100"
+                        aria-label="העתקת קוד המכשיר"
+                        title="העתק קוד"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="mt-2 flex items-center justify-center gap-1.5 rounded-[0.65rem] bg-white/80 px-2 py-2 text-[9px] text-sky-700">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      ממתין ל־Codex…
+                    </div>
+                  )}
+
+                  <div className="mt-2 text-[8px] leading-4 text-slate-600">
+                    פתח את עמוד ההתחברות, היכנס לחשבון הרצוי והקלד את הקוד. הקוד נשמר רק בזיכרון עד לסיום התהליך.
+                  </div>
+                  {accountAuth.expiresAt && (
+                    <div className="mt-0.5 text-[8px] text-slate-400">בתוקף עד {formatCompactTimestamp(accountAuth.expiresAt)}</div>
+                  )}
+                  <div className="mt-2 flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => void cancelDeviceAuth()}
+                      disabled={isAccountActionPending}
+                      className="flex-1 rounded-[0.55rem] border border-slate-200 bg-white px-2 py-1.5 text-[8px] font-semibold text-slate-600 disabled:opacity-50"
+                    >
+                      ביטול
+                    </button>
+                    {accountAuth.verificationUrl && (
+                      <a
+                        href={accountAuth.verificationUrl}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="flex flex-[1.8] items-center justify-center gap-1 rounded-[0.55rem] bg-sky-600 px-2 py-1.5 text-[8px] font-semibold text-white transition hover:bg-sky-700"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                        פתח את OpenAI
+                      </a>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {snapshot?.account?.authenticated && !isLogoutConfirming && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAccountActionNotice(null);
+                    setIsLogoutConfirming(true);
+                  }}
+                  disabled={isAccountActionPending}
+                  className="flex w-full items-center justify-center gap-1.5 rounded-[0.65rem] border border-rose-100 bg-white px-2 py-1.5 text-[9px] font-semibold text-rose-600 transition hover:bg-rose-50 disabled:opacity-50"
+                >
+                  <LogOut className="h-3 w-3" />
+                  התנתק מחשבון Codex
+                </button>
+              )}
+
+              {snapshot?.account?.authenticated && isLogoutConfirming && (
+                <div className="rounded-[0.7rem] border border-rose-200 bg-rose-50 px-2 py-2">
+                  <div className="text-[8px] font-medium leading-4 text-rose-800">
+                    הניתוק מסיר מהמכשיר הזה את אישורי Codex של הפרופיל. השיחות והקבצים לא יימחקו.
+                  </div>
+                  <div className="mt-2 flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setIsLogoutConfirming(false)}
+                      disabled={isAccountActionPending}
+                      className="flex-1 rounded-[0.55rem] border border-slate-200 bg-white px-2 py-1.5 text-[8px] font-semibold text-slate-600 disabled:opacity-50"
+                    >
+                      ביטול
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void confirmAccountDisconnect()}
+                      disabled={isAccountActionPending}
+                      className="flex flex-[1.7] items-center justify-center gap-1 rounded-[0.55rem] bg-rose-600 px-2 py-1.5 text-[8px] font-semibold text-white transition hover:bg-rose-700 disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {isAccountActionPending && <Loader2 className="h-3 w-3 animate-spin" />}
+                      כן, התנתק
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {accountAuth?.state === 'failed' && accountAuth.error && (
+                <div className="mt-1.5 rounded-[0.6rem] border border-rose-100 bg-rose-50 px-2 py-1.5 text-[8px] leading-4 text-rose-700">
+                  {accountAuth.error}
+                </div>
+              )}
+              {accountActionNotice && (
+                <div className={cn(
+                  'mt-1.5 rounded-[0.6rem] border px-2 py-1.5 text-[8px] font-medium leading-4',
+                  accountActionNotice.tone === 'success'
+                    ? 'border-emerald-100 bg-emerald-50 text-emerald-700'
+                    : 'border-rose-100 bg-rose-50 text-rose-700'
+                )}>
+                  {accountActionNotice.text}
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         <section>
@@ -2381,9 +2686,9 @@ function CodexUsagePopover({
           )}
         </section>
 
-        {(requestError || snapshot?.accountUsageError) && (
+        {(requestError || (snapshot?.account?.authenticated ? snapshot?.accountUsageError : null)) && (
           <div className="rounded-[0.85rem] border border-rose-100 bg-rose-50/70 px-3 py-2 text-[9px] leading-4 text-rose-600">
-            {requestError || snapshot?.accountUsageError}
+            {requestError || (snapshot?.account?.authenticated ? snapshot?.accountUsageError : null)}
           </div>
         )}
         {snapshot?.rateLimitReachedType && (
@@ -3955,6 +4260,62 @@ async function consumeCodexFullResetRequest(
     }
   );
   return data.result;
+}
+
+async function fetchCodexAccountAuthStatus(
+  profileId: string
+): Promise<CodexDeviceAuthSnapshotResponse> {
+  const query = new URLSearchParams({ profile: profileId });
+  const data = await fetchJson<{ auth: CodexDeviceAuthSnapshotResponse }>(
+    `/api/codex/account-auth?${query.toString()}`
+  );
+  return data.auth;
+}
+
+async function startCodexDeviceAuthRequest(
+  profileId: string
+): Promise<CodexDeviceAuthSnapshotResponse> {
+  const data = await fetchJson<{ auth: CodexDeviceAuthSnapshotResponse }>(
+    '/api/codex/account-auth/device/start',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId }),
+    }
+  );
+  return data.auth;
+}
+
+async function cancelCodexDeviceAuthRequest(
+  profileId: string,
+  flowId: string | null
+): Promise<CodexDeviceAuthSnapshotResponse> {
+  const data = await fetchJson<{ auth: CodexDeviceAuthSnapshotResponse }>(
+    '/api/codex/account-auth/device/cancel',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId, flowId }),
+    }
+  );
+  return data.auth;
+}
+
+async function disconnectCodexAccountRequest(
+  profileId: string
+): Promise<CodexRateLimitSnapshotResponse | null> {
+  const data = await fetchJson<{
+    disconnected: boolean;
+    rateLimits: CodexRateLimitSnapshotResponse | null;
+  }>('/api/codex/account-auth/logout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      profileId,
+      confirmation: 'disconnect-codex-account',
+    }),
+  });
+  return data.rateLimits || null;
 }
 
 async function fetchSessionChangeRecord(
@@ -19647,6 +20008,17 @@ export function CodexMobileApp() {
     return result;
   }
 
+  async function handleCodexAccountChanged(
+    nextSnapshot?: CodexRateLimitSnapshotResponse | null
+  ): Promise<void> {
+    if (nextSnapshot !== undefined) {
+      setRateLimitSnapshot(nextSnapshot);
+      setRateLimitError(null);
+      return;
+    }
+    await loadRateLimitSnapshot(profileId, selectedSessionId, true);
+  }
+
   async function loadCurrentSessionInstruction(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
     if (!nextProfileId || !nextSessionKey) {
       setSessionInstruction(null);
@@ -23749,13 +24121,16 @@ export function CodexMobileApp() {
                   {isRateLimitOpen && (
                     <CodexUsagePopover
                       snapshot={rateLimitSnapshot}
+                      profileId={profileId || ''}
                       profileLabel={currentProfile?.label || null}
+                      canManageCodexAccount={currentProfile?.provider === 'codex'}
                       selectedModelSlug={selectedModelSlug}
                       selectedSessionId={selectedSessionId}
                       loading={isRateLimitLoading}
                       requestError={rateLimitError}
                       anchorElement={rateLimitButtonRef.current}
                       onConsumeReset={handleFullResetConsumption}
+                      onAccountChanged={handleCodexAccountChanged}
                       onRefresh={() => void loadRateLimitSnapshot(profileId, selectedSessionId, true)}
                       onClose={() => setIsRateLimitOpen(false)}
                     />

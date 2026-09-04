@@ -17,10 +17,13 @@ import {
   subscribeCodexSessionChanges,
 } from './codexService.js';
 import {
+  cancelAgentCodexDeviceAuth,
   consumeAgentFullReset,
   createAgentForkSession,
   deleteAgentTurn,
   deleteAgentSession,
+  disconnectAgentCodexAccount,
+  getAgentCodexAccountAuthStatus,
   getAgentSessionChangeRecord,
   getAgentModelCatalog,
   getAgentMultiAgentSnapshot,
@@ -30,6 +33,7 @@ import {
   getProviderForProfile,
   listAgentSessions,
   runAgentPrompt,
+  startAgentCodexDeviceAuth,
   updateAgentExecutionDefaults,
   updateAgentMultiAgentMode,
   updateAgentPermissionMode,
@@ -1940,6 +1944,52 @@ router.post('/response-speed', requireCodexAccess, async (req, res) => {
     res.json(catalog);
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to update response speed' });
+  }
+});
+
+router.get('/account-auth', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const auth = await getAgentCodexAccountAuthStatus(profileId);
+    res.json({ auth });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'לא ניתן לטעון את מצב ההתחברות ל־Codex.' });
+  }
+});
+
+router.post('/account-auth/device/start', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const auth = await startAgentCodexDeviceAuth(profileId);
+    res.json({ auth });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'לא ניתן להתחיל התחברות ל־Codex.' });
+  }
+});
+
+router.post('/account-auth/device/cancel', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const flowId = typeof req.body?.flowId === 'string' ? req.body.flowId : undefined;
+    const auth = await cancelAgentCodexDeviceAuth(profileId, flowId);
+    res.json({ auth });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'לא ניתן לבטל את ניסיון ההתחברות.' });
+  }
+});
+
+router.post('/account-auth/logout', requireCodexAccess, async (req, res) => {
+  try {
+    if (req.body?.confirmation !== 'disconnect-codex-account') {
+      res.status(400).json({ error: 'נדרש אישור מפורש לניתוק חשבון Codex.' });
+      return;
+    }
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    await disconnectAgentCodexAccount(profileId);
+    const rateLimits = await getAgentRateLimitSnapshot(profileId, undefined, true);
+    res.json({ disconnected: true, rateLimits });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'ניתוק חשבון Codex נכשל.' });
   }
 });
 

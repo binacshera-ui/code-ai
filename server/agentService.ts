@@ -27,6 +27,13 @@ import {
   type CodexUploadedAttachment,
 } from './codexService.js';
 import {
+  cancelCodexDeviceAuth,
+  disconnectCodexAccount,
+  getCodexDeviceAuthStatus,
+  startCodexDeviceAuth,
+  type CodexDeviceAuthSnapshot,
+} from './codexAccountAuth.js';
+import {
   cancelClaudeRun,
   createClaudeForkSession,
   deleteClaudeSession,
@@ -400,6 +407,42 @@ export async function consumeAgentFullReset(
     throw new Error('Full Reset זמין רק בפרופילי Codex.');
   }
   return consumeCodexFullReset(profile.id, creditId, redeemRequestId);
+}
+
+async function resolvePreparedCodexAccountProfile(profileId?: string): Promise<AgentProfile> {
+  const profile = resolveProfile(profileId);
+  await prepareInternalProfileHome(profile);
+  if (profile.provider !== 'codex') {
+    throw new Error('ניהול חיבור החשבון זמין רק בפרופילי Codex.');
+  }
+  return profile;
+}
+
+export async function getAgentCodexAccountAuthStatus(
+  profileId?: string
+): Promise<CodexDeviceAuthSnapshot> {
+  const profile = await resolvePreparedCodexAccountProfile(profileId);
+  return getCodexDeviceAuthStatus(profile);
+}
+
+export async function startAgentCodexDeviceAuth(
+  profileId?: string
+): Promise<CodexDeviceAuthSnapshot> {
+  const profile = await resolvePreparedCodexAccountProfile(profileId);
+  return startCodexDeviceAuth(profile);
+}
+
+export async function cancelAgentCodexDeviceAuth(
+  profileId: string | undefined,
+  flowId?: string | null
+): Promise<CodexDeviceAuthSnapshot> {
+  const profile = await resolvePreparedCodexAccountProfile(profileId);
+  return cancelCodexDeviceAuth(profile, flowId);
+}
+
+export async function disconnectAgentCodexAccount(profileId?: string): Promise<void> {
+  const profile = await resolvePreparedCodexAccountProfile(profileId);
+  await disconnectCodexAccount(profile);
 }
 
 export async function runAgentPrompt(
