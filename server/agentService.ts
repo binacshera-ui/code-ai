@@ -1,6 +1,7 @@
 import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
 import {
   cancelCodexRun,
+  consumeCodexFullReset,
   createCodexForkSession,
   deleteCodexSession,
   deleteCodexTurn,
@@ -373,7 +374,8 @@ export async function updateAgentMultiAgentMode(
 
 export async function getAgentRateLimitSnapshot(
   profileId?: string,
-  sessionId?: string
+  sessionId?: string,
+  forceAccountRefresh = false
 ): Promise<CodexRateLimitSnapshot | null> {
   const profile = resolveProfile(profileId);
   await prepareInternalProfileHome(profile);
@@ -384,7 +386,20 @@ export async function getAgentRateLimitSnapshot(
     return getGeminiRateLimitSnapshot(profile.id, sessionId);
   }
 
-  return getCodexRateLimitSnapshot(profile.id, sessionId);
+  return getCodexRateLimitSnapshot(profile.id, sessionId, forceAccountRefresh);
+}
+
+export async function consumeAgentFullReset(
+  profileId: string | undefined,
+  creditId: string,
+  redeemRequestId: string
+) {
+  const profile = resolveProfile(profileId);
+  await prepareInternalProfileHome(profile);
+  if (profile.provider !== 'codex') {
+    throw new Error('Full Reset זמין רק בפרופילי Codex.');
+  }
+  return consumeCodexFullReset(profile.id, creditId, redeemRequestId);
 }
 
 export async function runAgentPrompt(
@@ -442,6 +457,7 @@ export async function runAgentPrompt(
   let startedSessionId = sessionId?.trim() || null;
   const providerRunOptions = {
     ...options,
+    cwd: resolvedCwd,
     onSessionStarted: async (nextSessionId: string) => {
       startedSessionId = nextSessionId;
       await options.onSessionStarted?.(nextSessionId);

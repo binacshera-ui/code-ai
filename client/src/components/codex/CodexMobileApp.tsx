@@ -21,6 +21,7 @@ import {
   type TouchEvent,
   type WheelEvent as ReactWheelEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
@@ -176,6 +177,16 @@ import {
 import { shouldAcceptSessionSnapshot } from './sessionTimelineSync';
 import { selectPendingDraftConversations } from './pendingDraftConversations';
 import { observeQueueStatusTransitions } from './queueCompletionToast';
+import { buildWorkspaceMovePlan } from './workspaceMoveSelection';
+import {
+  classifyTranscriptMutation,
+  mergeEarlierTimelineEntries,
+  resolveScrollTopAfterTimelineChange,
+  resolveTranscriptScrollIntent,
+  shouldRequestEarlierTimeline,
+  type TranscriptScrollMode,
+} from './transcriptScrollPolicy';
+import { resolveUsagePanelPlacement, type UsagePanelPlacement } from './usagePanelPosition';
 
 const IS_WORKBENCH_EMBED = typeof window !== 'undefined'
   && window.parent !== window
@@ -418,6 +429,12 @@ type WorkspaceMoveTarget = {
   label: string;
   cwd: string;
   sessionCount: number;
+} | {
+  kind: 'batch';
+  sessionIds: string[];
+  topicIds: string[];
+  label: string;
+  cwd: string | null;
 };
 
 interface CodexConversationShareResponse {
@@ -773,6 +790,50 @@ interface CodexRateLimitWindowResponse {
   resetsAtIso: string | null;
 }
 
+interface CodexAccountQuotaGroupResponse {
+  id: string;
+  label: string;
+  meteredFeature: string | null;
+  normalModelSlug: string | null;
+  allowed: boolean | null;
+  limitReached: boolean | null;
+  primary: CodexRateLimitWindowResponse | null;
+  secondary: CodexRateLimitWindowResponse | null;
+}
+
+interface CodexBillingCreditsResponse {
+  hasCredits: boolean | null;
+  unlimited: boolean | null;
+  overageLimitReached: boolean | null;
+  balance: string | null;
+  approximateLocalMessages: [number, number] | null;
+  approximateCloudMessages: [number, number] | null;
+}
+
+interface CodexResetCreditResponse {
+  id: string;
+  resetType: string | null;
+  title: string;
+  status: string;
+  grantedAt: string | null;
+  expiresAt: string | null;
+  description: string | null;
+}
+
+interface CodexResetCreditsSnapshotResponse {
+  availableCount: number;
+  applicableAvailableCount: number | null;
+  totalEarnedCount: number;
+  immediateResetPurchaseEligible: boolean | null;
+  historyEnabled: boolean | null;
+  credits: CodexResetCreditResponse[];
+}
+
+interface CodexResetConsumptionResponse {
+  outcome: 'reset' | 'nothing_to_reset' | 'no_credit' | 'already_redeemed';
+  windowsReset: number;
+}
+
 interface CodexContextUsageSnapshotResponse {
   modelContextWindow: number | null;
   inputTokens: number | null;
@@ -789,6 +850,16 @@ interface CodexRateLimitSnapshotResponse {
   primary: CodexRateLimitWindowResponse | null;
   secondary: CodexRateLimitWindowResponse | null;
   context: CodexContextUsageSnapshotResponse | null;
+  account?: {
+    authenticated: boolean;
+    email: string | null;
+    accountIdMasked: string | null;
+  } | null;
+  quotaGroups?: CodexAccountQuotaGroupResponse[];
+  billingCredits?: CodexBillingCreditsResponse | null;
+  resetCredits?: CodexResetCreditsSnapshotResponse | null;
+  accountUsageFetchedAt?: string | null;
+  accountUsageError?: string | null;
 }
 
 interface SessionChangeFileRecordResponse {
@@ -1241,8 +1312,8 @@ const INITIAL_TIMELINE_WINDOW_SIZE = 120;
 const LIVE_SESSION_SNAPSHOT_FALLBACK_MS = 3_000;
 const SESSION_LIST_BACKGROUND_REFRESH_MS = 60_000;
 const MAX_SHARED_CONVERSATIONS = 20;
-const TIMELINE_WINDOW_INCREMENT = 120;
 const TIMELINE_FULL_LOAD_CHUNK_SIZE = 400;
+const TIMELINE_AUTO_LOAD_PAGE_SIZE = 60;
 
 function createEmptySessionContextSelection(
   actionRestriction: CodexSessionActionRestriction | null = null
@@ -1854,6 +1925,476 @@ function clampPercent(value: number | null): number {
   }
 
   return Math.max(0, Math.min(100, value));
+}
+
+function getResetCreditStatusLabel(status: string): string {
+  switch (status.toLowerCase()) {
+    case 'available':
+      return 'זמין';
+    case 'consumed':
+    case 'used':
+      return 'נוצל';
+    case 'expired':
+      return 'פג תוקף';
+    default:
+      return status;
+  }
+}
+
+function formatApproximateMessageRange(value: [number, number] | null): string | null {
+  if (!value) {
+    return null;
+  }
+  return value[0] === value[1]
+    ? `${Math.round(value[0])}`
+    : `${Math.round(value[0])}–${Math.round(value[1])}`;
+}
+
+function CodexUsagePopover({
+  snapshot,
+  profileLabel,
+  selectedModelSlug,
+  selectedSessionId,
+  loading,
+  requestError,
+  anchorElement,
+  onConsumeReset,
+  onRefresh,
+  onClose,
+}: {
+  snapshot: CodexRateLimitSnapshotResponse | null;
+  profileLabel: string | null;
+  selectedModelSlug: string | null;
+  selectedSessionId: string | null;
+  loading: boolean;
+  requestError: string | null;
+  anchorElement: HTMLButtonElement | null;
+  onConsumeReset: (creditId: string, idempotencyKey: string) => Promise<CodexResetConsumptionResponse>;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  const [placement, setPlacement] = useState<UsagePanelPlacement | null>(null);
+  const [pendingReset, setPendingReset] = useState<{ creditId: string; idempotencyKey: string } | null>(null);
+  const [isConsumingReset, setIsConsumingReset] = useState(false);
+  const [resetActionNotice, setResetActionNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!anchorElement) {
+      setPlacement(null);
+      return;
+    }
+
+    const updatePlacement = () => {
+      const anchorRect = anchorElement.getBoundingClientRect();
+      const visualViewport = window.visualViewport;
+      setPlacement(resolveUsagePanelPlacement(
+        {
+          left: anchorRect.left,
+          right: anchorRect.right,
+          top: anchorRect.top,
+          bottom: anchorRect.bottom,
+          width: anchorRect.width,
+        },
+        {
+          width: visualViewport?.width || window.innerWidth,
+          height: visualViewport?.height || window.innerHeight,
+          offsetLeft: visualViewport?.offsetLeft || 0,
+          offsetTop: visualViewport?.offsetTop || 0,
+          layoutHeight: window.innerHeight,
+        }
+      ));
+    };
+
+    updatePlacement();
+    window.addEventListener('resize', updatePlacement);
+    window.addEventListener('scroll', updatePlacement, true);
+    window.visualViewport?.addEventListener('resize', updatePlacement);
+    window.visualViewport?.addEventListener('scroll', updatePlacement);
+    return () => {
+      window.removeEventListener('resize', updatePlacement);
+      window.removeEventListener('scroll', updatePlacement, true);
+      window.visualViewport?.removeEventListener('resize', updatePlacement);
+      window.visualViewport?.removeEventListener('scroll', updatePlacement);
+    };
+  }, [anchorElement]);
+
+  const quotaGroups = snapshot?.quotaGroups?.length
+    ? snapshot.quotaGroups
+    : snapshot?.primary || snapshot?.secondary
+      ? [{
+          id: 'session-fallback',
+          label: 'Codex — נתוני session',
+          meteredFeature: null,
+          normalModelSlug: null,
+          allowed: null,
+          limitReached: null,
+          primary: snapshot.primary,
+          secondary: snapshot.secondary,
+        }]
+      : [];
+  const resetCredits = snapshot?.resetCredits || null;
+  const billingCredits = snapshot?.billingCredits || null;
+  const localMessageRange = formatApproximateMessageRange(billingCredits?.approximateLocalMessages || null);
+  const cloudMessageRange = formatApproximateMessageRange(billingCredits?.approximateCloudMessages || null);
+
+  const beginResetConfirmation = (creditId: string) => {
+    setResetActionNotice(null);
+    setPendingReset({
+      creditId,
+      idempotencyKey: crypto.randomUUID(),
+    });
+  };
+
+  const confirmResetConsumption = async () => {
+    if (!pendingReset || isConsumingReset) {
+      return;
+    }
+    setIsConsumingReset(true);
+    setResetActionNotice(null);
+    try {
+      const result = await onConsumeReset(pendingReset.creditId, pendingReset.idempotencyKey);
+      const text = result.outcome === 'reset'
+        ? `ה־Full Reset הופעל בהצלחה${result.windowsReset > 0 ? ` על ${result.windowsReset} חלונות מכסה` : ''}.`
+        : result.outcome === 'nothing_to_reset'
+          ? 'לא נמצא כרגע חלון מכסה שניתן לאפס; הקרדיט לא מומש.'
+          : result.outcome === 'no_credit'
+            ? 'הקרדיט כבר אינו זמין בחשבון.'
+            : 'הבקשה הזו כבר הושלמה קודם; הנתונים רועננו.';
+      setResetActionNotice({ tone: result.outcome === 'reset' || result.outcome === 'already_redeemed' ? 'success' : 'error', text });
+      setPendingReset(null);
+    } catch (resetError: any) {
+      setResetActionNotice({
+        tone: 'error',
+        text: resetError?.message || 'הפעלת Full Reset נכשלה.',
+      });
+    } finally {
+      setIsConsumingReset(false);
+    }
+  };
+
+  if (!placement) {
+    return null;
+  }
+
+  return createPortal(
+    <div
+      dir="rtl"
+      onPointerDown={(event) => event.stopPropagation()}
+      className="fixed z-[100] flex flex-col overflow-hidden rounded-[1.1rem] border border-slate-200/80 bg-white/98 shadow-[0_24px_60px_-30px_rgba(15,23,42,0.35)] backdrop-blur-xl"
+      style={{
+        left: placement.left,
+        top: placement.top ?? undefined,
+        bottom: placement.bottom ?? undefined,
+        width: placement.width,
+        maxHeight: placement.maxHeight,
+      }}
+    >
+      <div className="shrink-0 border-b border-slate-100/90 bg-gradient-to-b from-sky-50/65 via-white to-white px-3 py-2.5 text-right">
+        <div className="flex items-start gap-2">
+          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-sky-100/75 text-sky-600">
+            <Gauge className="h-3.5 w-3.5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-[12px] font-semibold text-slate-800">חשבון, מכסות ושימוש</div>
+            <div className="mt-0.5 text-[9px] leading-4 text-slate-500">
+              מד השימוש מציג את המכסות החיות של החשבון, חלונות האיפוס, הקונטקסט וקרדיטי Full Reset.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={loading}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-sky-50 hover:text-sky-600 disabled:cursor-wait disabled:opacity-50"
+            aria-label="רענון נתוני שימוש"
+            title="רענון נתוני שימוש מהחשבון"
+          >
+            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-300 transition hover:bg-slate-100 hover:text-slate-600"
+            aria-label="סגירת נתוני שימוש"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-2.5 overflow-y-auto overscroll-contain p-2.5 text-right">
+        <section className="rounded-[0.9rem] border border-slate-100 bg-slate-50/75 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-[10px] font-semibold text-slate-700">
+                <User className="h-3.5 w-3.5 text-sky-500" />
+                חשבון מחובר
+              </div>
+              <div className="mt-1 truncate text-[11px] font-medium text-slate-800" dir="ltr">
+                {snapshot?.account?.email || snapshot?.account?.accountIdMasked || profileLabel || 'לא זוהה חשבון'}
+              </div>
+              {snapshot?.account?.email && snapshot.account.accountIdMasked && (
+                <div className="mt-0.5 truncate text-[8px] text-slate-400" dir="ltr">
+                  {snapshot.account.accountIdMasked}
+                </div>
+              )}
+            </div>
+            <div className="shrink-0 text-left">
+              <div className="rounded-full border border-sky-100 bg-white px-2 py-1 text-[9px] font-semibold uppercase text-sky-700">
+                {snapshot?.planType || 'ללא תוכנית'}
+              </div>
+              <div className="mt-1 text-[8px] text-slate-400">{profileLabel || 'Codex'}</div>
+            </div>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-1.5 border-t border-slate-100 pt-2 text-[8px] text-slate-500">
+            <div className="truncate">מודל: <span dir="ltr">{selectedModelSlug || 'ברירת מחדל'}</span></div>
+            <div>עודכן: {formatCompactTimestamp(snapshot?.accountUsageFetchedAt || snapshot?.updatedAt || null)}</div>
+          </div>
+        </section>
+
+        <section>
+          <div className="mb-1.5 flex items-center justify-between px-1">
+            <span className="text-[10px] font-semibold text-slate-700">כל מכסות Codex</span>
+            <span className="text-[8px] text-slate-400">לפי החשבון המחובר</span>
+          </div>
+          <div className="space-y-2">
+            {quotaGroups.map((group, groupIndex) => {
+              const windows = [
+                { key: 'primary', label: 'חלון ראשי', window: group.primary },
+                { key: 'secondary', label: 'חלון נוסף', window: group.secondary },
+              ].filter((item): item is { key: string; label: string; window: CodexRateLimitWindowResponse } => Boolean(item.window));
+              return (
+                <div key={`${group.id}-${groupIndex}`} className="rounded-[0.9rem] border border-slate-100 bg-white px-2.5 py-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-[10px] font-semibold text-slate-700" dir="auto">{group.label}</div>
+                      {(group.normalModelSlug || group.meteredFeature) && (
+                        <div className="mt-0.5 truncate text-[8px] text-slate-400" dir="ltr">
+                          {group.normalModelSlug || group.meteredFeature}
+                        </div>
+                      )}
+                    </div>
+                    <span className={cn(
+                      'shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-medium',
+                      group.limitReached
+                        ? 'bg-rose-50 text-rose-600'
+                        : group.allowed === false
+                          ? 'bg-amber-50 text-amber-600'
+                          : 'bg-emerald-50 text-emerald-600'
+                    )}>
+                      {group.limitReached ? 'המגבלה הושגה' : group.allowed === false ? 'לא זמין' : 'זמין'}
+                    </span>
+                  </div>
+
+                  <div className="mt-2 space-y-1.5">
+                    {windows.map(({ key, label, window }, windowIndex) => {
+                      const usedPercent = clampPercent(window.usedPercent);
+                      return (
+                        <div key={key} className="rounded-[0.75rem] bg-slate-50/80 px-2 py-1.5">
+                          <div className="flex items-center justify-between gap-2 text-[9px]">
+                            <span className="font-medium text-slate-600">
+                              {getRateLimitWindowLabel(window.windowMinutes, label)}
+                            </span>
+                            <span className="text-slate-500">
+                              {window.usedPercent === null
+                                ? 'ללא נתון'
+                                : `${Math.round(usedPercent)}% נוצל · ${Math.round(100 - usedPercent)}% נותר`}
+                            </span>
+                          </div>
+                          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-200/75">
+                            <div
+                              className={cn(
+                                'h-full rounded-full bg-gradient-to-l transition-[width]',
+                                (groupIndex + windowIndex) % 2 === 0
+                                  ? 'from-sky-400 via-cyan-300 to-emerald-300'
+                                  : 'from-violet-400 via-fuchsia-300 to-rose-300'
+                              )}
+                              style={{ width: `${usedPercent}%` }}
+                            />
+                          </div>
+                          <div className="mt-1 text-[8px] text-slate-400">
+                            איפוס צפוי: {formatCompactTimestamp(window.resetsAtIso)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            {!loading && quotaGroups.length === 0 && (
+              <div className="rounded-[0.9rem] border border-dashed border-slate-200 bg-white px-3 py-2.5 text-[9px] text-slate-500">
+                לא התקבלו כרגע מכסות מהחשבון. אפשר לנסות את כפתור הרענון.
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-[0.9rem] border border-indigo-100/80 bg-indigo-50/35 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[10px] font-semibold text-indigo-800">Full Reset</div>
+            <div className="text-[10px] font-semibold text-indigo-700">
+              {resetCredits ? `${resetCredits.availableCount} זמינים` : 'ללא נתון'}
+            </div>
+          </div>
+          {resetCredits && (
+            <>
+              <div className="mt-1 text-[8px] text-indigo-700/70">
+                נצברו בסך הכול {resetCredits.totalEarnedCount}
+                {resetCredits.applicableAvailableCount !== null
+                  ? ` · ${resetCredits.applicableAvailableCount} מתאימים למכסה הנוכחית`
+                  : ''}
+              </div>
+              <div className="mt-2 space-y-1.5">
+                {resetCredits.credits.map((credit) => {
+                  const isAvailable = credit.status.toLowerCase() === 'available';
+                  const canConsume = isAvailable && resetCredits.applicableAvailableCount !== 0;
+                  const isConfirming = pendingReset?.creditId === credit.id;
+                  return (
+                    <div key={credit.id} className="rounded-[0.7rem] border border-indigo-100/80 bg-white/80 px-2 py-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[9px] font-semibold text-slate-700">{credit.title}</span>
+                        <span className={cn(
+                          'rounded-full px-1.5 py-0.5 text-[8px] font-medium',
+                          isAvailable
+                            ? 'bg-emerald-50 text-emerald-600'
+                            : 'bg-slate-100 text-slate-500'
+                        )}>
+                          {getResetCreditStatusLabel(credit.status)}
+                        </span>
+                      </div>
+                      {credit.description && <div className="mt-1 text-[8px] leading-4 text-slate-500">{credit.description}</div>}
+                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[8px] text-slate-400">
+                        {credit.resetType && <span dir="ltr">{credit.resetType}</span>}
+                        {credit.grantedAt && <span>הוענק: {formatCompactTimestamp(credit.grantedAt)}</span>}
+                        {credit.expiresAt && <span>תוקף: {formatCompactTimestamp(credit.expiresAt)}</span>}
+                      </div>
+
+                      {canConsume && !isConfirming && (
+                        <button
+                          type="button"
+                          onClick={() => beginResetConfirmation(credit.id)}
+                          disabled={isConsumingReset}
+                          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-[0.6rem] border border-indigo-200 bg-indigo-50 px-2 py-1.5 text-[9px] font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-wait disabled:opacity-50"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          הפעל Full Reset
+                        </button>
+                      )}
+
+                      {isConfirming && (
+                        <div className="mt-2 rounded-[0.65rem] border border-amber-200 bg-amber-50 px-2 py-2">
+                          <div className="text-[8px] font-medium leading-4 text-amber-800">
+                            הפעולה צורכת קרדיט אחד ומאפסת את חלונות המכסה הזכאים. אי אפשר לבטל אותה לאחר האישור.
+                          </div>
+                          <div className="mt-2 flex gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setPendingReset(null)}
+                              disabled={isConsumingReset}
+                              className="flex-1 rounded-[0.55rem] border border-slate-200 bg-white px-2 py-1.5 text-[8px] font-semibold text-slate-600 disabled:opacity-50"
+                            >
+                              ביטול
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void confirmResetConsumption()}
+                              disabled={isConsumingReset}
+                              className="flex flex-[1.7] items-center justify-center gap-1 rounded-[0.55rem] bg-indigo-600 px-2 py-1.5 text-[8px] font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-wait disabled:opacity-60"
+                            >
+                              {isConsumingReset && <Loader2 className="h-3 w-3 animate-spin" />}
+                              כן, הפעל ריסט
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {resetCredits.credits.length === 0 && (
+                  <div className="rounded-[0.7rem] border border-dashed border-indigo-100 bg-white/60 px-2 py-1.5 text-[8px] text-indigo-700/65">
+                    אין כרגע קרדיט Full Reset זמין בחשבון.
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+          {resetActionNotice && (
+            <div className={cn(
+              'mt-2 rounded-[0.65rem] border px-2 py-1.5 text-[8px] font-medium leading-4',
+              resetActionNotice.tone === 'success'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : 'border-rose-200 bg-rose-50 text-rose-700'
+            )}>
+              {resetActionNotice.text}
+            </div>
+          )}
+          <div className="mt-2 border-t border-indigo-100/70 pt-2 text-[8px] leading-4 text-indigo-700/75">
+            הרענון רק קורא נתונים ואינו צורך ריסט. הפעלת Full Reset מתבצעת רק לאחר לחיצה ואישור מפורש נוסף.
+          </div>
+        </section>
+
+        {billingCredits && (
+          <section className="rounded-[0.9rem] border border-slate-100 bg-white px-3 py-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-semibold text-slate-700">קרדיטי שימוש נוספים</span>
+              <span className="text-[9px] text-slate-500">
+                {billingCredits.unlimited ? 'ללא הגבלה' : `יתרה ${billingCredits.balance || '0'}`}
+              </span>
+            </div>
+            {(localMessageRange || cloudMessageRange) && (
+              <div className="mt-1.5 text-[8px] text-slate-400">
+                {localMessageRange && <span>הודעות מקומיות משוערות: {localMessageRange}</span>}
+                {localMessageRange && cloudMessageRange && <span> · </span>}
+                {cloudMessageRange && <span>הודעות ענן משוערות: {cloudMessageRange}</span>}
+              </div>
+            )}
+            {billingCredits.overageLimitReached && (
+              <div className="mt-1.5 text-[8px] font-medium text-rose-600">הושגה מגבלת החריגה.</div>
+            )}
+          </section>
+        )}
+
+        <section className="rounded-[0.9rem] border border-amber-100/80 bg-amber-50/35 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] font-semibold text-slate-700">קונטקסט השיחה</span>
+            <span className="text-[10px] text-slate-500">
+              {selectedSessionId && snapshot?.context?.usagePercent !== null && snapshot?.context?.usagePercent !== undefined
+                ? `${Math.round(clampPercent(snapshot.context.usagePercent))}%`
+                : '0%'}
+            </span>
+          </div>
+          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-amber-100/80">
+            <div
+              className="h-full rounded-full bg-gradient-to-l from-amber-400 via-sky-300 to-cyan-300 transition-[width]"
+              style={{ width: `${selectedSessionId ? clampPercent(snapshot?.context?.usagePercent ?? null) : 0}%` }}
+            />
+          </div>
+          <div className="mt-1 text-[8px] text-slate-500">
+            {selectedSessionId && snapshot?.context
+              ? `${formatCompactTokenCount(getContextUsageDisplayTokens(snapshot.context))} / ${formatCompactTokenCount(snapshot.context.modelContextWindow)}`
+              : 'בשיחה חדשה אין עדיין snapshot של קונטקסט.'}
+          </div>
+          {snapshot?.context?.cachedInputTokens !== null && snapshot?.context?.cachedInputTokens !== undefined && (
+            <div className="mt-0.5 text-[8px] text-slate-400">
+              cache: {formatCompactTokenCount(snapshot.context.cachedInputTokens)}
+            </div>
+          )}
+        </section>
+
+        {(requestError || snapshot?.accountUsageError) && (
+          <div className="rounded-[0.85rem] border border-rose-100 bg-rose-50/70 px-3 py-2 text-[9px] leading-4 text-rose-600">
+            {requestError || snapshot?.accountUsageError}
+          </div>
+        )}
+        {snapshot?.rateLimitReachedType && (
+          <div className="rounded-[0.85rem] border border-rose-100 bg-rose-50/70 px-3 py-2 text-[9px] text-rose-600">
+            הושגה מגבלה: {snapshot.rateLimitReachedType}
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body
+  );
 }
 
 function getPermissionTone(permission: CodexPermissionSnapshotResponse | null): {
@@ -3377,15 +3918,43 @@ async function saveCodexMultiAgentMode(
   return data.multiAgent;
 }
 
-async function fetchCodexRateLimits(profileId: string, sessionId?: string | null): Promise<CodexRateLimitSnapshotResponse | null> {
+async function fetchCodexRateLimits(
+  profileId: string,
+  sessionId?: string | null,
+  forceRefresh = false
+): Promise<CodexRateLimitSnapshotResponse | null> {
   const query = new URLSearchParams({ profile: profileId });
   if (sessionId?.trim()) {
     query.set('sessionId', sessionId.trim());
+  }
+  if (forceRefresh) {
+    query.set('refresh', '1');
   }
   const data = await fetchJson<{ rateLimits: CodexRateLimitSnapshotResponse | null }>(
     `/api/codex/rate-limits?${query.toString()}`
   );
   return data.rateLimits || null;
+}
+
+async function consumeCodexFullResetRequest(
+  profileId: string,
+  creditId: string,
+  idempotencyKey: string
+): Promise<CodexResetConsumptionResponse> {
+  const data = await fetchJson<{ result: CodexResetConsumptionResponse }>(
+    '/api/codex/rate-limit-reset-credits/consume',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        profileId,
+        creditId,
+        idempotencyKey,
+        confirmation: 'consume-full-reset',
+      }),
+    }
+  );
+  return data.result;
 }
 
 async function fetchSessionChangeRecord(
@@ -6352,6 +6921,7 @@ function SessionCard({
   isActive,
   isArchivedView,
   isCopyMode,
+  selectionPurpose,
   isMarkedForCopy,
   canCopy,
   taskSummary,
@@ -6377,6 +6947,7 @@ function SessionCard({
   isActive: boolean;
   isArchivedView: boolean;
   isCopyMode: boolean;
+  selectionPurpose: 'copy' | 'workspace' | null;
   isMarkedForCopy: boolean;
   canCopy: boolean;
   taskSummary?: { assignedCount: number; completedCount: number } | null;
@@ -6535,7 +7106,13 @@ function SessionCard({
                       : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50 hover:text-indigo-700')
                     : 'cursor-not-allowed border-slate-100 bg-slate-50 text-slate-300'
                 )}
-                title={canCopy ? (isMarkedForCopy ? 'הסר מסימון העתקה' : 'סמן להעתקה') : 'העתקה זמינה רק לשיחות Codex רגילות'}
+                title={canCopy
+                  ? isMarkedForCopy
+                    ? `הסר מסימון ${selectionPurpose === 'workspace' ? 'העברה' : 'העתקה'}`
+                    : `סמן ל${selectionPurpose === 'workspace' ? 'העברה' : 'העתקה'}`
+                  : selectionPurpose === 'workspace'
+                    ? 'לא ניתן להעביר את השיחה הזו'
+                    : 'העתקה זמינה רק לשיחות Codex רגילות'}
               >
                 <Check className="h-3.5 w-3.5" />
               </button>
@@ -6694,6 +7271,9 @@ function SidebarPanel({
   selectedSessionCopyCount,
   isCopyingSessions,
   sessionCopyNotice,
+  isSessionWorkspaceMoveMode,
+  selectedWorkspaceMoveSessionCount,
+  selectedWorkspaceMoveTopicIds,
   isMovingWorkspace,
   workspaceMoveNotice,
   sessionTaskSummaries,
@@ -6725,14 +7305,17 @@ function SidebarPanel({
   onToggleWorkspaceMode,
   onToggleSessionCopyMode,
   onConfirmCopySessions,
-  onMoveSessionToWorkspace,
-  onMoveTopicToWorkspace,
+  onToggleSessionWorkspaceMoveMode,
+  onToggleWorkspaceMoveTopic,
+  onConfirmWorkspaceMoveSelection,
   onManageTopic,
   onManageSessionTasks,
   onToggleArchived,
   isSessionCopySelectable,
   isSessionMarkedForCopy,
   onToggleSessionMarkedForCopy,
+  isSessionMarkedForWorkspaceMove,
+  onToggleSessionMarkedForWorkspaceMove,
   onToggleSessionHidden,
   onDeleteSessionPermanently,
   onSelectSession,
@@ -6758,6 +7341,9 @@ function SidebarPanel({
   selectedSessionCopyCount: number;
   isCopyingSessions: boolean;
   sessionCopyNotice: string | null;
+  isSessionWorkspaceMoveMode: boolean;
+  selectedWorkspaceMoveSessionCount: number;
+  selectedWorkspaceMoveTopicIds: string[];
   isMovingWorkspace: boolean;
   workspaceMoveNotice: string | null;
   sessionTaskSummaries: Record<string, { assignedCount: number; completedCount: number }>;
@@ -6789,14 +7375,17 @@ function SidebarPanel({
   onToggleWorkspaceMode: () => void;
   onToggleSessionCopyMode: () => void;
   onConfirmCopySessions: () => void;
-  onMoveSessionToWorkspace: (sessionId: string) => void;
-  onMoveTopicToWorkspace: (topicId: string) => void;
+  onToggleSessionWorkspaceMoveMode: () => void;
+  onToggleWorkspaceMoveTopic: (topicId: string) => void;
+  onConfirmWorkspaceMoveSelection: () => void;
   onManageTopic: (session: CodexSessionSummary) => void;
   onManageSessionTasks: (session: CodexSessionSummary) => void;
   onToggleArchived: () => void;
   isSessionCopySelectable: (session: CodexSessionSummary) => boolean;
   isSessionMarkedForCopy: (sessionId: string) => boolean;
   onToggleSessionMarkedForCopy: (sessionId: string) => void;
+  isSessionMarkedForWorkspaceMove: (sessionId: string) => boolean;
+  onToggleSessionMarkedForWorkspaceMove: (sessionId: string) => void;
   onToggleSessionHidden: (sessionId: string, hidden: boolean) => void;
   onDeleteSessionPermanently: (session: CodexSessionSummary) => void;
   onSelectSession: (sessionId: string) => void;
@@ -6830,17 +7419,6 @@ function SidebarPanel({
     }
     return [...byId.values()].sort((left, right) => left.topic.name.localeCompare(right.topic.name, 'he'));
   }, [sessions]);
-  const [workspaceMoveTopicId, setWorkspaceMoveTopicId] = useState('');
-  const selectedWorkspaceMoveSession = selectedSessionId
-    ? sessions.find((session) => session.id === selectedSessionId) || null
-    : null;
-
-  useEffect(() => {
-    if (movableTopics.some((entry) => entry.topic.id === workspaceMoveTopicId)) {
-      return;
-    }
-    setWorkspaceMoveTopicId(movableTopics[0]?.topic.id || '');
-  }, [movableTopics, workspaceMoveTopicId]);
 
   useEffect(() => {
     setCollapsedFolders(readBooleanMapFromStorage(collapsedFoldersStorageKey));
@@ -6966,6 +7544,39 @@ function SidebarPanel({
                   >
                     {isCopyingSessions ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Copy className="h-3.5 w-3.5" />}
                     <span>העתק מסומנות</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isSessionWorkspaceMoveMode && (
+            <div className="rounded-2xl border border-cyan-100 bg-cyan-50/70 px-4 py-3 text-right">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-cyan-800">בחירה מרובה להעברה</div>
+                  <div className="mt-1 text-[11px] text-cyan-700">
+                    {selectedWorkspaceMoveSessionCount > 0
+                      ? `נבחרו ${selectedWorkspaceMoveSessionCount} שיחות`
+                      : 'סמן כמה שיחות מהרשימה; אפשר לשלב גם נושאים מההגדרות'}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onToggleSessionWorkspaceMoveMode}
+                    className="rounded-full border border-cyan-200 bg-white px-3 py-1.5 text-xs font-medium text-cyan-700 transition hover:bg-cyan-50"
+                  >
+                    סיים סימון
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onConfirmWorkspaceMoveSelection}
+                    disabled={isMovingWorkspace || (selectedWorkspaceMoveSessionCount === 0 && selectedWorkspaceMoveTopicIds.length === 0)}
+                    className="inline-flex items-center gap-1 rounded-full bg-cyan-700 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-cyan-800 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isMovingWorkspace ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+                    <span>בחר יעד</span>
                   </button>
                 </div>
               </div>
@@ -7122,9 +7733,12 @@ function SidebarPanel({
                                 isSelected={selectedSessionId === session.id}
                                 isActive={activeSessionIds.has(session.id)}
                                 isArchivedView={showArchived}
-                                isCopyMode={isSessionCopyMode}
-                                isMarkedForCopy={isSessionMarkedForCopy(session.id)}
-                                canCopy={isSessionCopySelectable(session)}
+                                isCopyMode={isSessionCopyMode || isSessionWorkspaceMoveMode}
+                                selectionPurpose={isSessionWorkspaceMoveMode ? 'workspace' : isSessionCopyMode ? 'copy' : null}
+                                isMarkedForCopy={isSessionWorkspaceMoveMode
+                                  ? isSessionMarkedForWorkspaceMove(session.id)
+                                  : isSessionMarkedForCopy(session.id)}
+                                canCopy={isSessionWorkspaceMoveMode || isSessionCopySelectable(session)}
                                 taskSummary={sessionTaskSummaries[session.id] || null}
                                 subtaskSummary={sessionSubtaskSummaries[session.id] || null}
                                 isNativeAgentsExpanded={Boolean(expandedNativeAgentParents[session.id])}
@@ -7132,7 +7746,13 @@ function SidebarPanel({
                                 isDeletingPermanent={deletingSessionId === session.id}
                                 onSelect={() => onSelectSession(session.id)}
                                 onPrefetch={() => onPrefetchSession(session.id)}
-                                onToggleMarkedForCopy={() => onToggleSessionMarkedForCopy(session.id)}
+                                onToggleMarkedForCopy={() => {
+                                  if (isSessionWorkspaceMoveMode) {
+                                    onToggleSessionMarkedForWorkspaceMove(session.id);
+                                    return;
+                                  }
+                                  onToggleSessionMarkedForCopy(session.id);
+                                }}
                                 onManageTopic={() => onManageTopic(session)}
                                 onManageTasks={() => onManageSessionTasks(session)}
                                 onToggleNativeAgents={() => setExpandedNativeAgentParents((current) => ({
@@ -7329,37 +7949,70 @@ function SidebarPanel({
                 </div>
                 <button
                   type="button"
-                  onClick={() => selectedWorkspaceMoveSession && onMoveSessionToWorkspace(selectedWorkspaceMoveSession.id)}
-                  disabled={!selectedWorkspaceMoveSession || isMovingWorkspace}
-                  className="mt-2 flex w-full items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-right text-sm text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={onToggleSessionWorkspaceMoveMode}
+                  disabled={isMovingWorkspace}
+                  className={cn(
+                    'mt-2 flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-right text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+                    isSessionWorkspaceMoveMode
+                      ? 'border-cyan-200 bg-cyan-50 text-cyan-700 hover:bg-cyan-100'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  )}
                 >
-                  <span className="min-w-0 flex-1 truncate">
-                    {selectedWorkspaceMoveSession
-                      ? `העבר את השיחה: ${selectedWorkspaceMoveSession.title}`
-                      : 'בחר שיחה מהרשימה כדי להעביר אותה'}
+                  <span>
+                    {isSessionWorkspaceMoveMode
+                      ? `סיים סימון שיחות (${selectedWorkspaceMoveSessionCount})`
+                      : 'בחר כמה שיחות מהרשימה'}
                   </span>
-                  {isMovingWorkspace ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <FolderTree className="h-4 w-4 shrink-0" />}
+                  <Check className="h-4 w-4" />
                 </button>
-                <select
-                  value={workspaceMoveTopicId}
-                  onChange={(event) => setWorkspaceMoveTopicId(event.target.value)}
-                  disabled={movableTopics.length === 0 || isMovingWorkspace}
-                  className="mt-2 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-3 text-right text-sm text-slate-700 outline-none transition focus:border-indigo-300 disabled:opacity-50"
-                >
-                  {movableTopics.length === 0 && <option value="">אין נושאים להעברה</option>}
-                  {movableTopics.map(({ topic, sessionCount }) => (
-                    <option key={topic.id} value={topic.id}>
-                      {topic.icon} {topic.name} · {sessionCount} שיחות
-                    </option>
-                  ))}
-                </select>
+
+                <div className="mt-3 text-[11px] font-semibold text-slate-500">בחר כמה נושאים</div>
+                {movableTopics.length === 0 ? (
+                  <div className="mt-2 rounded-xl border border-dashed border-slate-200 bg-white px-3 py-3 text-xs text-slate-400">
+                    אין נושאים זמינים להעברה.
+                  </div>
+                ) : (
+                  <div className="mt-2 max-h-40 space-y-1.5 overflow-y-auto rounded-xl border border-slate-100 bg-white p-2">
+                    {movableTopics.map(({ topic, sessionCount }) => {
+                      const isSelected = selectedWorkspaceMoveTopicIds.includes(topic.id);
+                      return (
+                        <button
+                          key={topic.id}
+                          type="button"
+                          onClick={() => onToggleWorkspaceMoveTopic(topic.id)}
+                          disabled={isMovingWorkspace}
+                          className={cn(
+                            'flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-right text-xs transition disabled:opacity-50',
+                            isSelected
+                              ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                              : 'border-slate-100 bg-slate-50/60 text-slate-600 hover:bg-slate-100'
+                          )}
+                        >
+                          <span className="min-w-0 flex-1 truncate">{topic.icon} {topic.name}</span>
+                          <span className="flex shrink-0 items-center gap-1.5">
+                            <span>{sessionCount} שיחות</span>
+                            <span className={cn(
+                              'flex h-5 w-5 items-center justify-center rounded-full border',
+                              isSelected ? 'border-indigo-300 bg-white' : 'border-slate-200 bg-white'
+                            )}>
+                              {isSelected && <Check className="h-3 w-3" />}
+                            </span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
                 <button
                   type="button"
-                  onClick={() => workspaceMoveTopicId && onMoveTopicToWorkspace(workspaceMoveTopicId)}
-                  disabled={!workspaceMoveTopicId || isMovingWorkspace}
-                  className="mt-2 flex w-full items-center justify-between gap-2 rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2 text-right text-sm text-indigo-700 transition-colors hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={onConfirmWorkspaceMoveSelection}
+                  disabled={isMovingWorkspace || (selectedWorkspaceMoveSessionCount === 0 && selectedWorkspaceMoveTopicIds.length === 0)}
+                  className="mt-3 flex w-full items-center justify-between gap-2 rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2 text-right text-sm text-indigo-700 transition-colors hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <span>העבר נושא עם כל השיחות שבתוכו</span>
+                  <span>
+                    בחר יעד ל־{selectedWorkspaceMoveSessionCount} שיחות ו־{selectedWorkspaceMoveTopicIds.length} נושאים
+                  </span>
                   {isMovingWorkspace ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderOpen className="h-4 w-4" />}
                 </button>
                 {workspaceMoveNotice && (
@@ -14137,6 +14790,9 @@ export function CodexMobileApp() {
   const [markedSessionIdsForCopy, setMarkedSessionIdsForCopy] = useState<string[]>([]);
   const [isCopyingSessions, setIsCopyingSessions] = useState(false);
   const [sessionCopyNotice, setSessionCopyNotice] = useState<string | null>(null);
+  const [isSessionWorkspaceMoveMode, setIsSessionWorkspaceMoveMode] = useState(false);
+  const [markedSessionIdsForWorkspaceMove, setMarkedSessionIdsForWorkspaceMove] = useState<string[]>([]);
+  const [markedTopicIdsForWorkspaceMove, setMarkedTopicIdsForWorkspaceMove] = useState<string[]>([]);
   const [workspaceMoveTarget, setWorkspaceMoveTarget] = useState<WorkspaceMoveTarget | null>(null);
   const [isMovingWorkspace, setIsMovingWorkspace] = useState(false);
   const [workspaceMoveNotice, setWorkspaceMoveNotice] = useState<string | null>(null);
@@ -14186,6 +14842,7 @@ export function CodexMobileApp() {
   const [isModelCatalogLoading, setIsModelCatalogLoading] = useState(false);
   const [isPermissionModeSaving, setIsPermissionModeSaving] = useState(false);
   const [isRateLimitLoading, setIsRateLimitLoading] = useState(false);
+  const [rateLimitError, setRateLimitError] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [draftCwd, setDraftCwd] = useState<string | null>(null);
   const [isFolderPickerOpen, setIsFolderPickerOpen] = useState(false);
@@ -14404,6 +15061,8 @@ export function CodexMobileApp() {
   const [isFullTimelineLoaded, setIsFullTimelineLoaded] = useState(false);
   const [isFullTimelineLoading, setIsFullTimelineLoading] = useState(false);
   const [fullTimelineLoadPercent, setFullTimelineLoadPercent] = useState(0);
+  const [isEarlierTimelineLoading, setIsEarlierTimelineLoading] = useState(false);
+  const [earlierTimelineLoadError, setEarlierTimelineLoadError] = useState<string | null>(null);
   const [isTranscriptCollapsed, setIsTranscriptCollapsed] = useState(false);
   const [queuePanelStage, setQueuePanelStage] = useState<'closed' | 'summary' | 'details'>('closed');
   const [expandedToolGroups, setExpandedToolGroups] = useState<Record<string, boolean>>({});
@@ -14414,6 +15073,7 @@ export function CodexMobileApp() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composerControlsRef = useRef<HTMLDivElement | null>(null);
+  const rateLimitButtonRef = useRef<HTMLButtonElement | null>(null);
   const composerDragDepthRef = useRef(0);
   const pollInFlightRef = useRef(false);
   const liveSessionStreamReadyRef = useRef(false);
@@ -14426,6 +15086,9 @@ export function CodexMobileApp() {
   const lastSessionDetailPollAtRef = useRef(0);
   const latestSessionLoadTokenRef = useRef(0);
   const sessionDetailAbortControllerRef = useRef<AbortController | null>(null);
+  const latestEarlierTimelineLoadTokenRef = useRef(0);
+  const earlierTimelineAbortControllerRef = useRef<AbortController | null>(null);
+  const earlierTimelineLoadInFlightRef = useRef(false);
   const latestFullTimelineLoadTokenRef = useRef(0);
   const latestInstructionLoadTokenRef = useRef(0);
   const latestFinalNotificationLoadTokenRef = useRef(0);
@@ -14457,8 +15120,16 @@ export function CodexMobileApp() {
   const selectedSessionRef = useRef<CodexSessionDetail | null>(selectedSession);
   const queueStatusByIdRef = useRef<Record<string, CodexQueueServerItem['status']>>({});
   const sessionCompletionToastTimerRef = useRef<number | null>(null);
-  const isTranscriptNearBottomRef = useRef(true);
+  const transcriptScrollModeRef = useRef<TranscriptScrollMode>('follow-live');
+  const transcriptProgrammaticScrollRef = useRef<{
+    scrollTop: number;
+    expiresAt: number;
+  } | null>(null);
   const lastTranscriptSignatureRef = useRef('');
+  const transcriptRenderSnapshotRef = useRef({
+    conversationKey: '',
+    firstEntryId: null as string | null,
+  });
   const transcriptViewportSnapshotRef = useRef({
     scrollTop: 0,
     scrollHeight: 0,
@@ -14652,21 +15323,32 @@ export function CodexMobileApp() {
     () => flattenTimelineRenderBlocks(timelineBlocks),
     [timelineBlocks]
   );
+  const transcriptConversationKey = selectedSessionId || `draft:${draftConversationKey}`;
   const transcriptSignature = useMemo(() => {
     const timelineTail = visibleTimelineEntries
       .slice(-8)
-      .map((entry) => `${entry.id}:${entry.entryType}:${entry.timestamp}`)
+      .map((entry) => [
+        entry.id,
+        entry.entryType,
+        entry.timestamp,
+        entry.status || '',
+        entry.text?.length || 0,
+        entry.toolInputText?.length || 0,
+        entry.toolOutputText?.length || 0,
+      ].join(':'))
       .join('|');
 
     return [
-      selectedSessionId || draftConversationKey,
+      transcriptConversationKey,
       forkDraftContext?.sourceSessionId || '',
       forkDraftContext?.forkEntryId || '',
       visibleTimelineEntries.length,
+      visibleTimelineEntries[0]?.id || '',
+      selectedSession?.timelineWindowStart || 0,
       timelineTail,
       isSending ? 'sending' : 'idle',
     ].join('::');
-  }, [draftConversationKey, forkDraftContext?.forkEntryId, forkDraftContext?.sourceSessionId, isSending, selectedSessionId, visibleTimelineEntries]);
+  }, [forkDraftContext?.forkEntryId, forkDraftContext?.sourceSessionId, isSending, selectedSession?.timelineWindowStart, transcriptConversationKey, visibleTimelineEntries]);
 
   useEffect(() => {
     setQueuePanelStage('closed');
@@ -15228,6 +15910,10 @@ export function CodexMobileApp() {
     setIsFullTimelineLoaded(false);
   }, [selectedSessionId]);
 
+  const requestEarlierTimelinePageEvent = useEffectEvent(() => {
+    void loadEarlierSessionTimeline();
+  });
+
   useEffect(() => {
     const handleVisibilityChange = () => {
       setIsDocumentVisible(isDocumentCurrentlyVisible());
@@ -15252,13 +15938,52 @@ export function CodexMobileApp() {
     }
 
     const updateViewportScrollState = () => {
-      const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-      isTranscriptNearBottomRef.current = distanceFromBottom < 180;
+      const previousScrollTop = transcriptViewportSnapshotRef.current.scrollTop;
+      const scrollTop = Math.max(0, viewport.scrollTop);
+      const programmaticScroll = transcriptProgrammaticScrollRef.current;
+      const isProgrammaticScroll = Boolean(
+        programmaticScroll
+        && performance.now() <= programmaticScroll.expiresAt
+        && Math.abs(programmaticScroll.scrollTop - scrollTop) <= 2
+      );
+      if (programmaticScroll) {
+        transcriptProgrammaticScrollRef.current = null;
+      }
+      const distanceFromBottom = Math.max(
+        0,
+        viewport.scrollHeight - scrollTop - viewport.clientHeight,
+      );
+      if (isProgrammaticScroll) {
+        transcriptViewportSnapshotRef.current = {
+          scrollTop,
+          scrollHeight: viewport.scrollHeight,
+          clientHeight: viewport.clientHeight,
+        };
+        return;
+      }
+      const intent = resolveTranscriptScrollIntent({
+        mode: transcriptScrollModeRef.current,
+        previousScrollTop,
+        scrollTop,
+        distanceFromBottom,
+      });
+      transcriptScrollModeRef.current = intent.mode;
       transcriptViewportSnapshotRef.current = {
         scrollTop: viewport.scrollTop,
         scrollHeight: viewport.scrollHeight,
         clientHeight: viewport.clientHeight,
       };
+
+      if (shouldRequestEarlierTimeline({
+        mode: intent.mode,
+        enteredReadingMode: intent.enteredReadingMode,
+        scrollTop,
+        clientHeight: viewport.clientHeight,
+        hasEarlierTimeline: selectedSessionRef.current?.hasEarlierTimeline === true,
+        isLoading: earlierTimelineLoadInFlightRef.current,
+      })) {
+        requestEarlierTimelinePageEvent();
+      }
     };
 
     updateViewportScrollState();
@@ -15275,8 +16000,11 @@ export function CodexMobileApp() {
     }
 
     const observer = new ResizeObserver(() => {
-      if (isTranscriptNearBottomRef.current) {
-        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      if (transcriptScrollModeRef.current === 'follow-live') {
+        setTranscriptViewportScrollTop(
+          viewport,
+          Math.max(0, viewport.scrollHeight - viewport.clientHeight),
+        );
       }
 
       transcriptViewportSnapshotRef.current = {
@@ -15293,13 +16021,20 @@ export function CodexMobileApp() {
   }, []);
 
   useEffect(() => {
-    isTranscriptNearBottomRef.current = true;
+    transcriptScrollModeRef.current = 'follow-live';
+    transcriptProgrammaticScrollRef.current = null;
     lastTranscriptSignatureRef.current = '';
+    transcriptRenderSnapshotRef.current = {
+      conversationKey: '',
+      firstEntryId: null,
+    };
     transcriptViewportSnapshotRef.current = {
       scrollTop: 0,
       scrollHeight: 0,
       clientHeight: 0,
     };
+    cancelEarlierTimelineLoading();
+    setEarlierTimelineLoadError(null);
   }, [draftConversationKey, selectedSessionId]);
 
   useEffect(() => {
@@ -15324,10 +16059,20 @@ export function CodexMobileApp() {
       return;
     }
 
-    viewport.scrollTo({
-      top: viewport.scrollHeight,
-      behavior,
-    });
+    const targetScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    if (behavior === 'auto') {
+      setTranscriptViewportScrollTop(viewport, targetScrollTop);
+      return;
+    }
+    viewport.scrollTo({ top: targetScrollTop, behavior });
+  }
+
+  function setTranscriptViewportScrollTop(viewport: HTMLElement, scrollTop: number) {
+    transcriptProgrammaticScrollRef.current = {
+      scrollTop,
+      expiresAt: performance.now() + 200,
+    };
+    viewport.scrollTop = scrollTop;
   }
 
   useLayoutEffect(() => {
@@ -15337,36 +16082,60 @@ export function CodexMobileApp() {
     }
 
     const previousViewportSnapshot = transcriptViewportSnapshotRef.current;
-    const shouldAutoScroll = (
-      !lastTranscriptSignatureRef.current
-      || isTranscriptNearBottomRef.current
+    const previousRenderSnapshot = transcriptRenderSnapshotRef.current;
+    const nextFirstEntryId = visibleTimelineEntries[0]?.id || null;
+    const previousFirstEntryStillRendered = Boolean(
+      previousRenderSnapshot.firstEntryId
+      && visibleTimelineEntries.some((entry) => entry.id === previousRenderSnapshot.firstEntryId)
     );
-
-    lastTranscriptSignatureRef.current = transcriptSignature;
-
-    if (!shouldAutoScroll) {
-      const heightDelta = viewport.scrollHeight - previousViewportSnapshot.scrollHeight;
-      if (heightDelta !== 0) {
-        viewport.scrollTop = Math.max(0, previousViewportSnapshot.scrollTop + heightDelta);
-      }
-      transcriptViewportSnapshotRef.current = {
-        scrollTop: viewport.scrollTop,
-        scrollHeight: viewport.scrollHeight,
-        clientHeight: viewport.clientHeight,
-      };
-      return;
+    const mutation = classifyTranscriptMutation({
+      previousConversationKey: previousRenderSnapshot.conversationKey,
+      nextConversationKey: transcriptConversationKey,
+      previousFirstEntryId: previousRenderSnapshot.firstEntryId,
+      nextFirstEntryId,
+      previousFirstEntryStillRendered,
+    });
+    if (mutation === 'reset') {
+      transcriptScrollModeRef.current = 'follow-live';
     }
 
-    scrollTranscriptViewportToBottom('auto');
+    lastTranscriptSignatureRef.current = transcriptSignature;
+    const nextScrollTop = resolveScrollTopAfterTimelineChange({
+      mode: transcriptScrollModeRef.current,
+      mutation,
+      previousScrollTop: previousViewportSnapshot.scrollTop,
+      previousScrollHeight: previousViewportSnapshot.scrollHeight,
+      nextScrollHeight: viewport.scrollHeight,
+      clientHeight: viewport.clientHeight,
+    });
+    setTranscriptViewportScrollTop(viewport, nextScrollTop);
     transcriptViewportSnapshotRef.current = {
       scrollTop: viewport.scrollTop,
       scrollHeight: viewport.scrollHeight,
       clientHeight: viewport.clientHeight,
     };
-  }, [transcriptSignature]);
+    transcriptRenderSnapshotRef.current = {
+      conversationKey: transcriptConversationKey,
+      firstEntryId: nextFirstEntryId,
+    };
+    if (shouldRequestEarlierTimeline({
+      mode: transcriptScrollModeRef.current,
+      enteredReadingMode: false,
+      scrollTop: nextScrollTop,
+      clientHeight: viewport.clientHeight,
+      hasEarlierTimeline: selectedSessionRef.current?.hasEarlierTimeline === true,
+      isLoading: earlierTimelineLoadInFlightRef.current,
+    })) {
+      const nextPageFrame = window.requestAnimationFrame(() => {
+        requestEarlierTimelinePageEvent();
+      });
+      return () => window.cancelAnimationFrame(nextPageFrame);
+    }
+  }, [transcriptConversationKey, transcriptSignature, visibleTimelineEntries]);
 
   function scrollTranscriptToTop() {
-    isTranscriptNearBottomRef.current = false;
+    transcriptScrollModeRef.current = 'reading-history';
+    requestEarlierTimelinePageEvent();
     mainScrollRef.current?.scrollTo({
       top: 0,
       behavior: 'smooth',
@@ -15374,7 +16143,7 @@ export function CodexMobileApp() {
   }
 
   function scrollTranscriptToBottom() {
-    isTranscriptNearBottomRef.current = true;
+    transcriptScrollModeRef.current = 'follow-live';
     scrollTranscriptViewportToBottom('smooth');
   }
 
@@ -15800,33 +16569,26 @@ export function CodexMobileApp() {
     void loadFolderPicker(preferredLaunchPath, { resetHistory: true });
   }
 
-  function beginSessionWorkspaceMove(sessionId: string) {
-    const session = sessions.find((candidate) => candidate.id === sessionId);
-    if (!session) {
-      setError('השיחה שנבחרה לא נמצאה ברשימה.');
+  function beginWorkspaceMoveSelection() {
+    if (markedSessionIdsForWorkspaceMove.length === 0 && markedTopicIdsForWorkspaceMove.length === 0) {
+      setError('בחר לפחות שיחה אחת או נושא אחד להעברה.');
       return;
     }
-    openWorkspaceMovePicker({
-      kind: 'session',
-      sessionId: session.id,
-      label: session.title,
-      cwd: session.cwd,
-    });
-  }
-
-  function beginTopicWorkspaceMove(topicId: string) {
-    const topicSessions = sessions.filter((session) => session.topic?.id === topicId);
-    const topic = topicSessions[0]?.topic;
-    if (!topic) {
-      setError('הנושא שנבחר לא נמצא ברשימה.');
-      return;
+    const sourceCwds = new Set<string>();
+    for (const session of sessions) {
+      if (markedSessionIdsForWorkspaceMove.includes(session.id) && session.cwd) {
+        sourceCwds.add(session.cwd);
+      }
+      if (session.topic && markedTopicIdsForWorkspaceMove.includes(session.topic.id)) {
+        sourceCwds.add(session.topic.cwd);
+      }
     }
     openWorkspaceMovePicker({
-      kind: 'topic',
-      topicId: topic.id,
-      label: topic.name,
-      cwd: topic.cwd,
-      sessionCount: topicSessions.length,
+      kind: 'batch',
+      sessionIds: [...markedSessionIdsForWorkspaceMove],
+      topicIds: [...markedTopicIdsForWorkspaceMove],
+      label: `${markedSessionIdsForWorkspaceMove.length} שיחות ו־${markedTopicIdsForWorkspaceMove.length} נושאים`,
+      cwd: sourceCwds.size === 1 ? [...sourceCwds][0]! : currentProfile?.workspaceCwd || null,
     });
   }
 
@@ -15867,7 +16629,7 @@ export function CodexMobileApp() {
   async function selectFolder(folderPath: string) {
     const moveTarget = workspaceMoveTarget;
     if (moveTarget) {
-      if (moveTarget.cwd === folderPath) {
+      if (moveTarget.kind !== 'batch' && moveTarget.cwd === folderPath) {
         setFolderBrowserError('זהו כבר הנתיב הפעיל. בחר תיקייה אחרת.');
         return;
       }
@@ -15875,29 +16637,95 @@ export function CodexMobileApp() {
       setIsMovingWorkspace(true);
       setError(null);
       try {
-        const response = moveTarget.kind === 'session'
-          ? await moveSessionToWorkspaceRequest(profileId, moveTarget.sessionId, folderPath)
-          : await moveTopicToWorkspaceRequest(profileId, moveTarget.topicId, folderPath);
+        let responses: CodexWorkspaceMoveResponse[] = [];
+        const requestErrors: string[] = [];
+        if (moveTarget.kind === 'batch') {
+          const topicById = new Map<string, CodexSessionTopic>();
+          for (const session of sessions) {
+            if (session.topic && moveTarget.topicIds.includes(session.topic.id)) {
+              topicById.set(session.topic.id, session.topic);
+            }
+          }
+          const topicIdsToMove = buildWorkspaceMovePlan({
+            sessions,
+            selectedSessionIds: moveTarget.sessionIds,
+            selectedTopicIds: moveTarget.topicIds,
+            successfullyMovedTopicIds: [],
+            targetCwd: folderPath,
+          }).topicIds;
+          const successfullyMovedTopicIds = new Set<string>();
+
+          for (const topicId of topicIdsToMove) {
+            try {
+              responses.push(await moveTopicToWorkspaceRequest(profileId, topicId, folderPath));
+              successfullyMovedTopicIds.add(topicId);
+            } catch (moveError: any) {
+              requestErrors.push(moveError.message || `העברת הנושא ${topicById.get(topicId)?.name || topicId} נכשלה.`);
+            }
+          }
+          const sessionIdsToMove = buildWorkspaceMovePlan({
+            sessions,
+            selectedSessionIds: moveTarget.sessionIds,
+            selectedTopicIds: moveTarget.topicIds,
+            successfullyMovedTopicIds,
+            targetCwd: folderPath,
+          }).sessionIds;
+          for (const sessionId of sessionIdsToMove) {
+            try {
+              responses.push(await moveSessionToWorkspaceRequest(profileId, sessionId, folderPath));
+            } catch (moveError: any) {
+              requestErrors.push(moveError.message || `העברת השיחה ${sessionId} נכשלה.`);
+            }
+          }
+
+          if (topicIdsToMove.length === 0 && sessionIdsToMove.length === 0) {
+            throw new Error('כל השיחות והנושאים שנבחרו כבר נמצאים בתיקיית היעד.');
+          }
+          if (responses.length === 0) {
+            throw new Error(requestErrors.join(' • ') || 'העברת הפריטים שנבחרו נכשלה.');
+          }
+        } else {
+          responses = [moveTarget.kind === 'session'
+            ? await moveSessionToWorkspaceRequest(profileId, moveTarget.sessionId, folderPath)
+            : await moveTopicToWorkspaceRequest(profileId, moveTarget.topicId, folderPath)];
+        }
+
+        const affectedSessionIds = [...new Set(responses.flatMap((response) => response.affectedSessionIds))];
+        const queueItemIds = [...new Set(responses.flatMap((response) => response.queueItemIds))];
+        const announcementErrors = responses.flatMap((response) => response.announcementErrors);
+        const response = responses[responses.length - 1]!;
         const movedCount = response.affectedSessionIds.length;
-        const queuedCount = response.queueItemIds.length;
-        const failedAnnouncements = response.announcementErrors.length;
+        const queuedCount = queueItemIds.length;
+        const failedAnnouncements = announcementErrors.length;
         const targetLabel = moveTarget.kind === 'session'
           ? `השיחה „${moveTarget.label}” הועברה`
-          : `הנושא „${moveTarget.label}” וכל ${movedCount} השיחות שבו הועברו`;
+          : moveTarget.kind === 'topic'
+            ? `הנושא „${moveTarget.label}” וכל ${movedCount} השיחות שבו הועברו`
+            : `${affectedSessionIds.length} שיחות מתוך הבחירה המרובה הועברו`;
         setWorkspaceMoveNotice([
-          `${targetLabel} אל ${response.cwd}.`,
+          `${targetLabel} אל ${folderPath}.`,
           queuedCount > 0 ? `נשלחו ${queuedCount} הודעות מעבר לסשנים.` : '',
           failedAnnouncements > 0 ? `${failedAnnouncements} הודעות לא נשלחו; פרטי השגיאה זמינים בראש המסך.` : '',
+          requestErrors.length > 0 ? `${requestErrors.length} פריטים לא הועברו.` : '',
+          moveTarget.kind === 'batch' ? 'אפשר לבחור מיד פריטים נוספים להעברה הבאה.' : '',
         ].filter(Boolean).join(' '));
-        if (failedAnnouncements > 0) {
-          setError(response.announcementErrors.map((entry) => entry.reason).join(' • '));
+        if (failedAnnouncements > 0 || requestErrors.length > 0) {
+          setError([
+            ...announcementErrors.map((entry) => entry.reason),
+            ...requestErrors,
+          ].join(' • '));
         }
         await Promise.all([
           loadSessionsOnly(profileId, { silent: true }),
           loadQueueItems(profileId, { silent: true }),
         ]);
-        if (selectedSessionId && response.affectedSessionIds.includes(selectedSessionId)) {
+        if (selectedSessionId && affectedSessionIds.includes(selectedSessionId)) {
           await loadSessionDetail(selectedSessionId, profileId, { silent: true });
+        }
+        if (moveTarget.kind === 'batch') {
+          setMarkedSessionIdsForWorkspaceMove([]);
+          setMarkedTopicIdsForWorkspaceMove([]);
+          setIsSessionWorkspaceMoveMode(false);
         }
       } catch (moveError: any) {
         setError(moveError.message || 'העברת השיחה לתיקייה אחרת נכשלה.');
@@ -16378,6 +17206,145 @@ export function CodexMobileApp() {
     }
   }
 
+  function cancelEarlierTimelineLoading() {
+    latestEarlierTimelineLoadTokenRef.current += 1;
+    earlierTimelineAbortControllerRef.current?.abort();
+    earlierTimelineAbortControllerRef.current = null;
+    earlierTimelineLoadInFlightRef.current = false;
+    setIsEarlierTimelineLoading(false);
+  }
+
+  async function loadEarlierSessionTimeline() {
+    const currentSession = selectedSessionRef.current;
+    const requestServerId = activeServerRef.current;
+    const nextProfileId = activeProfileRef.current;
+    if (
+      !currentSession
+      || !activeSelectedSessionIdRef.current
+      || currentSession.id !== activeSelectedSessionIdRef.current
+      || !nextProfileId
+      || !currentSession.hasEarlierTimeline
+      || currentSession.timelineWindowStart <= 0
+      || earlierTimelineLoadInFlightRef.current
+      || isFullTimelineLoading
+    ) {
+      return null;
+    }
+
+    const sessionId = currentSession.id;
+    const requestedBefore = currentSession.timelineWindowStart;
+    const pageSize = Math.min(TIMELINE_AUTO_LOAD_PAGE_SIZE, requestedBefore);
+    const requestToken = ++latestEarlierTimelineLoadTokenRef.current;
+    const requestController = new AbortController();
+    earlierTimelineAbortControllerRef.current = requestController;
+    earlierTimelineLoadInFlightRef.current = true;
+    setIsEarlierTimelineLoading(true);
+    setEarlierTimelineLoadError(null);
+    recordCodexBreadcrumb('timeline-auto-load-earlier-started', {
+      sessionId,
+      before: requestedBefore,
+      pageSize,
+    });
+
+    try {
+      const rawData = await fetchJsonForServer<{ session: CodexSessionDetail }>(
+        requestServerId,
+        `/api/codex/sessions/${encodeURIComponent(sessionId)}?profile=${encodeURIComponent(nextProfileId)}&tail=${pageSize}&before=${requestedBefore}`,
+        { signal: requestController.signal }
+      );
+      const earlierSession = prepareSessionDetailForBrowser(rawData.session);
+      if (
+        requestToken !== latestEarlierTimelineLoadTokenRef.current
+        || requestServerId !== activeServerRef.current
+        || nextProfileId !== activeProfileRef.current
+        || sessionId !== activeSelectedSessionIdRef.current
+      ) {
+        return null;
+      }
+
+      const latestSession = selectedSessionRef.current;
+      if (!latestSession || latestSession.id !== sessionId) {
+        return null;
+      }
+      if (
+        latestSession.timelineWindowStart !== requestedBefore
+        || earlierSession.timelineWindowEnd !== requestedBefore
+      ) {
+        recordCodexBreadcrumb('timeline-auto-load-earlier-stale-discarded', {
+          sessionId,
+          requestedBefore,
+          currentWindowStart: latestSession.timelineWindowStart,
+          responseWindowEnd: earlierSession.timelineWindowEnd,
+        });
+        return null;
+      }
+
+      const mergedTimeline = mergeEarlierTimelineEntries(
+        earlierSession.timeline,
+        latestSession.timeline,
+      );
+      const nextWindowStart = Math.min(
+        latestSession.timelineWindowStart,
+        earlierSession.timelineWindowStart,
+      );
+      const madeProgress = (
+        nextWindowStart < latestSession.timelineWindowStart
+        || mergedTimeline.length > latestSession.timeline.length
+      );
+      const nextSession: CodexSessionDetail = {
+        ...latestSession,
+        timeline: mergedTimeline,
+        totalTimelineEntries: Math.max(
+          latestSession.totalTimelineEntries,
+          earlierSession.totalTimelineEntries,
+          mergedTimeline.length,
+        ),
+        timelineWindowStart: nextWindowStart,
+        timelineWindowEnd: Math.max(
+          latestSession.timelineWindowEnd,
+          nextWindowStart + mergedTimeline.length,
+        ),
+        hasEarlierTimeline: madeProgress && nextWindowStart > 0,
+      };
+
+      selectedSessionRef.current = nextSession;
+      setSelectedSession((visibleSession) => (
+        visibleSession?.id === sessionId ? nextSession : visibleSession
+      ));
+      setSessionWindowSize((current) => Math.max(current, mergedTimeline.length));
+      rememberSessionDetail(requestServerId, nextProfileId, nextSession);
+      recordCodexBreadcrumb('timeline-auto-load-earlier-completed', {
+        sessionId,
+        loaded: mergedTimeline.length - latestSession.timeline.length,
+        windowStart: nextWindowStart,
+        hasEarlier: nextSession.hasEarlierTimeline,
+      });
+      return nextSession;
+    } catch (loadError: any) {
+      if (loadError?.name === 'AbortError') {
+        return null;
+      }
+      const message = loadError.message || 'טעינת הודעות קודמות נכשלה.';
+      setEarlierTimelineLoadError(message);
+      reportCodexClientLog({
+        type: 'session-earlier-timeline-load-failed',
+        message,
+        details: {
+          sessionId,
+          profileId: nextProfileId,
+          before: requestedBefore,
+        },
+      });
+      return null;
+    } finally {
+      if (requestToken === latestEarlierTimelineLoadTokenRef.current) {
+        earlierTimelineLoadInFlightRef.current = false;
+        earlierTimelineAbortControllerRef.current = null;
+        setIsEarlierTimelineLoading(false);
+      }
+    }
+  }
+
   function cancelFullTimelineLoading() {
     latestFullTimelineLoadTokenRef.current += 1;
     setIsFullTimelineLoading(false);
@@ -16385,6 +17352,7 @@ export function CodexMobileApp() {
   }
 
   async function loadFullSessionTimeline(sessionId: string, nextProfileId = profileId) {
+    cancelEarlierTimelineLoading();
     if (!selectedSession || selectedSession.id !== sessionId) {
       return null;
     }
@@ -16762,7 +17730,7 @@ export function CodexMobileApp() {
     nextCwd?: string | null,
     options: { draftKey?: string } = {}
   ) {
-    const fallbackCwd = nextCwd || selectedSession?.cwd || currentProfile?.workspaceCwd || selectedProfileWorkspaceCwd;
+    const fallbackCwd = nextCwd || currentProfile?.workspaceCwd || selectedProfileWorkspaceCwd || selectedSession?.cwd;
     recordCodexBreadcrumb('new-conversation-opened', {
       previousSessionId: selectedSessionId,
       cwd: fallbackCwd,
@@ -16770,6 +17738,7 @@ export function CodexMobileApp() {
     latestSessionLoadTokenRef.current += 1;
     latestFinalNotificationLoadTokenRef.current += 1;
     cancelFullTimelineLoading();
+    cancelEarlierTimelineLoading();
     setSelectedSessionId(null);
     setSelectedSession(null);
     setIsDraftConversation(true);
@@ -16853,6 +17822,7 @@ export function CodexMobileApp() {
   async function handleOpenSession(sessionId: string) {
     recordCodexBreadcrumb('session-opened', { sessionId });
     cancelFullTimelineLoading();
+    cancelEarlierTimelineLoading();
     setActiveToolEntry(null);
     closeFilePreview();
     setIsDraftConversation(true);
@@ -16877,6 +17847,8 @@ export function CodexMobileApp() {
   function resetWorkspaceForServerChange() {
     latestSessionLoadTokenRef.current += 1;
     latestFullTimelineLoadTokenRef.current += 1;
+    cancelEarlierTimelineLoading();
+    setEarlierTimelineLoadError(null);
     latestInstructionLoadTokenRef.current += 1;
     latestFinalNotificationLoadTokenRef.current += 1;
     latestSessionContextSelectionLoadTokenRef.current += 1;
@@ -17038,6 +18010,7 @@ export function CodexMobileApp() {
     latestSessionLoadTokenRef.current += 1;
     latestFinalNotificationLoadTokenRef.current += 1;
     cancelFullTimelineLoading();
+    cancelEarlierTimelineLoading();
     setError(null);
     setSearch('');
     setPrompt('');
@@ -17486,6 +18459,7 @@ export function CodexMobileApp() {
 
       latestSessionLoadTokenRef.current += 1;
       cancelFullTimelineLoading();
+      cancelEarlierTimelineLoading();
       activeProfileRef.current = activeProfileId;
       activeSelectedSessionIdRef.current = data.session.isDraft ? null : data.session.id;
       closeFilePreview();
@@ -17620,6 +18594,7 @@ export function CodexMobileApp() {
 
       latestSessionLoadTokenRef.current += 1;
       cancelFullTimelineLoading();
+      cancelEarlierTimelineLoading();
       activeProfileRef.current = data.targetProfileId;
       activeSelectedSessionIdRef.current = null;
       draftQueueItemIdsRef.current[data.sessionId] = Array.from(new Set([
@@ -18620,17 +19595,23 @@ export function CodexMobileApp() {
     }
   }
 
-  async function loadRateLimitSnapshot(nextProfileId = profileId, nextSessionId = selectedSessionId) {
+  async function loadRateLimitSnapshot(
+    nextProfileId = profileId,
+    nextSessionId = selectedSessionId,
+    forceRefresh = false
+  ) {
     if (!nextProfileId) {
       setRateLimitSnapshot(null);
+      setRateLimitError(null);
       return;
     }
 
     const requestToken = ++latestRateLimitLoadTokenRef.current;
     setIsRateLimitLoading(true);
+    setRateLimitError(null);
 
     try {
-      const data = await fetchCodexRateLimits(nextProfileId, nextSessionId);
+      const data = await fetchCodexRateLimits(nextProfileId, nextSessionId, forceRefresh);
       if (
         requestToken !== latestRateLimitLoadTokenRef.current
         || nextProfileId !== activeProfileRef.current
@@ -18640,15 +19621,30 @@ export function CodexMobileApp() {
       }
 
       setRateLimitSnapshot(data);
-    } catch (_rateLimitError: any) {
+    } catch (rateLimitLoadError: any) {
       if (requestToken === latestRateLimitLoadTokenRef.current) {
-        setRateLimitSnapshot(null);
+        setRateLimitError(rateLimitLoadError?.message || 'לא ניתן לטעון כרגע את נתוני השימוש.');
       }
     } finally {
       if (requestToken === latestRateLimitLoadTokenRef.current) {
         setIsRateLimitLoading(false);
       }
     }
+  }
+
+  async function handleFullResetConsumption(
+    creditId: string,
+    idempotencyKey: string
+  ): Promise<CodexResetConsumptionResponse> {
+    if (!profileId) {
+      throw new Error('לא נבחר חשבון Codex להפעלת Full Reset.');
+    }
+
+    const targetProfileId = profileId;
+    const targetSessionId = selectedSessionId;
+    const result = await consumeCodexFullResetRequest(targetProfileId, creditId, idempotencyKey);
+    await loadRateLimitSnapshot(targetProfileId, targetSessionId, true);
+    return result;
   }
 
   async function loadCurrentSessionInstruction(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
@@ -20688,6 +21684,10 @@ export function CodexMobileApp() {
     () => new Set(markedSessionIdsForCopy),
     [markedSessionIdsForCopy]
   );
+  const markedSessionIdsForWorkspaceMoveSet = useMemo(
+    () => new Set(markedSessionIdsForWorkspaceMove),
+    [markedSessionIdsForWorkspaceMove]
+  );
   const selectedSkillSummaries = useMemo(
     () => availableUnifiedSkills.filter((skill) => sessionContextSelection.skillIds.includes(skill.id)),
     [availableUnifiedSkills, sessionContextSelection.skillIds]
@@ -20747,10 +21747,40 @@ export function CodexMobileApp() {
 
     setError(null);
     setSessionCopyNotice(null);
+    if (!isSessionCopyMode) {
+      setIsSessionWorkspaceMoveMode(false);
+      setMarkedSessionIdsForWorkspaceMove([]);
+    }
     setIsSessionCopyMode((current) => !current);
     if (isSessionCopyMode) {
       setMarkedSessionIdsForCopy([]);
     }
+  }
+
+  function toggleSessionMarkedForWorkspaceMove(sessionId: string) {
+    setMarkedSessionIdsForWorkspaceMove((current) => (
+      current.includes(sessionId)
+        ? current.filter((candidate) => candidate !== sessionId)
+        : [...current, sessionId]
+    ));
+  }
+
+  function toggleWorkspaceMoveTopic(topicId: string) {
+    setMarkedTopicIdsForWorkspaceMove((current) => (
+      current.includes(topicId)
+        ? current.filter((candidate) => candidate !== topicId)
+        : [...current, topicId]
+    ));
+  }
+
+  function toggleSessionWorkspaceMoveMode() {
+    setError(null);
+    setWorkspaceMoveNotice(null);
+    if (!isSessionWorkspaceMoveMode) {
+      setIsSessionCopyMode(false);
+      setMarkedSessionIdsForCopy([]);
+    }
+    setIsSessionWorkspaceMoveMode((current) => !current);
   }
 
   async function handleCopyMarkedSessions() {
@@ -20801,6 +21831,14 @@ export function CodexMobileApp() {
       setMarkedSessionIdsForCopy([]);
     }
   }, [copyableCodexTargetProfiles, sessionCopyTargetProfileId]);
+
+  useEffect(() => {
+    setIsSessionWorkspaceMoveMode(false);
+    setMarkedSessionIdsForWorkspaceMove([]);
+    setMarkedTopicIdsForWorkspaceMove([]);
+    setWorkspaceMoveTarget(null);
+    setWorkspaceMoveNotice(null);
+  }, [profileId, serverId]);
 
   useEffect(() => {
     if (!profileId || !currentQueueKey) {
@@ -21142,6 +22180,9 @@ export function CodexMobileApp() {
       selectedSessionCopyCount={markedSessionIdsForCopy.length}
       isCopyingSessions={isCopyingSessions}
       sessionCopyNotice={sessionCopyNotice}
+      isSessionWorkspaceMoveMode={isSessionWorkspaceMoveMode}
+      selectedWorkspaceMoveSessionCount={markedSessionIdsForWorkspaceMove.length}
+      selectedWorkspaceMoveTopicIds={markedTopicIdsForWorkspaceMove}
       isMovingWorkspace={isMovingWorkspace}
       workspaceMoveNotice={workspaceMoveNotice}
       sessionTaskSummaries={sessionTaskSummaries}
@@ -21178,14 +22219,17 @@ export function CodexMobileApp() {
       onToggleWorkspaceMode={handleToggleWorkspaceMode}
       onToggleSessionCopyMode={toggleSessionCopyMode}
       onConfirmCopySessions={() => void handleCopyMarkedSessions()}
-      onMoveSessionToWorkspace={beginSessionWorkspaceMove}
-      onMoveTopicToWorkspace={beginTopicWorkspaceMove}
+      onToggleSessionWorkspaceMoveMode={toggleSessionWorkspaceMoveMode}
+      onToggleWorkspaceMoveTopic={toggleWorkspaceMoveTopic}
+      onConfirmWorkspaceMoveSelection={beginWorkspaceMoveSelection}
       onManageTopic={(session) => void openTopicManager(session)}
       onManageSessionTasks={openSessionTaskDialog}
       onToggleArchived={() => setShowArchived((current) => !current)}
       isSessionCopySelectable={isSessionEligibleForUserCopy}
       isSessionMarkedForCopy={(sessionId) => markedSessionIdsForCopySet.has(sessionId)}
       onToggleSessionMarkedForCopy={toggleSessionMarkedForCopy}
+      isSessionMarkedForWorkspaceMove={(sessionId) => markedSessionIdsForWorkspaceMoveSet.has(sessionId)}
+      onToggleSessionMarkedForWorkspaceMove={toggleSessionMarkedForWorkspaceMove}
       onToggleSessionHidden={(sessionId, hidden) => void handleToggleSessionHidden(sessionId, hidden)}
       onDeleteSessionPermanently={(session) => setPendingPermanentDeleteSession(session)}
       onSelectSession={handleSelectConversation}
@@ -21458,36 +22502,27 @@ export function CodexMobileApp() {
                 <div className="flex flex-wrap items-center justify-center gap-2">
                 <button
                   type="button"
-                  disabled={isFullTimelineLoading}
-                  onClick={() => {
-                    if (!selectedSessionId || isFullTimelineLoading) {
-                      return;
-                    }
-
-                    const nextWindowSize = Math.min(
-                      totalTimelineLength,
-                      renderedTimeline.length + TIMELINE_WINDOW_INCREMENT
-                    );
-                    recordCodexBreadcrumb('timeline-expanded', {
-                      hiddenBefore: hiddenTimelineCount,
-                      nextWindowSize,
-                    });
-                    setIsFullTimelineLoaded(false);
-                    setSessionWindowSize(nextWindowSize);
-                    void loadSessionDetail(selectedSessionId, profileId, {
-                      silent: true,
-                      tail: nextWindowSize,
-                    });
-                  }}
+                  disabled={isFullTimelineLoading || isEarlierTimelineLoading}
+                  onClick={() => void loadEarlierSessionTimeline()}
+                  title={earlierTimelineLoadError || 'הודעות קודמות נטענות אוטומטית בעת גלילה למעלה'}
                   className="rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-600 shadow-sm transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                 >
-                  טען עוד {Math.min(hiddenTimelineCount, TIMELINE_WINDOW_INCREMENT)} אירועים ישנים
+                  {isEarlierTimelineLoading ? (
+                    <span className="inline-flex items-center gap-2">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      טוען הודעות קודמות…
+                    </span>
+                  ) : earlierTimelineLoadError ? (
+                    'נסה שוב לטעון הודעות קודמות'
+                  ) : (
+                    `טען עוד ${Math.min(hiddenTimelineCount, TIMELINE_AUTO_LOAD_PAGE_SIZE)} אירועים ישנים`
+                  )}
                 </button>
                 <button
                   type="button"
-                  disabled={isFullTimelineLoading}
+                  disabled={isFullTimelineLoading || isEarlierTimelineLoading}
                   onClick={() => {
-                    if (!selectedSessionId || isFullTimelineLoading) {
+                    if (!selectedSessionId || isFullTimelineLoading || isEarlierTimelineLoading) {
                       return;
                     }
 
@@ -22688,6 +23723,7 @@ export function CodexMobileApp() {
 
                 <div className="relative ml-1 flex shrink-0 flex-col items-center justify-end gap-1 self-stretch">
                   <button
+                    ref={rateLimitButtonRef}
                     type="button"
                     onClick={() => {
                       setIsScheduleOpen(false);
@@ -22711,124 +23747,18 @@ export function CodexMobileApp() {
                   </button>
 
                   {isRateLimitOpen && (
-                    <div className="absolute bottom-full left-0 z-20 mb-2 w-[min(11.5rem,68vw)] overflow-hidden rounded-[1rem] border border-slate-200/80 bg-white/96 shadow-[0_16px_36px_-30px_rgba(15,23,42,0.2)] backdrop-blur-xl">
-                      <div className="border-b border-slate-100/90 bg-gradient-to-b from-sky-50/45 via-white to-white px-2.5 py-2 text-right">
-                        <div className="flex items-center justify-between gap-2">
-                          <Gauge className="h-3.5 w-3.5 shrink-0 text-sky-400" />
-                          <div className="min-w-0 flex-1">
-                            <div className="text-[11px] font-semibold text-slate-700">מגבלות שימוש</div>
-                            <div className="truncate text-[9px] text-slate-400">
-                              {rateLimitSnapshot?.planType ? `תוכנית ${rateLimitSnapshot.planType}` : 'נתונים חיים מה־CLI'}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="space-y-2 p-2">
-                        {[
-                          { key: 'primary', label: '5 שעות', window: rateLimitSnapshot?.primary || null },
-                          { key: 'secondary', label: 'שבוע', window: rateLimitSnapshot?.secondary || null },
-                        ].map(({ key, label, window }) => {
-                          const usedPercent = clampPercent(window?.usedPercent ?? null);
-                          const toneClass = key === 'primary'
-                            ? 'from-sky-300 via-cyan-200 to-emerald-200'
-                            : 'from-violet-300 via-fuchsia-200 to-rose-200';
-                          return (
-                            <div key={key} className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-2 text-right">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[10px] font-semibold text-slate-600">
-                                  {getRateLimitWindowLabel(window?.windowMinutes ?? null, label)}
-                                </span>
-                                <span className="text-[10px] text-slate-400">
-                                  {window?.usedPercent !== null && window?.usedPercent !== undefined
-                                    ? `${Math.round(usedPercent)}%`
-                                    : 'ללא נתון'}
-                                </span>
-                              </div>
-                              <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-200/70">
-                                <div
-                                  className={cn('h-full rounded-full bg-gradient-to-l transition-[width]', toneClass)}
-                                  style={{ width: `${usedPercent}%` }}
-                                />
-                              </div>
-                              <div className="mt-1 text-[9px] text-slate-400">
-                                מתאפס {formatCompactTimestamp(window?.resetsAtIso ?? null)}
-                              </div>
-                            </div>
-                          );
-                        })}
-
-                        {selectedSessionId && rateLimitSnapshot?.context && (
-                          <div className="rounded-[0.8rem] border border-slate-100 bg-white/85 px-2.5 py-2 text-right">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[10px] font-semibold text-slate-600">
-                                קונטקסט
-                              </span>
-                              <span className="text-[10px] text-slate-400">
-                                {rateLimitSnapshot.context.usagePercent !== null && rateLimitSnapshot.context.usagePercent !== undefined
-                                  ? `${Math.round(clampPercent(rateLimitSnapshot.context.usagePercent))}%`
-                                  : 'ללא נתון'}
-                              </span>
-                            </div>
-                            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-200/70">
-                              <div
-                                className="h-full rounded-full bg-gradient-to-l from-amber-300 via-sky-200 to-cyan-200 transition-[width]"
-                                style={{ width: `${clampPercent(rateLimitSnapshot.context.usagePercent ?? null)}%` }}
-                              />
-                            </div>
-                            <div className="mt-1 text-[9px] text-slate-400">
-                              {formatCompactTokenCount(getContextUsageDisplayTokens(rateLimitSnapshot.context))} / {formatCompactTokenCount(rateLimitSnapshot.context.modelContextWindow)}
-                            </div>
-                            {rateLimitSnapshot.context.cachedInputTokens !== null && rateLimitSnapshot.context.cachedInputTokens !== undefined && (
-                              <div className="mt-0.5 text-[8px] text-slate-300">
-                                cache {formatCompactTokenCount(rateLimitSnapshot.context.cachedInputTokens)}
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {!selectedSessionId && (
-                          <div className="rounded-[0.8rem] border border-dashed border-slate-200 bg-white/85 px-2.5 py-2 text-right">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[10px] font-semibold text-slate-600">
-                                קונטקסט
-                              </span>
-                              <span className="text-[10px] text-slate-400">0%</span>
-                            </div>
-                            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-200/70">
-                              <div
-                                className="h-full rounded-full bg-gradient-to-l from-amber-300 via-sky-200 to-cyan-200 transition-[width]"
-                                style={{ width: '0%' }}
-                              />
-                            </div>
-                            <div className="mt-1 text-[9px] text-slate-400">
-                              0 / —
-                            </div>
-                            <div className="mt-0.5 text-[8px] text-slate-300">
-                              טרם נשלחה הודעה, לכן עדיין אין session snapshot.
-                            </div>
-                          </div>
-                        )}
-
-                        {!isRateLimitLoading && !rateLimitSnapshot?.primary && !rateLimitSnapshot?.secondary && !selectedSessionId && (
-                          <div className="rounded-[0.85rem] border border-dashed border-slate-200 bg-white/75 px-2.5 py-2 text-right text-[10px] text-slate-400">
-                            אין עדיין נתוני שימוש זמינים לפרופיל הזה.
-                          </div>
-                        )}
-
-                        {!isRateLimitLoading && !rateLimitSnapshot?.primary && !rateLimitSnapshot?.secondary && selectedSessionId && !rateLimitSnapshot?.context && (
-                          <div className="rounded-[0.85rem] border border-dashed border-slate-200 bg-white/75 px-2.5 py-2 text-right text-[10px] text-slate-400">
-                            עדיין אין snapshot קונטקסט לשיחה הזאת.
-                          </div>
-                        )}
-
-                        {rateLimitSnapshot?.rateLimitReachedType && (
-                          <div className="rounded-[0.85rem] border border-rose-100/90 bg-rose-50/70 px-2.5 py-2 text-right text-[9px] text-rose-600">
-                            הושגה מגבלה: {rateLimitSnapshot.rateLimitReachedType}
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                    <CodexUsagePopover
+                      snapshot={rateLimitSnapshot}
+                      profileLabel={currentProfile?.label || null}
+                      selectedModelSlug={selectedModelSlug}
+                      selectedSessionId={selectedSessionId}
+                      loading={isRateLimitLoading}
+                      requestError={rateLimitError}
+                      anchorElement={rateLimitButtonRef.current}
+                      onConsumeReset={handleFullResetConsumption}
+                      onRefresh={() => void loadRateLimitSnapshot(profileId, selectedSessionId, true)}
+                      onClose={() => setIsRateLimitOpen(false)}
+                    />
                   )}
 
                   <button
@@ -23815,7 +24745,9 @@ export function CodexMobileApp() {
           title={workspaceMoveTarget
             ? workspaceMoveTarget.kind === 'session'
               ? `העבר את השיחה „${workspaceMoveTarget.label}” לתיקייה`
-              : `העבר את הנושא „${workspaceMoveTarget.label}” וכל השיחות`
+              : workspaceMoveTarget.kind === 'topic'
+                ? `העבר את הנושא „${workspaceMoveTarget.label}” וכל השיחות`
+                : `העבר ${workspaceMoveTarget.label} לתיקייה`
             : 'בחר תיקייה לשיחה חדשה'}
           browser={folderBrowser}
           isLoading={isFolderBrowserLoading}

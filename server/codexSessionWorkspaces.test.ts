@@ -58,6 +58,17 @@ test('workspace move prompt carries the new active path into the session', () =>
   assert.match(prompt, /workspace הפעיל/u);
 });
 
+test('the same session can be moved repeatedly without stale workspace state', async () => {
+  await setSessionWorkspaceOverride('profile-repeat', 'session-repeat', '/work/first');
+  await setSessionWorkspaceOverride('profile-repeat', 'session-repeat', '/work/second');
+  await setSessionWorkspaceOverride('profile-repeat', 'session-repeat', '/work/third');
+
+  assert.equal(
+    (await getSessionWorkspaceOverride('profile-repeat', 'session-repeat'))?.cwd,
+    '/work/third',
+  );
+});
+
 test('moving a topic keeps its assignments and exposes it only in the target folder', async () => {
   const topic = await createSessionTopic('profile-topic', '/work/source', {
     name: 'נושא בדיקה',
@@ -72,4 +83,10 @@ test('moving a topic keeps its assignments and exposes it only in the target fol
   assert.deepEqual(new Set(result.affectedSessionIds), new Set(['topic-session-1', 'topic-session-2']));
   assert.equal((await listSessionTopics('profile-topic', '/work/source')).length, 0);
   assert.equal((await listSessionTopics('profile-topic', '/work/target'))[0]?.assignedSessionCount, 2);
+
+  const repeatedResult = await moveSessionTopic('profile-topic', topic.id, '/work/final-target');
+  assert.equal(repeatedResult.topic.cwd, '/work/final-target');
+  assert.deepEqual(new Set(repeatedResult.affectedSessionIds), new Set(['topic-session-1', 'topic-session-2']));
+  assert.equal((await listSessionTopics('profile-topic', '/work/target')).length, 0);
+  assert.equal((await listSessionTopics('profile-topic', '/work/final-target'))[0]?.assignedSessionCount, 2);
 });

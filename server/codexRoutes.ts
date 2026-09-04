@@ -17,6 +17,7 @@ import {
   subscribeCodexSessionChanges,
 } from './codexService.js';
 import {
+  consumeAgentFullReset,
   createAgentForkSession,
   deleteAgentTurn,
   deleteAgentSession,
@@ -1946,10 +1947,35 @@ router.get('/rate-limits', requireCodexAccess, async (req, res) => {
   try {
     const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
     const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
-    const rateLimits = await getAgentRateLimitSnapshot(profileId, sessionId);
+    const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    const rateLimits = await getAgentRateLimitSnapshot(profileId, sessionId, forceRefresh);
     res.json({ rateLimits });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load Codex rate limits' });
+  }
+});
+
+router.post('/rate-limit-reset-credits/consume', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const creditId = typeof req.body?.creditId === 'string' ? req.body.creditId.trim() : '';
+    const redeemRequestId = typeof req.body?.idempotencyKey === 'string'
+      ? req.body.idempotencyKey.trim()
+      : '';
+    if (req.body?.confirmation !== 'consume-full-reset') {
+      res.status(400).json({ error: 'נדרש אישור מפורש להפעלת Full Reset.' });
+      return;
+    }
+    if (!creditId || !redeemRequestId) {
+      res.status(400).json({ error: 'חסרים מזהה קרדיט או מזהה פעולה.' });
+      return;
+    }
+
+    const result = await consumeAgentFullReset(profileId, creditId, redeemRequestId);
+    const rateLimits = await getAgentRateLimitSnapshot(profileId, undefined, true);
+    res.json({ result, rateLimits });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'הפעלת Full Reset נכשלה.' });
   }
 });
 

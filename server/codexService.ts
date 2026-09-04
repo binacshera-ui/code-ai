@@ -5,6 +5,14 @@ import path from 'path';
 import readline from 'readline';
 import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
 import {
+  consumeCodexRateLimitResetCredit,
+  loadCodexAccountUsage,
+  type CodexAccountQuotaGroup,
+  type CodexBillingCredits,
+  type CodexResetCreditsSnapshot,
+  type CodexResetConsumptionResult,
+} from './codexAccountUsage.js';
+import {
   getForkDraftSession,
   getForkSessionMetadata,
   listForkDraftSessions,
@@ -498,6 +506,16 @@ export interface CodexRateLimitSnapshot {
   primary: CodexRateLimitWindow | null;
   secondary: CodexRateLimitWindow | null;
   context: CodexContextUsageSnapshot | null;
+  account?: {
+    authenticated: boolean;
+    email: string | null;
+    accountIdMasked: string | null;
+  } | null;
+  quotaGroups?: CodexAccountQuotaGroup[];
+  billingCredits?: CodexBillingCredits | null;
+  resetCredits?: CodexResetCreditsSnapshot | null;
+  accountUsageFetchedAt?: string | null;
+  accountUsageError?: string | null;
 }
 
 interface RawCodexDebugModelsResponse {
@@ -4877,29 +4895,56 @@ export async function getCodexModelCatalog(profileId?: string): Promise<CodexMod
 
 export async function getCodexRateLimitSnapshot(
   profileId?: string,
-  sessionId?: string
+  sessionId?: string,
+  forceAccountRefresh = false
 ): Promise<CodexRateLimitSnapshot | null> {
   const profile = resolveProfile(profileId);
+  let sessionSnapshot: CodexRateLimitSnapshot | null = null;
 
   if (sessionId?.trim()) {
     const sessionRecord = await resolveSessionRecord(profile, sessionId.trim());
     if (!sessionRecord) {
       return null;
     }
-
-    return readRateLimitSnapshotFromSessionRecord(profile, sessionRecord);
-  }
-
-  const sessionFiles = await scanSessionFiles(profile);
-
-  for (const sessionRecord of sessionFiles) {
-    const snapshot = await readRateLimitSnapshotFromSessionRecord(profile, sessionRecord);
-    if (snapshot) {
-      return snapshot;
+    sessionSnapshot = await readRateLimitSnapshotFromSessionRecord(profile, sessionRecord);
+  } else {
+    const sessionFiles = await scanSessionFiles(profile);
+    for (const sessionRecord of sessionFiles) {
+      const snapshot = await readRateLimitSnapshotFromSessionRecord(profile, sessionRecord);
+      if (snapshot) {
+        sessionSnapshot = snapshot;
+        break;
+      }
     }
   }
 
-  return null;
+  const accountUsage = await loadCodexAccountUsage(profile, { forceRefresh: forceAccountRefresh });
+  const standardQuota = accountUsage.quotaGroups[0] || null;
+  return {
+    profileId: profile.id,
+    sessionId: sessionId?.trim() || sessionSnapshot?.sessionId || null,
+    updatedAt: sessionSnapshot?.updatedAt || accountUsage.fetchedAt,
+    planType: accountUsage.planType || sessionSnapshot?.planType || null,
+    rateLimitReachedType: accountUsage.rateLimitReachedType || sessionSnapshot?.rateLimitReachedType || null,
+    primary: standardQuota?.primary || sessionSnapshot?.primary || null,
+    secondary: standardQuota?.secondary || sessionSnapshot?.secondary || null,
+    context: sessionSnapshot?.context || null,
+    account: accountUsage.account,
+    quotaGroups: accountUsage.quotaGroups,
+    billingCredits: accountUsage.billingCredits,
+    resetCredits: accountUsage.resetCredits,
+    accountUsageFetchedAt: accountUsage.fetchedAt,
+    accountUsageError: accountUsage.error,
+  };
+}
+
+export async function consumeCodexFullReset(
+  profileId: string | undefined,
+  creditId: string,
+  redeemRequestId: string
+): Promise<CodexResetConsumptionResult> {
+  const profile = resolveProfile(profileId);
+  return consumeCodexRateLimitResetCredit(profile, { creditId, redeemRequestId });
 }
 
 async function resolveCodexExecutionConfig(
