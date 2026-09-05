@@ -1683,6 +1683,14 @@ export async function getClaudeModelCatalog(profileId?: string): Promise<CodexMo
   };
 }
 
+export function invalidateClaudeModelCatalogCache(profileId?: string): void {
+  if (profileId) {
+    modelCatalogCache.delete(profileId);
+    return;
+  }
+  modelCatalogCache.clear();
+}
+
 export async function updateClaudeResponseSpeed(profileId: string | undefined, modeId: string): Promise<CodexModelCatalog> {
   const profile = resolveProfile(profileId);
   const normalizedModeId = modeId.trim().toLowerCase();

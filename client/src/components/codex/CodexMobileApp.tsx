@@ -719,6 +719,17 @@ interface CodexModelCatalogResponse {
   permissions: CodexPermissionSnapshotResponse | null;
   responseSpeed: CodexResponseSpeedSnapshotResponse | null;
   multiAgent?: CodexMultiAgentSnapshotResponse | null;
+  cliUpdate?: CodexCliAutoUpdateSnapshotResponse | null;
+}
+
+interface CodexCliAutoUpdateSnapshotResponse {
+  enabled: boolean;
+  state: 'disabled' | 'checking' | 'current' | 'updating' | 'updated' | 'error';
+  currentVersion: string | null;
+  latestVersion: string | null;
+  lastCheckedAt: string | null;
+  lastUpdatedAt: string | null;
+  error: string | null;
 }
 
 interface CodexMultiAgentSnapshotResponse {
@@ -1335,6 +1346,7 @@ type WorkspaceMode = 'standard' | 'support';
 const INITIAL_TIMELINE_WINDOW_SIZE = 120;
 const LIVE_SESSION_SNAPSHOT_FALLBACK_MS = 3_000;
 const SESSION_LIST_BACKGROUND_REFRESH_MS = 60_000;
+const MODEL_CATALOG_BACKGROUND_REFRESH_MS = 60_000;
 const MAX_SHARED_CONVERSATIONS = 20;
 const TIMELINE_FULL_LOAD_CHUNK_SIZE = 400;
 const TIMELINE_AUTO_LOAD_PAGE_SIZE = 60;
@@ -4152,8 +4164,14 @@ async function consumeCodexEventStream(
   }
 }
 
-async function fetchCodexModelCatalog(profileId: string): Promise<CodexModelCatalogResponse> {
-  return fetchJson<CodexModelCatalogResponse>(`/api/codex/models?profile=${encodeURIComponent(profileId)}`);
+async function fetchCodexModelCatalog(
+  profileId: string,
+  forceRefresh = false,
+): Promise<CodexModelCatalogResponse> {
+  const refreshQuery = forceRefresh ? '&refresh=1' : '';
+  return fetchJson<CodexModelCatalogResponse>(
+    `/api/codex/models?profile=${encodeURIComponent(profileId)}${refreshQuery}`
+  );
 }
 
 async function saveCodexPermissionMode(
@@ -15365,6 +15383,7 @@ export function CodexMobileApp() {
   const [modelPermissionSnapshot, setModelPermissionSnapshot] = useState<CodexPermissionSnapshotResponse | null>(null);
   const [modelResponseSpeedSnapshot, setModelResponseSpeedSnapshot] = useState<CodexResponseSpeedSnapshotResponse | null>(null);
   const [modelMultiAgentSnapshot, setModelMultiAgentSnapshot] = useState<CodexMultiAgentSnapshotResponse | null>(null);
+  const [modelCliUpdateSnapshot, setModelCliUpdateSnapshot] = useState<CodexCliAutoUpdateSnapshotResponse | null>(null);
   const [rateLimitSnapshot, setRateLimitSnapshot] = useState<CodexRateLimitSnapshotResponse | null>(null);
   const [selectedModelSlug, setSelectedModelSlug] = useState<string | null>(null);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
@@ -18265,6 +18284,7 @@ export function CodexMobileApp() {
     setModelPermissionSnapshot(null);
     setModelResponseSpeedSnapshot(null);
     setModelMultiAgentSnapshot(null);
+    setModelCliUpdateSnapshot(null);
     setSelectedModelSlug(null);
     setSelectedReasoningEffort(null);
     setRateLimitSnapshot(null);
@@ -19010,6 +19030,7 @@ export function CodexMobileApp() {
         setModelPermissionSnapshot(null);
         setModelResponseSpeedSnapshot(null);
         setModelMultiAgentSnapshot(null);
+        setModelCliUpdateSnapshot(null);
         setSelectedModelSlug(null);
         setSelectedReasoningEffort(null);
         setSessionInstruction(null);
@@ -19763,12 +19784,13 @@ export function CodexMobileApp() {
     }
   }
 
-  async function loadModelCatalog(nextProfileId = profileId) {
+  async function loadModelCatalog(nextProfileId = profileId, forceRefresh = false) {
     if (!nextProfileId) {
       setAvailableModels([]);
       setModelPermissionSnapshot(null);
       setModelResponseSpeedSnapshot(null);
       setModelMultiAgentSnapshot(null);
+      setModelCliUpdateSnapshot(null);
       setSelectedModelSlug(null);
       setSelectedReasoningEffort(null);
       return;
@@ -19779,7 +19801,7 @@ export function CodexMobileApp() {
     setIsModelCatalogLoading(true);
 
     try {
-      const data = await fetchCodexModelCatalog(nextProfileId);
+      const data = await fetchCodexModelCatalog(nextProfileId, forceRefresh);
       if (
         requestToken !== latestModelCatalogLoadTokenRef.current
         || requestServerId !== activeServerRef.current
@@ -19803,6 +19825,7 @@ export function CodexMobileApp() {
       setModelPermissionSnapshot(data.permissions || null);
       setModelResponseSpeedSnapshot(data.responseSpeed || null);
       setModelMultiAgentSnapshot(data.multiAgent || null);
+      setModelCliUpdateSnapshot(data.cliUpdate || null);
       setSelectedModelSlug(nextModelSlug);
       setSelectedReasoningEffort(nextReasoningEffort);
     } catch (modelCatalogError: any) {
@@ -19811,6 +19834,7 @@ export function CodexMobileApp() {
         setModelPermissionSnapshot(null);
         setModelResponseSpeedSnapshot(null);
         setModelMultiAgentSnapshot(null);
+        setModelCliUpdateSnapshot(null);
         setSelectedModelSlug(null);
         setSelectedReasoningEffort(null);
         setError(modelCatalogError.message || 'Failed to load models');
@@ -19874,6 +19898,7 @@ export function CodexMobileApp() {
       setModelPermissionSnapshot(data.permissions || null);
       setModelResponseSpeedSnapshot(data.responseSpeed || null);
       setModelMultiAgentSnapshot(data.multiAgent || modelMultiAgentSnapshot);
+      setModelCliUpdateSnapshot(data.cliUpdate || modelCliUpdateSnapshot);
       setSelectedModelSlug(nextModelSlug);
       setSelectedReasoningEffort(nextReasoningEffort);
     } catch (responseSpeedError: any) {
@@ -19911,6 +19936,7 @@ export function CodexMobileApp() {
       setModelPermissionSnapshot(data.permissions || null);
       setModelResponseSpeedSnapshot(data.responseSpeed || null);
       setModelMultiAgentSnapshot(data.multiAgent || modelMultiAgentSnapshot);
+      setModelCliUpdateSnapshot(data.cliUpdate || modelCliUpdateSnapshot);
       setSelectedModelSlug(data.selectedModel || nextModelSlug);
       setSelectedReasoningEffort(data.selectedReasoningEffort || nextReasoningEffort);
     } catch (modelSelectionError: any) {
@@ -22279,6 +22305,7 @@ export function CodexMobileApp() {
       setModelPermissionSnapshot(null);
       setModelResponseSpeedSnapshot(null);
       setModelMultiAgentSnapshot(null);
+      setModelCliUpdateSnapshot(null);
       setRateLimitSnapshot(null);
       setSelectedModelSlug(null);
       setSelectedReasoningEffort(null);
@@ -22288,6 +22315,31 @@ export function CodexMobileApp() {
     void loadModelCatalog(profileId);
     void loadRateLimitSnapshot(profileId, selectedSessionId);
   }, [profileId, selectedSessionId]);
+
+  useEffect(() => {
+    if (!profileId || !isModelPickerOpen) {
+      return;
+    }
+    void loadModelCatalog(profileId, true);
+  }, [isModelPickerOpen, profileId, serverId]);
+
+  useEffect(() => {
+    if (!profileId) {
+      return;
+    }
+
+    const refreshVisibleCatalog = () => {
+      if (document.visibilityState === 'visible') {
+        void loadModelCatalog(profileId);
+      }
+    };
+    const interval = window.setInterval(refreshVisibleCatalog, MODEL_CATALOG_BACKGROUND_REFRESH_MS);
+    document.addEventListener('visibilitychange', refreshVisibleCatalog);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshVisibleCatalog);
+    };
+  }, [profileId, serverId]);
 
   useEffect(() => {
     writeWorkspaceMode(workspaceMode);
@@ -23625,7 +23677,33 @@ export function CodexMobileApp() {
                             <div className="truncate text-[9px] text-slate-400">
                               {selectedProviderLabel} המקומי
                             </div>
+                            {currentProfile?.provider === 'codex' && modelCliUpdateSnapshot && (
+                              <div className={cn(
+                                'mt-0.5 truncate text-[8px]',
+                                modelCliUpdateSnapshot.state === 'error' ? 'text-amber-500' : 'text-emerald-500'
+                              )}>
+                                {modelCliUpdateSnapshot.state === 'updating' || modelCliUpdateSnapshot.state === 'checking'
+                                  ? 'בודק עדכון Codex…'
+                                  : modelCliUpdateSnapshot.state === 'error'
+                                    ? 'עדכון אוטומטי ינסה שוב'
+                                    : `CLI ${modelCliUpdateSnapshot.currentVersion || '—'} • עדכון אוטומטי`}
+                              </div>
+                            )}
                           </div>
+                          <button
+                            type="button"
+                            disabled={!profileId || isModelCatalogLoading}
+                            onClick={() => {
+                              if (profileId) {
+                                void loadModelCatalog(profileId, true);
+                              }
+                            }}
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-white hover:text-violet-600 disabled:cursor-wait disabled:opacity-50"
+                            aria-label="רענן קטלוג מודלים"
+                            title="רענן קטלוג מודלים עכשיו"
+                          >
+                            <RefreshCw className={cn('h-3.5 w-3.5', isModelCatalogLoading && 'animate-spin')} />
+                          </button>
                         </div>
                       </div>
 

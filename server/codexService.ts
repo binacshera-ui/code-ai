@@ -53,6 +53,7 @@ import {
   terminateProviderProcessTree,
   type ProviderSessionStartedHandler,
 } from './providerProcessLifecycle.js';
+import { getCodexCliAutoUpdateSnapshot } from './codexCliAutoUpdate.js';
 
 export interface CodexProfile {
   id: string;
@@ -473,6 +474,7 @@ export interface CodexModelCatalog {
   responseSpeed: CodexResponseSpeedSnapshot | null;
   permissions: CodexPermissionSnapshot | null;
   multiAgent?: CodexMultiAgentSnapshot | null;
+  cliUpdate?: ReturnType<typeof getCodexCliAutoUpdateSnapshot> | null;
 }
 
 export interface CodexMultiAgentSnapshot {
@@ -4686,7 +4688,7 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
   const payload = safeJsonParse<RawCodexDebugModelsResponse>((result.stdout || '').trim());
   const rawModels = Array.isArray(payload?.models) ? payload.models : [];
   const models = rawModels
-    .filter((entry) => entry?.visibility !== 'hidden')
+    .filter((entry) => !['hide', 'hidden'].includes(String(entry?.visibility || '').toLowerCase()))
     .map((entry): CodexAvailableModel | null => {
       const slug = normalizeExecutionSettingValue(entry?.slug);
       if (!slug) {
@@ -4746,6 +4748,14 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
     supportedReasoningLevels: model.supportedReasoningLevels.map((level) => ({ ...level })),
     availableResponseSpeedIds: [...(model.availableResponseSpeedIds || [])],
   }));
+}
+
+export function invalidateCodexModelCatalogCache(profileId?: string): void {
+  if (profileId) {
+    modelCatalogCache.delete(profileId);
+    return;
+  }
+  modelCatalogCache.clear();
 }
 
 function buildCodexResponseSpeedSnapshot(
@@ -4890,6 +4900,7 @@ export async function getCodexModelCatalog(profileId?: string): Promise<CodexMod
     responseSpeed: buildCodexResponseSpeedSnapshot(selectedModelOption, defaults),
     permissions: null,
     multiAgent,
+    cliUpdate: getCodexCliAutoUpdateSnapshot(),
   };
 }
 

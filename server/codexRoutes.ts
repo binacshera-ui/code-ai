@@ -1864,7 +1864,9 @@ router.get('/profiles', requireCodexAccess, async (_req, res) => {
 router.get('/models', requireCodexAccess, async (req, res) => {
   try {
     const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
-    const catalog = await getAgentModelCatalog(profileId);
+    const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    const catalog = await getAgentModelCatalog(profileId, { forceRefresh });
+    res.setHeader('Cache-Control', 'no-store');
     res.json(catalog);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load Codex models' });

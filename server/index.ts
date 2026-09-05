@@ -11,6 +11,11 @@ import codexFinalNotificationRoutes from './codexFinalNotificationRoutes.js';
 import { recordCodexServerCrash } from './codexCrashLogs.js';
 import { CODEX_APP_CONFIG } from './config.js';
 import { shutdownCodexQueueWorker, startCodexQueueWorker } from './codexQueue.js';
+import { invalidateCodexModelCatalogCache } from './codexService.js';
+import {
+  startCodexCliAutoUpdateWorker,
+  stopCodexCliAutoUpdateWorker,
+} from './codexCliAutoUpdate.js';
 import { startCodexFinalNotificationWorker } from './codexFinalNotifications.js';
 import { repairAllProviderHomesOwnership } from './providerRuntimeOwnership.js';
 import {
@@ -243,6 +248,10 @@ server.once('listening', () => {
 
   repairAllProviderHomesOwnership(CODEX_APP_CONFIG.profiles);
 
+  if (CODEX_APP_CONFIG.profiles.some((profile) => profile.provider === 'codex')) {
+    startCodexCliAutoUpdateWorker(() => invalidateCodexModelCatalogCache());
+  }
+
   void startCodexFinalNotificationWorker()
     .then(() => {
       console.log('🔔 Final-response notification worker started');
@@ -279,6 +288,7 @@ function shutdownServer(signal: NodeJS.Signals): void {
   shutdownRemoteHostTunnels();
   shutdownPersonalChromeBridge();
   shutdownPersonalPortForwardBroker();
+  stopCodexCliAutoUpdateWorker();
 
   const forceExitTimer = setTimeout(() => {
     console.error('❌ Timed out while closing code-ai; forcing open connections to close');

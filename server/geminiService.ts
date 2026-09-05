@@ -1444,6 +1444,14 @@ export async function getGeminiModelCatalog(profileId?: string): Promise<CodexMo
   };
 }
 
+export function invalidateGeminiModelCatalogCache(profileId?: string): void {
+  if (profileId) {
+    modelCatalogCache.delete(profileId);
+    return;
+  }
+  modelCatalogCache.clear();
+}
+
 export async function listGeminiSessions(
   profileId?: string,
   query = '',

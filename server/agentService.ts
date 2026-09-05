@@ -7,6 +7,7 @@ import {
   deleteCodexTurn,
   getAvailableProfiles as getAvailableCodexProfiles,
   getCodexModelCatalog,
+  invalidateCodexModelCatalogCache,
   getCodexMultiAgentSnapshot,
   getCodexRateLimitSnapshot,
   getCodexSessionDetail,
@@ -40,6 +41,7 @@ import {
   deleteClaudeTurn,
   getAvailableClaudeProfiles,
   getClaudeModelCatalog,
+  invalidateClaudeModelCatalogCache,
   getClaudeRateLimitSnapshot,
   getClaudeSessionDetail,
   listClaudeSessions,
@@ -55,6 +57,7 @@ import {
   deleteGeminiTurn,
   getAvailableGeminiProfiles,
   getGeminiModelCatalog,
+  invalidateGeminiModelCatalogCache,
   getGeminiRateLimitSnapshot,
   getGeminiSessionDetail,
   listGeminiSessions,
@@ -276,9 +279,21 @@ export async function getAgentSessionDetail(
   return workspaceOverride ? { ...session, cwd: workspaceOverride.cwd } : session;
 }
 
-export async function getAgentModelCatalog(profileId?: string): Promise<CodexModelCatalog> {
+export async function getAgentModelCatalog(
+  profileId?: string,
+  options: { forceRefresh?: boolean } = {},
+): Promise<CodexModelCatalog> {
   const profile = resolveProfile(profileId);
   await prepareInternalProfileHome(profile);
+  if (options.forceRefresh) {
+    if (profile.provider === 'claude') {
+      invalidateClaudeModelCatalogCache(profile.id);
+    } else if (profile.provider === 'gemini') {
+      invalidateGeminiModelCatalogCache(profile.id);
+    } else {
+      invalidateCodexModelCatalogCache(profile.id);
+    }
+  }
   const permissions = await buildProviderPermissionSnapshot(profile);
   if (profile.provider === 'claude') {
     const catalog = await getClaudeModelCatalog(profile.id);
