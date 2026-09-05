@@ -2558,14 +2558,10 @@ function CodexUsagePopover({
             <>
               <div className="mt-1 text-[8px] text-indigo-700/70">
                 נצברו בסך הכול {resetCredits.totalEarnedCount}
-                {resetCredits.applicableAvailableCount !== null
-                  ? ` · ${resetCredits.applicableAvailableCount} מתאימים למכסה הנוכחית`
-                  : ''}
               </div>
               <div className="mt-2 space-y-1.5">
                 {resetCredits.credits.map((credit) => {
                   const isAvailable = credit.status.toLowerCase() === 'available';
-                  const canConsume = isAvailable && resetCredits.applicableAvailableCount !== 0;
                   const isConfirming = pendingReset?.creditId === credit.id;
                   return (
                     <div key={credit.id} className="rounded-[0.7rem] border border-indigo-100/80 bg-white/80 px-2 py-1.5">
@@ -2587,9 +2583,10 @@ function CodexUsagePopover({
                         {credit.expiresAt && <span>תוקף: {formatCompactTimestamp(credit.expiresAt)}</span>}
                       </div>
 
-                      {canConsume && !isConfirming && (
+                      {isAvailable && !isConfirming && (
                         <button
                           type="button"
+                          aria-label="הפעל Full Reset"
                           onClick={() => beginResetConfirmation(credit.id)}
                           disabled={isConsumingReset}
                           className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-[0.6rem] border border-indigo-200 bg-indigo-50 px-2 py-1.5 text-[9px] font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-wait disabled:opacity-50"
@@ -2602,11 +2599,12 @@ function CodexUsagePopover({
                       {isConfirming && (
                         <div className="mt-2 rounded-[0.65rem] border border-amber-200 bg-amber-50 px-2 py-2">
                           <div className="text-[8px] font-medium leading-4 text-amber-800">
-                            הפעולה צורכת קרדיט אחד ומאפסת את חלונות המכסה הזכאים. אי אפשר לבטל אותה לאחר האישור.
+                            הפעולה צורכת קרדיט אחד ומאפסת את חלונות המכסה הזכאים. אי אפשר לבטל אותה לאחר האישור. אם השירות יחזיר שאין כרגע מכסה לאיפוס, הקרדיט לא ינוצל.
                           </div>
                           <div className="mt-2 flex gap-1.5">
                             <button
                               type="button"
+                              aria-label="ביטול הפעלת Full Reset"
                               onClick={() => setPendingReset(null)}
                               disabled={isConsumingReset}
                               className="flex-1 rounded-[0.55rem] border border-slate-200 bg-white px-2 py-1.5 text-[8px] font-semibold text-slate-600 disabled:opacity-50"
@@ -2615,6 +2613,7 @@ function CodexUsagePopover({
                             </button>
                             <button
                               type="button"
+                              aria-label="אישור הפעלת Full Reset"
                               onClick={() => void confirmResetConsumption()}
                               disabled={isConsumingReset}
                               className="flex flex-[1.7] items-center justify-center gap-1 rounded-[0.55rem] bg-indigo-600 px-2 py-1.5 text-[8px] font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-wait disabled:opacity-60"

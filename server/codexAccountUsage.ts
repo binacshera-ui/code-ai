@@ -442,9 +442,9 @@ export async function consumeCodexRateLimitResetCredit(
   if (!selectedCredit || selectedCredit.status.toLowerCase() !== 'available') {
     throw new Error('קרדיט ה־Full Reset שנבחר כבר אינו זמין. רענן את הנתונים ונסה שוב.');
   }
-  if (currentUsage.resetCredits?.applicableAvailableCount === 0) {
-    throw new Error('אין כרגע חלון מכסה שמתאים להפעלת Full Reset.');
-  }
+  // Match Codex's redemption flow: an available credit can be submitted for
+  // confirmation even when the usage summary reports zero applicable credits.
+  // Only the consume response determines whether a window can actually reset.
 
   let auth: Record<string, unknown> | null = null;
   try {

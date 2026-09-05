@@ -187,3 +187,41 @@ test('Full Reset consumption requires an available selected credit and sends the
   assert.deepEqual(result, { outcome: 'reset', windowsReset: 2 });
   assert.equal(requests.filter(({ method }) => method === 'POST').length, 1);
 });
+
+test('an available credit with zero applicable summary count reaches the provider and preserves its outcome', async (t) => {
+  const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), 'code-ai-codex-reset-summary-'));
+  t.after(() => fs.rm(codexHome, { recursive: true, force: true }));
+  await fs.writeFile(path.join(codexHome, 'auth.json'), JSON.stringify({
+    tokens: { access_token: 'test-access-token', account_id: 'test-account' },
+  }));
+
+  for (const outcome of ['reset', 'nothing_to_reset'] as const) {
+    let consumeCalls = 0;
+    const result = await consumeCodexRateLimitResetCredit(
+      { id: `summary-zero-${outcome}`, codexHome },
+      {
+        creditId: 'reset-1',
+        redeemRequestId: '12345678-1234-4234-9234-123456789012',
+        fetchImpl: async (url, init) => {
+          if (init.method === 'POST') {
+            consumeCalls += 1;
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({ code: outcome, windows_reset: outcome === 'reset' ? 1 : 0 }),
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => url.endsWith('/usage')
+              ? { ...usageFixture, rate_limit_reset_credits: { available_count: 1, applicable_available_count: 0 } }
+              : resetCreditsFixture,
+          };
+        },
+      }
+    );
+    assert.equal(consumeCalls, 1);
+    assert.deepEqual(result, { outcome, windowsReset: outcome === 'reset' ? 1 : 0 });
+  }
+});
