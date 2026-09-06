@@ -24,6 +24,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useSessionUnread, type SessionReadSnapshot } from './useSessionUnread';
+import { ActiveTaskChips } from './ActiveTaskChips';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
@@ -7786,6 +7787,11 @@ function SidebarPanel({
   onThemePresetChange: (presetId: ThemePresetId) => void;
 }) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const loadActiveTaskItems = useCallback((signal: AbortSignal) => fetchJsonForServer<{ items: CodexQueueServerItem[] }>(
+    serverId,
+    `/api/codex/queue/items?profile=${encodeURIComponent(profileId)}`,
+    { signal },
+  ).then(data => data.items), [serverId, profileId]);
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
   const collapsedFoldersStorageKey = `${SIDEBAR_COLLAPSED_FOLDERS_STORAGE_PREFIX}:${serverId}:${profileId}`;
   const collapsedTopicsStorageKey = `${SIDEBAR_COLLAPSED_TOPICS_STORAGE_PREFIX}:${serverId}:${profileId}`;
@@ -7843,6 +7849,18 @@ function SidebarPanel({
             </button>
           )}
         </div>
+        <ActiveTaskChips
+          scope={`${serverId}:${profileId}`}
+          profileId={profileId}
+          loadItems={loadActiveTaskItems}
+          sessions={sessions}
+          selectedSessionId={selectedSessionId}
+          onSelect={(item) => {
+            if (item.sessionId) onSelectSession(item.sessionId);
+            else onSelectPendingDraft(item);
+            onClose?.();
+          }}
+        />
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
