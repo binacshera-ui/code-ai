@@ -55,6 +55,7 @@ import {
 } from './providerProcessLifecycle.js';
 import { getCodexCliAutoUpdateSnapshot } from './codexCliAutoUpdate.js';
 import { normalizeCodexSessionRow } from './codexSessionMessages.js';
+import { walkJsonlFiles } from './codexSessionFiles.js';
 
 export interface CodexProfile {
   id: string;
@@ -1132,31 +1133,6 @@ async function pathExists(targetPath: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-async function walkJsonlFiles(rootDir: string): Promise<string[]> {
-  if (!(await pathExists(rootDir))) {
-    return [];
-  }
-
-  const stack = [rootDir];
-  const files: string[] = [];
-
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    const entries = await fs.readdir(current, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-      } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
-        files.push(fullPath);
-      }
-    }
-  }
-
-  return files;
 }
 
 async function readFirstLine(filePath: string): Promise<string> {
