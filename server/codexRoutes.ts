@@ -6,6 +6,7 @@ import path from 'path';
 import { promisify } from 'util';
 import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
+import { SessionReadReceiptStore } from './codexSessionReadState.js';
 import type { AppMode, AppProvider } from './config.js';
 import {
   copyCodexSessionToProfile,
@@ -48,6 +49,7 @@ import {
   getCodexQueueItem,
   getCodexQueueItemSession,
   listCodexQueueItems,
+  listCodexQueueCompletionTimes,
   listCodexQueueWorkspaceItems,
   resolveCodexQueueSessionId,
   retryCodexQueueItem,
@@ -2337,6 +2339,63 @@ router.delete('/terminal/sessions/:terminalId', requireCodexAccess, (req, res) =
   } catch (error: any) {
     const message = error.message || 'Failed to close terminal';
     res.status(message === 'Terminal session was not found' ? 404 : 400).json({ error: message });
+  }
+});
+
+const sessionReadReceipts = new SessionReadReceiptStore(path.join(CODEX_APP_CONFIG.storageRoot, 'session-read-receipts.json'));
+
+router.get('/session-read-state', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : '';
+    if (!profileId) throw new Error('Profile is required');
+    getProviderForProfile(profileId);
+    const [viewed, completions, sessions] = await Promise.all([
+      sessionReadReceipts.read(readTerminalOwnerId(req), profileId),
+      listCodexQueueCompletionTimes(profileId),
+      listAgentSessions(profileId),
+    ]);
+    // Native CLI runs do not necessarily have a queue record. Reading the
+    // cached catalog also keeps their badges fresh while the sidebar is open.
+    for (const session of sessions) {
+      const completedAt = Date.parse(session.lastCompletedAt || '');
+      if (Number.isFinite(completedAt) && completedAt > (completions[session.id]?.completedAt || 0)) {
+        completions[session.id] = { completedAt, startedAt: completedAt };
+      }
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ viewed, completions });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to read session view state' });
+  }
+});
+
+router.post('/sessions/:sessionId/viewed', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : '';
+    const observedCompletedAt = req.body?.completedAt;
+    if (!profileId || !Number.isSafeInteger(observedCompletedAt) || observedCompletedAt <= 0) {
+      res.status(400).json({ error: 'Profile and observed completion are required' });
+      return;
+    }
+    const sessionId = await resolveEffectiveSessionId(readRouteParam(req.params.sessionId));
+    const effectiveProfile = await resolveEffectiveProfileIdForSession(profileId, sessionId);
+    const [session, completions] = await Promise.all([
+      getAgentSessionDetail(sessionId, effectiveProfile, { tail: 120 }),
+      listCodexQueueCompletionTimes(profileId),
+    ]);
+    const timelineCompletion = Math.max(0, ...session.timeline
+      .filter(entry => (entry.entryType === 'message' && entry.kind === 'final') || entry.status === 'completed')
+      .filter(entry => entry.entryType !== 'tool')
+      .map(entry => Date.parse(entry.timestamp) || 0));
+    const latest = Math.max(completions[sessionId]?.completedAt || 0, Date.parse(session.lastCompletedAt || '') || timelineCompletion);
+    if (observedCompletedAt > latest) {
+      res.status(409).json({ error: 'The observed completion is not available yet' });
+      return;
+    }
+    const viewedThrough = await sessionReadReceipts.markViewed(readTerminalOwnerId(req), profileId, sessionId, observedCompletedAt);
+    res.json({ sessionId, viewedThrough });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to save session view state' });
   }
 });
 

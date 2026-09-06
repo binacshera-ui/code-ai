@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { latestCompletionTimes, type SessionCompletion } from './codexSessionReadState.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import {
@@ -2627,6 +2628,11 @@ export async function listCodexQueueItems(profileId?: string): Promise<CodexQueu
     : state.items;
 
   return sortQueueItems(filtered).map(cloneQueueItem);
+}
+
+export async function listCodexQueueCompletionTimes(profileId: string): Promise<Record<string, SessionCompletion>> {
+  await refreshQueueState();
+  return latestCompletionTimes(state.items.filter((item) => item.profileId === profileId));
 }
 
 export async function getCodexQueueItem(itemId: string): Promise<CodexQueueItem | null> {

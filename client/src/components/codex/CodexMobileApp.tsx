@@ -23,6 +23,7 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { useSessionUnread, type SessionReadSnapshot } from './useSessionUnread';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
@@ -339,6 +340,7 @@ interface CodexSessionSummary {
   endPreview: string;
   source: string;
   hidden?: boolean;
+  lastCompletedAt?: string | null;
   topic?: CodexSessionTopic | null;
   forkSourceSessionId?: string | null;
   forkEntryId?: string | null;
@@ -7298,6 +7300,7 @@ function SessionCard({
   session,
   isSelected,
   isActive,
+  isUnread,
   isArchivedView,
   isCopyMode,
   selectionPurpose,
@@ -7324,6 +7327,7 @@ function SessionCard({
   session: CodexSessionSummary;
   isSelected: boolean;
   isActive: boolean;
+  isUnread: boolean;
   isArchivedView: boolean;
   isCopyMode: boolean;
   selectionPurpose: 'copy' | 'workspace' | null;
@@ -7388,6 +7392,7 @@ function SessionCard({
       <button
         type="button"
         dir="rtl"
+        data-session-id={session.id}
         onPointerEnter={onPrefetch}
         onFocus={onPrefetch}
         onPointerDown={() => {
@@ -7465,6 +7470,9 @@ function SessionCard({
             </div>
           </div>
           <div className="flex shrink-0 items-start gap-1.5">
+            {isUnread && (
+              <span className="mt-2 h-2.5 w-2.5 shrink-0 rounded-full bg-blue-500" role="img" aria-label="השיחה הסתיימה וטרם נצפתה" title="השיחה הסתיימה וטרם נצפתה" />
+            )}
             {isCopyMode && (
               <button
                 type="button"
@@ -7662,6 +7670,7 @@ function SidebarPanel({
   groupedSessions,
   pendingDraftItems,
   activeSessionIds,
+  unreadSessionIds,
   installMode,
   showArchived,
   selectedSessionId,
@@ -7732,6 +7741,7 @@ function SidebarPanel({
   groupedSessions: SessionFolderGroup[];
   pendingDraftItems: CodexQueueServerItem[];
   activeSessionIds: Set<string>;
+  unreadSessionIds: Set<string>;
   installMode: 'installed' | 'ready' | 'manual';
   showArchived: boolean;
   selectedSessionId: string | null;
@@ -8111,6 +8121,7 @@ function SidebarPanel({
                                 session={session}
                                 isSelected={selectedSessionId === session.id}
                                 isActive={activeSessionIds.has(session.id)}
+                                isUnread={unreadSessionIds.has(session.id)}
                                 isArchivedView={showArchived}
                                 isCopyMode={isSessionCopyMode || isSessionWorkspaceMoveMode}
                                 selectionPurpose={isSessionWorkspaceMoveMode ? 'workspace' : isSessionCopyMode ? 'copy' : null}
@@ -15594,6 +15605,30 @@ export function CodexMobileApp() {
       .flatMap((item) => [item.sessionId, item.queueKey])
       .filter((value): value is string => Boolean(value))
   ), [queueItems]);
+  const sessionReadApi = useMemo(() => ({
+    read: () => profileId
+      ? fetchJsonForServer<SessionReadSnapshot>(serverId, `/api/codex/session-read-state?profile=${encodeURIComponent(profileId)}`)
+      : Promise.resolve({ viewed: {}, completions: {} }),
+    mark: (sessionId: string, completedAt: number) => fetchJsonForServer<{ viewedThrough: number }>(
+      serverId,
+      `/api/codex/sessions/${encodeURIComponent(sessionId)}/viewed`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profileId, completedAt }) }
+    ),
+  }), [profileId, serverId]);
+  const isFilePreviewOpen = isFilePreviewLoading
+    || Boolean(activeFilePreview)
+    || activeFileMatches.length > 0
+    || Boolean(filePreviewError);
+  const unreadSessionIds = useSessionUnread({
+    scope: `${serverId}:${profileId}`,
+    api: sessionReadApi,
+    sessions,
+    selectedSession: selectedSession?.id === selectedSessionId ? selectedSession : null,
+    viewport: mainScrollElement,
+    blocked: isSidebarOpen || isFolderPickerOpen || isFileTreeOpen || isTerminalOpen
+      || isFilePreviewOpen || isFullTimelineLoading
+      || Boolean(selectedSessionId && activeSessionIds.has(selectedSessionId)),
+  });
   const currentSessionActiveQueueCount = useMemo(() => queueItems.filter((item) => {
     if (!isQueueItemActive(item)) {
       return false;
@@ -22119,10 +22154,6 @@ export function CodexMobileApp() {
     : deferredInstallPrompt
       ? 'ready'
       : 'manual';
-  const isFilePreviewOpen = isFilePreviewLoading
-    || Boolean(activeFilePreview)
-    || activeFileMatches.length > 0
-    || Boolean(filePreviewError);
   const { date: scheduleDateValue, time: scheduleTimeValue } = splitScheduledDateTime(scheduledFor);
 
   function isSessionEligibleForUserCopy(session: CodexSessionSummary): boolean {
@@ -22621,6 +22652,7 @@ export function CodexMobileApp() {
       groupedSessions={groupedSessions}
       pendingDraftItems={pendingDraftItems}
       activeSessionIds={activeSessionIds}
+      unreadSessionIds={unreadSessionIds}
       installMode={installMode}
       showArchived={showArchived}
       selectedSessionId={selectedConversationId}

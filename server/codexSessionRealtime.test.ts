@@ -132,7 +132,7 @@ test('session detail cache is reusable and live subscription invalidates it', as
   const catalogCachePath = path.join(
     storage,
     'session-catalog-cache',
-    'v2',
+    'v3',
     'test-codex.json'
   );
   assert.equal(await fs.stat(catalogCachePath).then(() => true).catch(() => false), true);
@@ -146,7 +146,7 @@ test('session detail cache is reusable and live subscription invalidates it', as
   const persistedCacheDirectory = path.join(
     storage,
     'session-read-cache',
-    'v3',
+    'v4',
     'test-codex',
     sessionId
   );
@@ -293,7 +293,7 @@ test('session detail cache is reusable and live subscription invalidates it', as
   const oldestBudgetCachePath = path.join(
     storage,
     'session-read-cache',
-    'v3',
+    'v4',
     'test-codex',
     budgetSessionIds[0],
     'tail-120-before-latest.json'

@@ -54,6 +54,7 @@ import {
   type ProviderSessionStartedHandler,
 } from './providerProcessLifecycle.js';
 import { getCodexCliAutoUpdateSnapshot } from './codexCliAutoUpdate.js';
+import { normalizeCodexSessionRow } from './codexSessionMessages.js';
 
 export interface CodexProfile {
   id: string;
@@ -196,6 +197,7 @@ export interface CodexSessionSummary {
   compactSourceSessionId?: string | null;
   agentSession?: CodexAgentSessionMeta | null;
   nativeSubagents?: CodexNativeSubagentGroup | null;
+  lastCompletedAt?: string | null;
 }
 
 export interface CodexSessionDetail extends CodexSessionSummary {
@@ -338,6 +340,7 @@ interface ParsedSession {
   lastMessage?: CodexSessionMessage | null;
   isCompactClone?: boolean;
   compactSourceSessionId?: string | null;
+  lastCompletedAt?: string | null;
 }
 
 interface ParseSessionFileOptions {
@@ -355,6 +358,7 @@ interface ParseSessionFileOptions {
     lastMessage: CodexSessionMessage | null;
     isCompactClone: boolean;
     compactSourceSessionId: string | null;
+    lastCompletedAt?: string | null;
   };
 }
 
@@ -367,6 +371,7 @@ interface SessionSummaryHints {
   isCompactClone?: boolean;
   compactSourceSessionId?: string | null;
   terminalStatus: CodexNativeSubagentStatus;
+  lastCompletedAt: string | null;
 }
 
 interface CodexRunResult {
@@ -590,7 +595,7 @@ const SESSION_CATALOG_CACHE_TTL_MS = Math.max(
 );
 // Summary status/preview parsing is persisted separately from session detail.
 // Keep its version in step with parser changes that affect the conversation list.
-const SESSION_CATALOG_CACHE_VERSION = 'v2';
+const SESSION_CATALOG_CACHE_VERSION = 'v3';
 const SESSION_CATALOG_CACHE_ROOT = path.join(
   CODEX_APP_CONFIG.storageRoot,
   'session-catalog-cache',
@@ -611,7 +616,7 @@ const SESSION_DETAIL_CACHE_MAX_BYTES = Math.max(
 const SESSION_DETAIL_CACHE_OBJECT_OVERHEAD_MULTIPLIER = 3;
 // Bump when rollout parsing semantics change so persisted details cannot hide
 // newly recognized terminal states or error messages after a deployment.
-const SESSION_DETAIL_CACHE_VERSION = 'v3';
+const SESSION_DETAIL_CACHE_VERSION = 'v4';
 const SESSION_DETAIL_CACHE_ROOT = path.join(
   CODEX_APP_CONFIG.storageRoot,
   'session-read-cache',
@@ -1784,10 +1789,11 @@ async function extractSessionSummaryHints(
   let isCompactClone = false;
   let compactSourceSessionId: string | null = null;
   let terminalStatus: CodexNativeSubagentStatus = 'active';
+  let lastCompletedAt: string | null = null;
 
   const headLines = await readFileHead(sessionPath);
   for (const line of headLines) {
-    const row = safeJsonParse<any>(line);
+    const row = normalizeCodexSessionRow(safeJsonParse<any>(line));
     if (!row || row.type !== 'event_msg') {
       continue;
     }
@@ -1827,7 +1833,7 @@ async function extractSessionSummaryHints(
 
   const tailLines = await readFileTail(sessionPath);
   for (const line of tailLines) {
-    const row = safeJsonParse<any>(line);
+    const row = normalizeCodexSessionRow(safeJsonParse<any>(line));
     if (!row || typeof row !== 'object') {
       continue;
     }
@@ -1836,6 +1842,7 @@ async function extractSessionSummaryHints(
       const eventType = row.payload?.type;
       if (eventType === 'task_complete') {
         terminalStatus = extractCodexEventErrorMessage(row.payload) ? 'failed' : 'completed';
+        if (terminalStatus === 'completed') lastCompletedAt = row.timestamp || null;
       } else if (eventType === 'turn_aborted') {
         terminalStatus = 'stopped';
       } else if (eventType === 'task_failed' || eventType === 'error') {
@@ -1859,7 +1866,7 @@ async function extractSessionSummaryHints(
   }
 
   for (const line of [...tailLines].reverse()) {
-    const row = safeJsonParse<any>(line);
+    const row = normalizeCodexSessionRow(safeJsonParse<any>(line));
     if (!row || row.type !== 'event_msg') {
       continue;
     }
@@ -1902,6 +1909,7 @@ async function extractSessionSummaryHints(
     isCompactClone,
     compactSourceSessionId,
     terminalStatus,
+    lastCompletedAt,
   };
   if (cacheKey && effectiveSourceSignature) {
     sessionSummaryHintCache.set(cacheKey, {
@@ -2199,6 +2207,7 @@ async function parseSessionFile(
   let timelineCount = options?.initial?.totalTimelineEntries || 0;
   let firstMessage = options?.initial?.firstMessage ? { ...options.initial.firstMessage } : null;
   let lastMessage = options?.initial?.lastMessage ? { ...options.initial.lastMessage } : null;
+  let lastCompletedAt = options?.initial?.lastCompletedAt || null;
   let derivedTitle = options?.initial?.title || indexEntry?.thread_name?.trim() || '';
   let preview = options?.initial?.preview || '';
   let isCompactClone = options?.initial?.isCompactClone || false;
@@ -2239,7 +2248,7 @@ async function parseSessionFile(
 
   try {
     for await (const line of lineReader) {
-      const row = safeJsonParse<any>(line);
+      const row = normalizeCodexSessionRow(safeJsonParse<any>(line));
       if (!row) {
         continue;
       }
@@ -2353,6 +2362,7 @@ async function parseSessionFile(
 
         if (eventType === 'task_complete') {
           const taskError = extractCodexEventErrorMessage(payload);
+          if (!taskError) lastCompletedAt = timestamp || lastCompletedAt;
           if (taskError) {
             pushTimeline({
               id: `${sessionId}-status-failed-${timelineCount}`,
@@ -2740,6 +2750,7 @@ async function parseSessionFile(
     preview: trimPreview(preview || derivedTitle || sessionId),
     timeline,
     messageCount,
+    lastCompletedAt,
     totalTimelineEntries: timelineCount,
     firstMessage,
     lastMessage,
@@ -3176,6 +3187,7 @@ async function buildIncrementalSessionDetail(
         lastMessage: cachedMessages.at(-1) || null,
         isCompactClone: Boolean(staleRecord.detail.isCompactClone),
         compactSourceSessionId: staleRecord.detail.compactSourceSessionId || null,
+        lastCompletedAt: staleRecord.detail.lastCompletedAt || null,
       },
       maxRetainedMessages: requestedTail,
       maxRetainedTimelineEntries: requestedTail,
@@ -3191,6 +3203,7 @@ async function buildIncrementalSessionDetail(
     title: parsed.title,
     updatedAt: stats.mtime.toISOString(),
     messageCount: parsed.messageCount ?? staleRecord.detail.messageCount,
+    lastCompletedAt: parsed.lastCompletedAt,
     preview: parsed.preview,
     endPreview: lastMessage?.text ? trimPreview(lastMessage.text) : parsed.preview,
     messages: [],
@@ -3374,7 +3387,7 @@ async function sliceSessionLinesForFork(
 
   for (let index = 0; index < rawLines.length; index += 1) {
     const line = rawLines[index];
-    const row = safeJsonParse<any>(line);
+    const row = normalizeCodexSessionRow(safeJsonParse<any>(line));
     if (!row) {
       continue;
     }
@@ -3651,6 +3664,7 @@ async function buildCodexSessionCatalog(profile: CodexProfile): Promise<CodexSes
       isCompactClone: hints.isCompactClone,
       compactSourceSessionId: hints.compactSourceSessionId,
       nativeSubagents: null,
+      lastCompletedAt: hints.lastCompletedAt,
     });
   }
 
@@ -4134,7 +4148,7 @@ function collectRawCodexTurnRanges(rawLines: string[], sessionId: string): RawCo
   let lastAssistantMessage: { kind: 'commentary' | 'final'; text: string } | null = null;
 
   for (let index = 0; index < rawLines.length; index += 1) {
-    const row = safeJsonParse<any>(rawLines[index]);
+    const row = normalizeCodexSessionRow(safeJsonParse<any>(rawLines[index]));
     if (!row || row.type !== 'event_msg') {
       continue;
     }
@@ -4449,6 +4463,7 @@ export async function getCodexSessionDetail(
       createdAt: sessionFile.createdAt,
       profileId: profile.id,
       messageCount: parsed.messageCount ?? parsed.messages.length,
+      lastCompletedAt: parsed.lastCompletedAt,
       preview: parsed.preview,
       startPreview: parsed.firstMessage?.text
         ? trimPreview(parsed.firstMessage.text)
