@@ -25,6 +25,7 @@ import {
 import { createPortal } from 'react-dom';
 import { useSessionUnread, type SessionReadSnapshot } from './useSessionUnread';
 import { ActiveTaskChips } from './ActiveTaskChips';
+import { collectSessionActivity } from './sessionUnread';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
@@ -15624,15 +15625,21 @@ export function CodexMobileApp() {
       .filter((value): value is string => Boolean(value))
   ), [queueItems]);
   const sessionReadApi = useMemo(() => ({
-    read: () => profileId
-      ? fetchJsonForServer<SessionReadSnapshot>(serverId, `/api/codex/session-read-state?profile=${encodeURIComponent(profileId)}`)
-      : Promise.resolve({ viewed: {}, completions: {} }),
+    read: async (): Promise<SessionReadSnapshot> => {
+      if (!profileId) return { viewed: {}, completions: {}, activity: {} };
+      const [readState, queue] = await Promise.all([
+        fetchJsonForServer<Omit<SessionReadSnapshot, 'activity'>>(serverId, `/api/codex/session-read-state?profile=${encodeURIComponent(profileId)}`),
+        fetchJsonForServer<{ items: CodexQueueServerItem[] }>(serverId, `/api/codex/queue/items?profile=${encodeURIComponent(profileId)}`),
+      ]);
+      return { ...readState, activity: collectSessionActivity(queue.items, profileId) };
+    },
     mark: (sessionId: string, completedAt: number) => fetchJsonForServer<{ viewedThrough: number }>(
       serverId,
       `/api/codex/sessions/${encodeURIComponent(sessionId)}/viewed`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profileId, completedAt }) }
     ),
   }), [profileId, serverId]);
+  const liveSessionActivity = useMemo(() => collectSessionActivity(queueItems, profileId), [queueItems, profileId]);
   const isFilePreviewOpen = isFilePreviewLoading
     || Boolean(activeFilePreview)
     || activeFileMatches.length > 0
@@ -15640,6 +15647,7 @@ export function CodexMobileApp() {
   const unreadSessionIds = useSessionUnread({
     scope: `${serverId}:${profileId}`,
     api: sessionReadApi,
+    liveActivity: liveSessionActivity,
     sessions,
     selectedSession: selectedSession?.id === selectedSessionId ? selectedSession : null,
     viewport: mainScrollElement,

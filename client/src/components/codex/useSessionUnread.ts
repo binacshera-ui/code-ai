@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { canAcknowledgeCompletion, hasUnreadCompletion, type SessionCompletion } from './sessionUnread';
+import { canAcknowledgeCompletion, hasUnreadCompletion, mergeSessionActivity, type SessionActivity, type SessionCompletion } from './sessionUnread';
 
 export interface SessionReadSnapshot {
   viewed: Record<string, number>;
   completions: Record<string, SessionCompletion>;
+  activity: Record<string, SessionActivity>;
 }
 interface ReadApi {
   read(): Promise<SessionReadSnapshot>;
@@ -14,16 +15,18 @@ interface SessionSummary {
   lastCompletedAt?: string | null;
 }
 
-export function useSessionUnread({ scope, api, sessions, selectedSession, viewport, blocked }: {
+export function useSessionUnread({ scope, api, sessions, selectedSession, viewport, blocked, liveActivity }: {
   scope: string;
   api: ReadApi;
   sessions: SessionSummary[];
-  selectedSession: (SessionSummary & { timeline: Array<{ entryType: string; role?: string; kind?: string; timestamp: string }> }) | null;
+  selectedSession: (SessionSummary & { timeline: Array<{ entryType: string; role?: string; kind?: string; status?: string; timestamp: string }> }) | null;
   viewport: HTMLElement | null;
   blocked: boolean;
+  liveActivity: Record<string, SessionActivity>;
 }): Set<string> {
-  const [snapshot, setSnapshot] = useState<SessionReadSnapshot & { scope: string }>({ scope, viewed: {}, completions: {} });
-  const current = snapshot.scope === scope ? snapshot : null;
+  const [snapshot, setSnapshot] = useState<SessionReadSnapshot & { scope: string; ready: boolean }>({ scope, viewed: {}, completions: {}, activity: {}, ready: false });
+  // Never flash historical badges before both receipts and current activity load.
+  const current = snapshot.scope === scope && snapshot.ready ? snapshot : null;
 
   useEffect(() => {
     let disposed = false;
@@ -38,10 +41,11 @@ export function useSessionUnread({ scope, api, sessions, selectedSession, viewpo
           if (previous.scope === scope) {
             for (const [id, time] of Object.entries(previous.viewed)) viewed[id] = Math.max(time, viewed[id] || 0);
           }
-          return { scope, viewed, completions: next.completions };
+          return { scope, ready: true, viewed, completions: next.completions, activity: next.activity };
         });
       } catch {
-        // Keep the existing unread state on transient network failures and retry.
+        // Without fresh activity we cannot assert that a conversation has ended.
+        if (!disposed) setSnapshot(previous => previous.scope === scope ? { ...previous, ready: false } : previous);
       } finally { reading = false; }
     };
     void refresh();
@@ -68,6 +72,20 @@ export function useSessionUnread({ scope, api, sessions, selectedSession, viewpo
     return merged;
   }, [current?.completions, sessions, selectedSession]);
 
+  const activity = useMemo(() => {
+    const merged = mergeSessionActivity(current?.activity || {}, liveActivity);
+    if (selectedSession) {
+      const latestPendingAt = Math.max(0, ...selectedSession.timeline.filter(entry => (
+        entry.entryType === 'tool'
+        || (entry.entryType === 'message' && (entry.role === 'user' || entry.kind === 'commentary'))
+        || (entry.entryType === 'status' && ['started', 'aborted', 'failed'].includes(entry.status || ''))
+      )).map(entry => Date.parse(entry.timestamp) || 0));
+      const previous = merged[selectedSession.id] || { busy: false, latestStartedAt: 0, latestInterruptedAt: 0, latestUpdatedAt: 0 };
+      merged[selectedSession.id] = { ...previous, latestStartedAt: Math.max(previous.latestStartedAt, latestPendingAt) };
+    }
+    return merged;
+  }, [current?.activity, liveActivity, selectedSession]);
+
   const selectedCompletion = selectedSession ? completions[selectedSession.id] : undefined;
   const selectedViewed = selectedSession ? current?.viewed[selectedSession.id] || 0 : 0;
   const renderedFinalAt = selectedSession ? Math.max(0, ...selectedSession.timeline
@@ -75,7 +93,7 @@ export function useSessionUnread({ scope, api, sessions, selectedSession, viewpo
     .map(entry => Date.parse(entry.timestamp) || 0)) : 0;
 
   useEffect(() => {
-    if (!current || !selectedSession || !selectedCompletion || !viewport || !hasUnreadCompletion(selectedCompletion, selectedViewed)) return;
+    if (!current || !selectedSession || !selectedCompletion || !viewport || !hasUnreadCompletion(selectedCompletion, selectedViewed, activity[selectedSession.id])) return;
     let disposed = false;
     let pending = false;
     const sessionId = selectedSession.id;
@@ -112,9 +130,9 @@ export function useSessionUnread({ scope, api, sessions, selectedSession, viewpo
       document.removeEventListener('visibilitychange', onView);
       window.removeEventListener('focus', onView);
     };
-  }, [api, scope, current !== null, selectedSession?.id, selectedSession?.lastCompletedAt, selectedCompletion?.completedAt, selectedCompletion?.startedAt, selectedViewed, viewport, blocked, renderedFinalAt]);
+  }, [api, scope, current !== null, selectedSession?.id, selectedSession?.lastCompletedAt, selectedCompletion?.completedAt, selectedCompletion?.startedAt, selectedViewed, viewport, blocked, renderedFinalAt, activity]);
 
   return useMemo(() => new Set(Object.keys(completions).filter(id => (
-    current && hasUnreadCompletion(completions[id], current.viewed[id])
-  ))), [completions, current?.viewed]);
+    current && hasUnreadCompletion(completions[id], current.viewed[id], activity[id])
+  ))), [completions, current?.viewed, activity]);
 }
