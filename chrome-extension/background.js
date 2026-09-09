@@ -25,6 +25,7 @@ let connected = false;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 let workspaceBroadcastTimer = null;
+let panelAnchorTransition = Promise.resolve();
 const pendingApprovals = [];
 
 function normalizeSessionContext(value) {
@@ -126,16 +127,44 @@ async function restorePanelAnchor() {
   await chrome.sidePanel.setOptions({ tabId: tab.id, path: 'panel.html', enabled: true }).catch(() => undefined);
 }
 
-async function setPanelAnchor(tab) {
+async function setPanelAnchorImmediately(tab) {
   if (!tab?.id) throw errorWithCode('No Chrome tab is available for the CODE-AI panel.', 'TAB_NOT_BOUND');
   const previous = panelAnchor;
   panelAnchor = { tabId: tab.id, windowId: tab.windowId };
   await chrome.storage.session.set({ [PANEL_ANCHOR_STORAGE_KEY]: panelAnchor });
+  // A manifest default_path is a global side-panel fallback. Chrome can retain
+  // that fallback across service-worker lifetimes, so explicitly keep it off
+  // before enabling the one tab that owns this panel.
+  await chrome.sidePanel.setOptions({ enabled: false }).catch(() => undefined);
   if (previous?.tabId && previous.tabId !== tab.id) {
     await chrome.sidePanel.setOptions({ tabId: previous.tabId, enabled: false }).catch(() => undefined);
   }
   await chrome.sidePanel.setOptions({ tabId: tab.id, path: 'panel.html', enabled: true });
   return panelAnchor;
+}
+
+function queuePanelAnchorTransition(operation) {
+  const transition = panelAnchorTransition
+    .catch(() => undefined)
+    .then(operation);
+  panelAnchorTransition = transition.catch(() => undefined);
+  return transition;
+}
+
+function setPanelAnchor(tab) {
+  return queuePanelAnchorTransition(() => setPanelAnchorImmediately(tab));
+}
+
+async function initializePanelScopeImmediately() {
+  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => undefined);
+  // Do this on every service-worker start, not only on installation. Without
+  // it, Chrome falls back to the manifest's global panel in unrelated tabs.
+  await chrome.sidePanel.setOptions({ enabled: false }).catch(() => undefined);
+  await restorePanelAnchor();
+}
+
+function initializePanelScope() {
+  return queuePanelAnchorTransition(() => initializePanelScopeImmediately());
 }
 
 async function panelAnchorTab() {
@@ -1490,9 +1519,8 @@ chrome.notifications.onClicked.addListener(() => {
     .catch(() => undefined);
 });
 
-const settingsReady = Promise.all([loadSettings(), loadInstallationId(), restoreSelections(), restoreWorkspaces(), restorePanelAnchor()]).then(async () => {
+const settingsReady = Promise.all([loadSettings(), loadInstallationId(), restoreSelections(), restoreWorkspaces(), initializePanelScope()]).then(async () => {
   await installAuthRules(settings);
-  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => undefined);
   if (settings?.deviceToken) connectBridge();
   return settings;
 });

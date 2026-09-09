@@ -10,7 +10,7 @@ const extensionRoot = path.join(appRoot, 'chrome-extension');
 test('Chrome extension package is generic, complete, and load-unpacked compatible', async () => {
   const manifest = JSON.parse(await fs.readFile(path.join(extensionRoot, 'manifest.json'), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.4.0');
+  assert.equal(manifest.version, '1.4.1');
   assert.equal(manifest.background.service_worker, 'background.js');
   assert.equal(manifest.side_panel.default_path, 'panel.html');
   for (const permission of ['debugger', 'declarativeNetRequest', 'scripting', 'sidePanel', 'tabGroups', 'tabs']) {
@@ -23,6 +23,7 @@ test('Chrome extension package is generic, complete, and load-unpacked compatibl
   const source = await Promise.all(['manifest.json', 'background.js', 'contentScript.js', 'panel.html', 'panel.js']
     .map((file) => fs.readFile(path.join(extensionRoot, file), 'utf8')));
   const combined = source.join('\n');
+  const background = source[1];
   const panel = await fs.readFile(path.join(extensionRoot, 'panel.html'), 'utf8');
   assert.doesNotMatch(combined, /\/root\/projects\/|app-code-ai\./i);
   assert.match(combined, /browser_key/);
@@ -35,6 +36,15 @@ test('Chrome extension package is generic, complete, and load-unpacked compatibl
   assert.match(combined, /PANEL_WORKSPACE_ACTION/);
   assert.match(combined, /chrome\.tabGroups\.update/);
   assert.match(combined, /chrome\.action\.onClicked/);
+  assert.match(background, /panelAnchorTransition/);
+  assert.match(background, /queuePanelAnchorTransition/);
+  assert.match(background, /function initializePanelScope\(\)/);
+  const panelInitialization = background.slice(background.indexOf('async function initializePanelScopeImmediately()'));
+  assert.ok(
+    panelInitialization.indexOf('chrome.sidePanel.setOptions({ enabled: false })')
+      < panelInitialization.indexOf('await restorePanelAnchor()'),
+    'the global panel must be disabled before restoring the tab-specific anchor',
+  );
   assert.match(combined, /createBackgroundWorkspaceTab/);
   assert.match(combined, /active: false/);
   assert.doesNotMatch(combined, /chrome\.tabs\.update\(tab\.id, \{ url, active: true \}\)/);
