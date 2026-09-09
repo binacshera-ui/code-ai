@@ -98,6 +98,8 @@ const MAX_CONTEXT_FILE_BYTES = 300_000;
 const MAX_CONTEXT_TOTAL_BYTES = 1_800_000;
 const MAX_REFERENCE_IMAGES = 6;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+const DESIGN_BRIEF_FILE = 'design-brief.md';
+const DESIGN_CONTEXT_DIR = 'project-context';
 const MAX_CALLS_PER_HOUR = 20;
 const MAX_ACTIVE_DESIGN_RUNS = 2;
 const DESIGN_TOOL_NAMES = new Set([
@@ -740,6 +742,27 @@ async function collectDesignContext(workspaceRoot: string, requestedPaths: strin
   return files;
 }
 
+async function stageDesignContextFiles(
+  runDir: string,
+  files: Awaited<ReturnType<typeof collectDesignContext>>,
+): Promise<void> {
+  const contextRoot = path.join(runDir, DESIGN_CONTEXT_DIR);
+  await fs.mkdir(contextRoot, { recursive: true, mode: 0o700 });
+  for (const file of files) {
+    const target = path.resolve(contextRoot, file.relativePath);
+    if (!isPathInside(contextRoot, target)) {
+      throw makeDesignToolError(
+        'DESIGN_CONTEXT_STAGE_INVALID',
+        `The staged design context path escaped its isolated directory: ${file.relativePath}`,
+        false,
+        'Pass only project files inside the active session directory.',
+      );
+    }
+    await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+    await fs.writeFile(target, file.content, { encoding: 'utf-8', mode: 0o600 });
+  }
+}
+
 async function resolveReferenceImage(
   registration: DesignBridgeRegistration,
   rawPath: string,
@@ -968,10 +991,10 @@ function buildGeminiPrompt(input: {
   imageLabels: string[];
 }): string {
   const fileSections = input.files.map((file) => [
-    `<project_file path="${file.relativePath}" truncated="${file.truncated}">`,
-    file.content,
-    '</project_file>',
-  ].join('\n')).join('\n\n');
+    `- ${path.posix.join(DESIGN_CONTEXT_DIR, file.relativePath.split(path.sep).join('/'))}`,
+    `  source: ${file.relativePath}`,
+    `  truncated: ${file.truncated}`,
+  ].join('\n')).join('\n');
   return [
     'You are Gemini Design Director, a visual product-design specialist collaborating with Codex.',
     'You provide visual design judgment plus exact, bounded visual implementation code. You MUST NOT edit files, remove behavior, invent backend changes, or issue shell commands.',
@@ -992,7 +1015,9 @@ function buildGeminiPrompt(input: {
       ? `Reference images are present in this isolated workspace. Inspect them with the read_file tool:\n- ${input.imageLabels.join('\n- ')}`
       : 'No reference image was intentionally supplied for this consultation.',
     `Project tree (bounded):\n${input.tree.join('\n')}`,
-    fileSections,
+    fileSections
+      ? `Project source snapshots are staged in this isolated workspace. Inspect every relevant file with the read_file tool before deciding the design:\n${fileSections}`
+      : 'No project source snapshot was supplied for this consultation.',
     'Return exactly one JSON object and no Markdown fence. Use this contract:',
     JSON.stringify({
       version: '1.0',
@@ -1069,6 +1094,7 @@ async function dispatchDesignConsultation(
   try {
     const requestedFiles = normalizeStringArray(args?.file_paths, MAX_CONTEXT_FILES, 2_000);
     const files = await collectDesignContext(registration.workspaceCwd, requestedFiles);
+    await stageDesignContextFiles(runDir, files);
     const tree = await collectProjectTree(registration.workspaceCwd);
     const imageReferences: Array<{ path: string; label: string }> = [];
     const canvasReference = await prepareCanvasReference(registration, args.canvas_input, runDir);
@@ -1096,10 +1122,17 @@ async function dispatchDesignConsultation(
       files,
       imageLabels,
     });
+    await fs.writeFile(path.join(runDir, DESIGN_BRIEF_FILE), prompt, { encoding: 'utf-8', mode: 0o600 });
+    const bootstrapPrompt = [
+      `Open and read ${DESIGN_BRIEF_FILE} with the read_file tool before doing anything else.`,
+      `Then inspect the staged source files and reference images named there from the current isolated workspace.`,
+      'Follow the brief exactly and return only the requested final JSON object.',
+      'Do not edit files or issue shell commands.',
+    ].join('\n');
     const catalog = await geminiModelCatalogProvider(registration.record.geminiProfileId);
     const model = selectDesignModel(catalog, registration.record.quality);
     const response = await geminiDesignInvoker({
-      prompt,
+      prompt: bootstrapPrompt,
       profileId: registration.record.geminiProfileId,
       cwd: runDir,
       model,

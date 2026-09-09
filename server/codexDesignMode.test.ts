@@ -120,6 +120,11 @@ before(async () => {
       'export function Card() { return <button className="rounded">Keep action</button>; }\n',
       'utf8',
     ),
+    fs.writeFile(
+      path.join(workspaceRoot, 'src', 'Large.tsx'),
+      `export const designTokens = ${JSON.stringify('quiet-token '.repeat(20_000))};\n`,
+      'utf8',
+    ),
     fs.writeFile(path.join(workspaceRoot, '.env'), 'SECRET_TOKEN=must-never-reach-gemini\n', 'utf8'),
   ]);
   profile = {
@@ -204,13 +209,29 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
     url: string;
     token: string;
   };
-  const invocations: Array<{ prompt: string; dimensions: { width: number; height: number } | null }> = [];
+  const invocations: Array<{
+    prompt: string;
+    brief: string;
+    stagedCard: string;
+    stagedLargeBytes: number;
+    stagedCardMode: number;
+    dimensions: { width: number; height: number } | null;
+  }> = [];
   setGeminiDesignModelCatalogProviderForTests(async () => fakeCatalog());
   setGeminiDesignInvokerForTests(async (input) => {
     const regionPath = path.join(input.cwd, 'canvas-region.png');
     const region = await fs.readFile(regionPath).catch(() => null);
+    const brief = await fs.readFile(path.join(input.cwd, 'design-brief.md'), 'utf8');
+    const stagedCardPath = path.join(input.cwd, 'project-context', 'src', 'Card.tsx');
+    const stagedCard = await fs.readFile(stagedCardPath, 'utf8').catch(() => '');
+    const stagedLarge = await fs.readFile(path.join(input.cwd, 'project-context', 'src', 'Large.tsx')).catch(() => null);
+    const stagedCardStat = await fs.stat(stagedCardPath).catch(() => null);
     invocations.push({
       prompt: input.prompt,
+      brief,
+      stagedCard,
+      stagedLargeBytes: stagedLarge?.byteLength || 0,
+      stagedCardMode: stagedCardStat ? stagedCardStat.mode & 0o777 : 0,
       dimensions: region ? readPngDimensions(region) : null,
     });
     const standardResponse = {
@@ -222,10 +243,10 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
         implementation_handoff: [{ file_hint: 'src/Card.tsx', instruction: 'Polish visual hierarchy only.' }],
       }),
     };
-    if (input.prompt.includes('Return irrecoverable output')) {
+    if (brief.includes('Return irrecoverable output')) {
       return { ...standardResponse, finalMessage: '午-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x' };
     }
-    if (!input.prompt.includes('Recover the final review')) return standardResponse;
+    if (!brief.includes('Recover the final review')) return standardResponse;
     const draft = {
       version: '1.0',
       consultation_type: 'design_review',
@@ -255,7 +276,7 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
     toolName: 'design_component',
     arguments: {
       request: 'Polish the card without changing its action.',
-      file_paths: ['src/Card.tsx'],
+      file_paths: ['src/Card.tsx', 'src/Large.tsx'],
       current_behavior: ['The button action must remain available.'],
       canvas_input: {
         mode: 'region',
@@ -266,12 +287,19 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
     },
   });
   assert.deepEqual(invocations[0]?.dimensions, { width: 50, height: 40 });
-  assert.match(invocations[0]?.prompt || '', /canvas-region\.png/);
-  assert.match(invocations[0]?.prompt || '', /Keep action/);
-  assert.match(invocations[0]?.prompt || '', /Soft editorial interface/);
-  assert.match(invocations[0]?.prompt || '', /primary implementation source/);
-  assert.match(invocations[0]?.prompt || '', /code_snippet is required/);
-  assert.doesNotMatch(invocations[0]?.prompt || '', /must-never-reach-gemini/);
+  assert.match(invocations[0]?.prompt || '', /design-brief\.md/);
+  assert.ok((invocations[0]?.prompt.length || Infinity) < 1_024, 'the Gemini CLI bootstrap prompt stays below OS argv limits');
+  assert.doesNotMatch(invocations[0]?.prompt || '', /Keep action|quiet-token|must-never-reach-gemini/);
+  assert.match(invocations[0]?.brief || '', /canvas-region\.png/);
+  assert.match(invocations[0]?.brief || '', /project-context\/src\/Card\.tsx/);
+  assert.match(invocations[0]?.brief || '', /project-context\/src\/Large\.tsx/);
+  assert.match(invocations[0]?.brief || '', /Soft editorial interface/);
+  assert.match(invocations[0]?.brief || '', /primary implementation source/);
+  assert.match(invocations[0]?.brief || '', /code_snippet is required/);
+  assert.doesNotMatch(invocations[0]?.brief || '', /quiet-token|must-never-reach-gemini/);
+  assert.match(invocations[0]?.stagedCard || '', /Keep action/);
+  assert.ok((invocations[0]?.stagedLargeBytes || 0) > 128 * 1024, 'large context is staged instead of embedded in argv');
+  assert.equal(invocations[0]?.stagedCardMode, 0o600);
   assert.equal((regionResult.canvas_decision as any).mode, 'region');
   assert.equal((regionResult.implementation_contract as any).code_and_behavior_owner, 'Codex');
   assert.equal((regionResult.implementation_contract as any).gemini_visual_code_is_primary, true);
@@ -291,7 +319,7 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
     },
   });
   assert.equal(invocations[1]?.dimensions, null);
-  assert.match(invocations[1]?.prompt || '', /No reference image was intentionally supplied/);
+  assert.match(invocations[1]?.brief || '', /No reference image was intentionally supplied/);
 
   const recoveredReview = await dispatchDesignConsultationForTests({
     profileId: PROFILE_ID,
