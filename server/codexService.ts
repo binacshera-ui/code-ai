@@ -56,6 +56,7 @@ import {
 import { getCodexCliAutoUpdateSnapshot } from './codexCliAutoUpdate.js';
 import { normalizeCodexSessionRow } from './codexSessionMessages.js';
 import { walkJsonlFiles } from './codexSessionFiles.js';
+import { isolateProviderProcessEnv } from './providerProcessEnv.js';
 
 export interface CodexProfile {
   id: string;
@@ -787,25 +788,25 @@ function normalizeCodexServiceTierConfigValue(value: string | null | undefined):
 
 function buildCodexProcessEnv(profile: CodexProfile, codexHomeOverride?: string | null): NodeJS.ProcessEnv {
   const effectiveCodexHome = codexHomeOverride?.trim() || profile.codexHome;
-  return {
+  return isolateProviderProcessEnv({
     ...process.env,
     HOME: path.dirname(effectiveCodexHome),
     CODEX_HOME: effectiveCodexHome,
     TERM: 'xterm-256color',
     NO_COLOR: '1',
-  };
+  });
 }
 
 function buildFallbackCodexProcessEnv(profile: CodexProfile): NodeJS.ProcessEnv {
   const fallbackCodexHome = path.join(CODEX_APP_CONFIG.storageRoot, 'model-catalog-fallback', profile.id);
 
-  return {
+  return isolateProviderProcessEnv({
     ...process.env,
     HOME: path.dirname(fallbackCodexHome),
     CODEX_HOME: fallbackCodexHome,
     TERM: 'xterm-256color',
     NO_COLOR: '1',
-  };
+  });
 }
 
 const BENIGN_CODEX_STDERR_PATTERNS = [

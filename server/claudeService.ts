@@ -37,6 +37,7 @@ import {
   terminateProviderProcessTree,
   type ProviderSessionStartedHandler,
 } from './providerProcessLifecycle.js';
+import { isolateProviderProcessEnv } from './providerProcessEnv.js';
 
 interface ClaudeSessionScanRecord {
   id: string;
@@ -348,13 +349,13 @@ async function writeClaudeCredentials(profile: CodexProfile, credentials: Claude
 }
 
 function buildClaudeProcessEnv(profile: CodexProfile): NodeJS.ProcessEnv {
-  return {
+  return isolateProviderProcessEnv({
     ...process.env,
     HOME: path.dirname(profile.codexHome),
     CLAUDE_HOME: profile.codexHome,
     TERM: 'xterm-256color',
     NO_COLOR: '1',
-  };
+  });
 }
 
 function readLatestTimestamp(value: string | null, fallback: string | null): string | null {

@@ -1,3 +1,5 @@
+import { isolateProviderProcessEnv } from './providerProcessEnv.js';
+
 const GEMINI_INHERITED_RUNTIME_KEYS = [
   // Gemini CLI treats any non-empty DEBUG value as a request to publish its
   // sandbox debugger. PM2 currently supplies DEBUG=release to CODE-AI, which
@@ -34,5 +36,5 @@ export function buildIsolatedGeminiProcessEnv(
     delete env[key];
   }
 
-  return env;
+  return isolateProviderProcessEnv(env);
 }
