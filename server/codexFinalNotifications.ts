@@ -156,7 +156,14 @@ function defaultPublicOrigin(): string {
   return `http://127.0.0.1:${Number.isFinite(port) && port > 0 ? port : 4000}`;
 }
 
-function resolveNtfyConfig(): ResolvedNtfyConfig {
+interface SealedNtfyRuntimeConfig {
+  config: ResolvedNtfyConfig;
+  stateFile: string;
+}
+
+let sealedNtfyRuntimeConfig: SealedNtfyRuntimeConfig | null = null;
+
+function readNtfyConfigFromEnvironment(): ResolvedNtfyConfig {
   return {
     endpoint: normalizeHttpUrl(process.env.CODEX_NTFY_URL),
     enabled: parseBoolean(process.env.CODEX_NTFY_ENABLED, true),
@@ -167,11 +174,41 @@ function resolveNtfyConfig(): ResolvedNtfyConfig {
   };
 }
 
-function getStateFile(): string {
+function readStateFileFromEnvironment(): string {
   return path.resolve(
     process.env.CODEX_NTFY_STATE_FILE?.trim()
       || path.join(CODEX_APP_CONFIG.storageRoot, 'session-final-notifications.json')
   );
+}
+
+function resolveNtfyConfig(): ResolvedNtfyConfig {
+  return sealedNtfyRuntimeConfig?.config || readNtfyConfigFromEnvironment();
+}
+
+function getStateFile(): string {
+  return sealedNtfyRuntimeConfig?.stateFile || readStateFileFromEnvironment();
+}
+
+/**
+ * Retains notification configuration inside the CODE-AI server and removes it
+ * from process.env before any provider CLI is spawned. This makes the ntfy
+ * endpoint a server-only capability instead of an ambient shell credential.
+ */
+export function sealCodexFinalNotificationServerEnvironment(): void {
+  if (sealedNtfyRuntimeConfig) return;
+  sealedNtfyRuntimeConfig = {
+    config: readNtfyConfigFromEnvironment(),
+    stateFile: readStateFileFromEnvironment(),
+  };
+  for (const key of [
+    'CODEX_NTFY_URL',
+    'CODEX_NTFY_ACCESS_TOKEN',
+    'CODEX_NTFY_ENABLED',
+    'CODEX_NTFY_DEFAULT_ENABLED',
+    'CODEX_NTFY_STATE_FILE',
+  ]) {
+    delete process.env[key];
+  }
 }
 
 function buildPreferenceKey(profileId: string, sessionKey: string): string {
@@ -744,4 +781,5 @@ export function resetCodexFinalNotificationRuntimeForTests(): void {
   stateLoadedPromise = null;
   persistTail = Promise.resolve();
   state = createEmptyState();
+  sealedNtfyRuntimeConfig = null;
 }

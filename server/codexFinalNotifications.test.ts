@@ -13,6 +13,7 @@ import {
   getSessionFinalNotificationPreference,
   rebindSessionFinalNotificationPreference,
   resetCodexFinalNotificationRuntimeForTests,
+  sealCodexFinalNotificationServerEnvironment,
   setSessionFinalNotificationPreference,
   startCodexFinalNotificationWorker,
 } from './codexFinalNotifications.js';
@@ -81,6 +82,23 @@ test('short final responses are sent as Markdown notification bodies', () => {
   assert.equal(request.headers.Click, `${TEST_ORIGIN}/session/developer/session-123`);
   assert.equal(request.headers['X-Sequence-ID'], 'sequence-1');
   assert.match(request.headers.Title, /^=\?UTF-8\?B\?/u);
+});
+
+test('server seals ntfy configuration before provider processes can inherit it', async () => {
+  process.env.CODEX_NTFY_URL = TEST_ENDPOINT;
+  process.env.CODEX_NTFY_ACCESS_TOKEN = 'server-only-token';
+  process.env.CODEX_NTFY_ENABLED = 'true';
+  process.env.CODEX_NTFY_DEFAULT_ENABLED = 'true';
+  process.env.CODEX_NTFY_STATE_FILE = path.join(process.env.CODEX_STORAGE_ROOT || '/tmp', 'sealed-state.json');
+
+  sealCodexFinalNotificationServerEnvironment();
+  assert.equal(process.env.CODEX_NTFY_URL, undefined);
+  assert.equal(process.env.CODEX_NTFY_ACCESS_TOKEN, undefined);
+  assert.equal(process.env.CODEX_NTFY_ENABLED, undefined);
+  assert.equal(process.env.CODEX_NTFY_DEFAULT_ENABLED, undefined);
+  assert.equal(process.env.CODEX_NTFY_STATE_FILE, undefined);
+  assert.equal((await getSessionFinalNotificationPreference('developer', 'sealed-session')).available, true);
+  resetCodexFinalNotificationRuntimeForTests();
 });
 
 test('interrupted runs use a high-priority warning and reopen the selected remote server', () => {

@@ -16,7 +16,10 @@ import {
   startCodexCliAutoUpdateWorker,
   stopCodexCliAutoUpdateWorker,
 } from './codexCliAutoUpdate.js';
-import { startCodexFinalNotificationWorker } from './codexFinalNotifications.js';
+import {
+  sealCodexFinalNotificationServerEnvironment,
+  startCodexFinalNotificationWorker,
+} from './codexFinalNotifications.js';
 import { repairAllProviderHomesOwnership } from './providerRuntimeOwnership.js';
 import {
   createRemoteHostProxyMiddleware,
@@ -37,6 +40,8 @@ import {
 } from './personalPortForwardBroker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+sealCodexFinalNotificationServerEnvironment();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
