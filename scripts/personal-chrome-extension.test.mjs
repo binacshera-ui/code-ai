@@ -10,10 +10,10 @@ const extensionRoot = path.join(appRoot, 'chrome-extension');
 test('Chrome extension package is generic, complete, and load-unpacked compatible', async () => {
   const manifest = JSON.parse(await fs.readFile(path.join(extensionRoot, 'manifest.json'), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.4.1');
+  assert.equal(manifest.version, '1.4.3');
   assert.equal(manifest.background.service_worker, 'background.js');
   assert.equal(manifest.side_panel.default_path, 'panel.html');
-  for (const permission of ['debugger', 'declarativeNetRequest', 'scripting', 'sidePanel', 'tabGroups', 'tabs']) {
+  for (const permission of ['clipboardWrite', 'debugger', 'declarativeNetRequest', 'scripting', 'sidePanel', 'tabGroups', 'tabs']) {
     assert.ok(manifest.permissions.includes(permission), `missing ${permission}`);
   }
   for (const file of ['background.js', 'contentScript.js', 'panel.html', 'panel.css', 'panel.js', 'icon-128.png', 'README.md']) {
@@ -36,15 +36,20 @@ test('Chrome extension package is generic, complete, and load-unpacked compatibl
   assert.match(combined, /PANEL_WORKSPACE_ACTION/);
   assert.match(combined, /chrome\.tabGroups\.update/);
   assert.match(combined, /chrome\.action\.onClicked/);
-  assert.match(background, /panelAnchorTransition/);
-  assert.match(background, /queuePanelAnchorTransition/);
+  assert.match(background, /openPanelFromUserGesture/);
   assert.match(background, /function initializePanelScope\(\)/);
-  const panelInitialization = background.slice(background.indexOf('async function initializePanelScopeImmediately()'));
+  const panelInitialization = background.slice(background.indexOf('async function initializePanelScope()'));
   assert.ok(
     panelInitialization.indexOf('chrome.sidePanel.setOptions({ enabled: false })')
       < panelInitialization.indexOf('await restorePanelAnchor()'),
     'the global panel must be disabled before restoring the tab-specific anchor',
   );
+  const actionClickHandler = background.slice(
+    background.indexOf('chrome.action.onClicked.addListener'),
+    background.indexOf('chrome.notifications.onClicked.addListener'),
+  );
+  assert.match(actionClickHandler, /openPanelFromUserGesture\(tab\)/);
+  assert.doesNotMatch(actionClickHandler, /\.then\([^)]*chrome\.sidePanel\.open/);
   assert.match(combined, /createBackgroundWorkspaceTab/);
   assert.match(combined, /active: false/);
   assert.doesNotMatch(combined, /chrome\.tabs\.update\(tab\.id, \{ url, active: true \}\)/);
@@ -63,5 +68,6 @@ test('Chrome extension package is generic, complete, and load-unpacked compatibl
   assert.match(combined, /current\.approvalPolicy === 'never'/);
   assert.match(combined, /approvalPolicy === 'never' \|\| !hasStoredPreference/);
   assert.doesNotMatch(panel, /pairing-code|pair-button|קוד חד/);
+  assert.match(panel, /<iframe[^>]+id="code-ai-frame"[^>]+allow="clipboard-write"/i);
   assert.doesNotMatch(panel, /<script(?![^>]+src=)/i);
 });

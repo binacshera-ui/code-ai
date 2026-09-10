@@ -25,7 +25,6 @@ let connected = false;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 let workspaceBroadcastTimer = null;
-let panelAnchorTransition = Promise.resolve();
 const pendingApprovals = [];
 
 function normalizeSessionContext(value) {
@@ -118,53 +117,49 @@ async function restoreWorkspaces() {
 }
 
 async function restorePanelAnchor() {
+  if (panelAnchor) return;
   const stored = await chrome.storage.session.get(PANEL_ANCHOR_STORAGE_KEY).catch(() => ({}));
+  if (panelAnchor) return;
   const candidate = stored?.[PANEL_ANCHOR_STORAGE_KEY];
   if (!Number.isInteger(candidate?.tabId)) return;
   const tab = await chrome.tabs.get(candidate.tabId).catch(() => null);
-  if (!tab) return;
+  if (!tab || panelAnchor) return;
   panelAnchor = { tabId: tab.id, windowId: tab.windowId };
   await chrome.sidePanel.setOptions({ tabId: tab.id, path: 'panel.html', enabled: true }).catch(() => undefined);
 }
 
-async function setPanelAnchorImmediately(tab) {
+function setPanelAnchor(tab) {
   if (!tab?.id) throw errorWithCode('No Chrome tab is available for the CODE-AI panel.', 'TAB_NOT_BOUND');
   const previous = panelAnchor;
   panelAnchor = { tabId: tab.id, windowId: tab.windowId };
-  await chrome.storage.session.set({ [PANEL_ANCHOR_STORAGE_KEY]: panelAnchor });
+  const updates = [chrome.storage.session.set({ [PANEL_ANCHOR_STORAGE_KEY]: panelAnchor })];
   // A manifest default_path is a global side-panel fallback. Chrome can retain
   // that fallback across service-worker lifetimes, so explicitly keep it off
   // before enabling the one tab that owns this panel.
-  await chrome.sidePanel.setOptions({ enabled: false }).catch(() => undefined);
+  updates.push(chrome.sidePanel.setOptions({ enabled: false }));
   if (previous?.tabId && previous.tabId !== tab.id) {
-    await chrome.sidePanel.setOptions({ tabId: previous.tabId, enabled: false }).catch(() => undefined);
+    updates.push(chrome.sidePanel.setOptions({ tabId: previous.tabId, enabled: false }));
   }
-  await chrome.sidePanel.setOptions({ tabId: tab.id, path: 'panel.html', enabled: true });
-  return panelAnchor;
+  updates.push(chrome.sidePanel.setOptions({ tabId: tab.id, path: 'panel.html', enabled: true }));
+  return Promise.all(updates).then(() => panelAnchor);
 }
 
-function queuePanelAnchorTransition(operation) {
-  const transition = panelAnchorTransition
-    .catch(() => undefined)
-    .then(operation);
-  panelAnchorTransition = transition.catch(() => undefined);
-  return transition;
+function openPanelFromUserGesture(tab) {
+  // Both API calls must be issued synchronously inside chrome.action.onClicked.
+  // Waiting for storage/options first causes Chrome to reject open() because the
+  // extension user gesture has already expired.
+  const configured = setPanelAnchor(tab);
+  const opened = chrome.sidePanel.open({ tabId: tab.id });
+  return Promise.all([configured, opened]).then(() => panelAnchor);
 }
 
-function setPanelAnchor(tab) {
-  return queuePanelAnchorTransition(() => setPanelAnchorImmediately(tab));
-}
-
-async function initializePanelScopeImmediately() {
-  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => undefined);
+async function initializePanelScope() {
+  const behavior = chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => undefined);
   // Do this on every service-worker start, not only on installation. Without
   // it, Chrome falls back to the manifest's global panel in unrelated tabs.
-  await chrome.sidePanel.setOptions({ enabled: false }).catch(() => undefined);
+  const globalDisabled = chrome.sidePanel.setOptions({ enabled: false }).catch(() => undefined);
+  await Promise.all([behavior, globalDisabled]);
   await restorePanelAnchor();
-}
-
-function initializePanelScope() {
-  return queuePanelAnchorTransition(() => initializePanelScopeImmediately());
 }
 
 async function panelAnchorTab() {
@@ -1509,13 +1504,15 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === 'code-ai-bridge-heartbeat') { if (!connected) connectBridge(); else try { sendSocket({ type: 'event', version: PROTOCOL_VERSION, name: 'heartbeat', payload: { at: new Date().toISOString() } }); } catch {} } });
 chrome.action.onClicked.addListener((tab) => {
-  void setPanelAnchor(tab)
-    .then(() => chrome.sidePanel.open({ tabId: tab.id }))
-    .catch(() => undefined);
+  void openPanelFromUserGesture(tab).catch(() => undefined);
 });
 chrome.notifications.onClicked.addListener(() => {
+  if (panelAnchor?.tabId) {
+    void openPanelFromUserGesture({ id: panelAnchor.tabId, windowId: panelAnchor.windowId }).catch(() => undefined);
+    return;
+  }
   void panelAnchorTab()
-    .then((tab) => setPanelAnchor(tab).then(() => chrome.sidePanel.open({ tabId: tab.id })))
+    .then((tab) => openPanelFromUserGesture(tab))
     .catch(() => undefined);
 });
 
