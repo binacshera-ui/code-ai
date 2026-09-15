@@ -22739,7 +22739,6 @@ export function CodexMobileApp() {
         ref={fileInputRef}
         type="file"
         multiple
-        accept="image/*,.pdf,.txt,.md,.csv,.json,.doc,.docx,.xls,.xlsx"
         className="hidden"
         onChange={handleFilesSelected}
       />
