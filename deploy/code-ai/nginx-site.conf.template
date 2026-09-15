@@ -2,7 +2,7 @@ server {
     listen 80;
     server_name _;
 
-    client_max_body_size 25m;
+    client_max_body_size 100m;
 
     # Only the Chrome Side Panel uses this route. Keep the rest of the app
     # protected from framing, while allowing a Chrome extension parent here.

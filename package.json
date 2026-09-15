@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "test:uploads": "esbuild shared/uploadLimits.test.ts server/codexUploads.test.ts --bundle --platform=node --format=esm --outdir=.code-ai/tmp/upload-tests --external:express --external:multer && node --test .code-ai/tmp/upload-tests/shared/uploadLimits.test.js .code-ai/tmp/upload-tests/server/codexUploads.test.js",
     "dev": "vite",
     "build": "vite build && esbuild server/index.ts --bundle --platform=node --outfile=dist/server.js --format=esm --external:express --external:multer --external:cors --external:express-session --external:connect-pg-simple --external:pg --external:node-pty --external:ws && node scripts/copy-personal-chrome-runtime.mjs",
     "test:workbench:runtime": "rm -rf /tmp/code-ai-workbench-runtime-smoke && esbuild scripts/workbench-rebind-smoke.ts --bundle --platform=node --format=esm --outfile=/tmp/code-ai-workbench-rebind-smoke.mjs && CODEX_STORAGE_ROOT=/tmp/code-ai-workbench-runtime-smoke node --env-file=.env /tmp/code-ai-workbench-rebind-smoke.mjs",

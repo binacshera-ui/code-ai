@@ -5,7 +5,7 @@ import { hostname } from 'os';
 import path from 'path';
 import { promisify } from 'util';
 import { Router, Request, Response, NextFunction } from 'express';
-import multer from 'multer';
+import { createCodexUploadMiddleware } from './codexUploads.js';
 import { SessionReadReceiptStore } from './codexSessionReadState.js';
 import type { AppMode, AppProvider } from './config.js';
 import {
@@ -293,7 +293,7 @@ import {
 } from './binaSso.js';
 import { issueBinaRuntimeWorkbenchSession } from './binaRuntimeSso.js';
 // standalone-strip:end private-runtime-integration
-import { decodeMultipartFileName, normalizeCanonicalFileName } from './fileNameNormalizer.js';
+import { decodeMultipartFileName } from './fileNameNormalizer.js';
 import {
   listCodeAiServers,
   refreshRemoteHostHealth,
@@ -308,8 +308,6 @@ const router = Router();
 // standalone-strip:start private-incident-center
 const incidentDecisionCenter = createIncidentDecisionCenterService();
 // standalone-strip:end private-incident-center
-const MAX_UPLOAD_SIZE = 15 * 1024 * 1024;
-const MAX_UPLOAD_FILES = 8;
 const RECURRING_FREQUENCIES = new Set(['daily', 'weekly']);
 const CODEX_CLIENT_LOG_ROOT = path.dirname(CLIENT_CRASH_LOG);
 const CODEX_CLIENT_LOG_FILE = CLIENT_CRASH_LOG;
@@ -320,12 +318,6 @@ const execFileAsync = promisify(execFile);
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function sanitizeFileName(fileName: string): string {
-  return normalizeCanonicalFileName(fileName, {
-    fallbackName: 'attachment',
-  });
 }
 
 function isPathInside(rootPath: string, targetPath: string): boolean {
@@ -737,24 +729,7 @@ function buildSupportSessionInstruction(
   return sections.join('\n\n');
 }
 
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, callback) => {
-      fs.mkdir(CODEX_UPLOAD_ROOT, { recursive: true })
-        .then(() => callback(null, CODEX_UPLOAD_ROOT))
-        .catch((error) => callback(error as Error, CODEX_UPLOAD_ROOT));
-    },
-    filename: (_req, file, callback) => {
-      const originalName = decodeMultipartFileName(file.originalname);
-      file.originalname = originalName;
-      callback(null, `${Date.now()}-${randomUUID()}-${sanitizeFileName(originalName)}`);
-    },
-  }),
-  limits: {
-    fileSize: MAX_UPLOAD_SIZE,
-    files: MAX_UPLOAD_FILES,
-  },
-});
+const upload = createCodexUploadMiddleware(CODEX_UPLOAD_ROOT);
 
 function readRequestHost(req: Request): string {
   const forwardedHost = req.headers['x-forwarded-host'];
@@ -1767,7 +1742,7 @@ router.get('/client-logs', requireCodexAccess, async (req, res) => {
   }
 });
 
-router.post('/uploads', requireCodexAccess, upload.array('files', MAX_UPLOAD_FILES), async (req, res) => {
+router.post('/uploads', requireCodexAccess, upload, async (req, res) => {
   try {
     const files = ((req.files as Express.Multer.File[]) || []).map((file) => ({
       id: randomUUID(),

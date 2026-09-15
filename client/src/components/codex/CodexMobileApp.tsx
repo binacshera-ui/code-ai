@@ -23,6 +23,7 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { planUploadBatches } from '../../../../shared/uploadLimits';
 import { useSessionUnread, type SessionReadSnapshot } from './useSessionUnread';
 import { ActiveTaskChips } from './ActiveTaskChips';
 import { collectSessionActivity } from './sessionUnread';
@@ -5875,26 +5876,47 @@ function getAttachmentIcon(attachment: DraftAttachment) {
     : <FileText className="h-4 w-4" />;
 }
 
-async function uploadFiles(files: File[]): Promise<DraftAttachment[]> {
-  const formData = new FormData();
-  files.forEach((file) => formData.append('files', file));
-
-  const response = await codexFetch('/api/codex/uploads', {
-    method: 'POST',
-    body: formData,
-  });
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data.error || 'Upload failed');
+async function uploadFiles(
+  files: File[],
+  onBatchUploaded?: (files: DraftAttachment[]) => void,
+): Promise<DraftAttachment[]> {
+  const batches = planUploadBatches(files);
+  const serverId = activeCodeAiServerId || LOCAL_SERVER_ID;
+  const uploaded: DraftAttachment[] = [];
+  for (const batch of batches) {
+    const formData = new FormData();
+    batch.forEach((file) => formData.append('files', file));
+    try {
+      const response = await codexFetch('/api/codex/uploads', {
+        method: 'POST',
+        body: formData,
+      }, serverId);
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(data?.error || `העלאת הקבצים נכשלה (${response.status}).`);
+      }
+      if (!Array.isArray(data?.files) || data.files.length !== batch.length) {
+        throw new Error('השרת לא אישר את כל הקבצים שהועלו.');
+      }
+      const attachments = data.files.map((attachment: CodexUploadedAttachment, index: number) => ({
+        ...attachment,
+        previewUrl: batch[index].type.startsWith('image/')
+          ? URL.createObjectURL(batch[index]) : undefined,
+      }));
+      uploaded.push(...attachments);
+      // Preserve completed batches if a later request fails; never retry POSTs
+      // automatically, which could create duplicate uploads.
+      onBatchUploaded?.(attachments);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'העלאת הקבצים נכשלה.';
+      if (!onBatchUploaded) {
+        uploaded.forEach((file) => { if (file.previewUrl) URL.revokeObjectURL(file.previewUrl); });
+      }
+      throw new Error(onBatchUploaded && uploaded.length
+        ? `${uploaded.length} קבצים כבר צורפו. ${message}` : message);
+    }
   }
-
-  return data.files.map((attachment: CodexUploadedAttachment, index: number) => ({
-    ...attachment,
-    previewUrl: files[index]?.type.startsWith('image/')
-      ? URL.createObjectURL(files[index])
-      : undefined,
-  }));
+  return uploaded;
 }
 
 const LONG_PASTE_WORD_THRESHOLD = 1000;
@@ -18604,12 +18626,13 @@ export function CodexMobileApp() {
     setError(null);
 
     try {
-      const uploadedFiles = await uploadFiles(selectedFiles);
+      const uploadedFiles = await uploadFiles(selectedFiles, (batch) => {
+        setDraftAttachments((current) => [...current, ...batch]);
+      });
       recordCodexBreadcrumb('attachments-uploaded', {
         count: uploadedFiles.length,
         source,
       });
-      setDraftAttachments((current) => [...current, ...uploadedFiles]);
     } catch (uploadError: any) {
       reportCodexClientLog({
         type: 'upload-failed',

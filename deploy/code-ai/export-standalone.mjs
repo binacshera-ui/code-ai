@@ -218,6 +218,7 @@ async function main() {
   const pathsToCopy = [
     'client',
     'server',
+    'shared',
     'chrome-extension',
     'skills',
     'scripts',
