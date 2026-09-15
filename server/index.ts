@@ -46,6 +46,10 @@ sealCodexFinalNotificationServerEnvironment();
 const app = express();
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST?.trim() || '0.0.0.0';
+// A passive node can own stateless HTTP endpoints (notably large uploads)
+// during a zero-interruption rollout. It must never lease queue work, emit
+// notifications, repair provider homes, or own browser/port-forward sockets.
+const PASSIVE_HTTP_NODE = process.env.CODE_AI_PASSIVE_HTTP_NODE === '1';
 const STARTUP_CONFIGURATION_EXIT_CODE = 78;
 const configuredCorsOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
   .split(',')
@@ -231,7 +235,9 @@ app.get('*', (req, res) => {
 });
 
 const server = createServer(app);
-attachPersonalChromeBridge(server);
+if (!PASSIVE_HTTP_NODE) {
+  attachPersonalChromeBridge(server);
+}
 server.listen(Number(PORT), HOST);
 
 server.once('error', (error: NodeJS.ErrnoException) => {
@@ -250,6 +256,10 @@ server.once('error', (error: NodeJS.ErrnoException) => {
 
 server.once('listening', () => {
   console.log(`🚀 code-ai server running on ${HOST}:${PORT}`);
+  if (PASSIVE_HTTP_NODE) {
+    console.log('📦 Passive HTTP node ready; background workers are disabled');
+    return;
+  }
 
   repairAllProviderHomesOwnership(CODEX_APP_CONFIG.profiles);
 
@@ -314,7 +324,7 @@ function shutdownServer(signal: NodeJS.Signals): void {
 
   void Promise.all([
     closeServer,
-    shutdownCodexQueueWorker(),
+    PASSIVE_HTTP_NODE ? Promise.resolve() : shutdownCodexQueueWorker(),
     shutdownCodexDesignModeBridge(),
     shutdownCodexUxModeBridge(),
   ])
