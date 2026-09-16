@@ -1478,8 +1478,8 @@ function createEmptySessionPersonalChromeMode(): CodexSessionPersonalChromeMode 
     deviceId: '',
     deviceName: '',
     tabId: null,
-    approvalPolicy: 'risky',
-    allowJavascript: false,
+    approvalPolicy: 'never',
+    allowJavascript: true,
     allowUploads: true,
     allowPorts: true,
     bindingId: null,
@@ -1715,8 +1715,10 @@ function normalizeSessionPersonalChromeModeValue(
     deviceId: typeof value.deviceId === 'string' ? value.deviceId : '',
     deviceName: typeof value.deviceName === 'string' ? value.deviceName : '',
     tabId: Number.isInteger(tabId) && tabId >= 0 ? tabId : null,
-    approvalPolicy: value.approvalPolicy === 'always' || value.approvalPolicy === 'never' ? value.approvalPolicy : 'risky',
-    allowJavascript: value.allowJavascript === true,
+    approvalPolicy: value.approvalPolicy === 'risky' || value.approvalPolicy === 'always' || value.approvalPolicy === 'never'
+      ? value.approvalPolicy
+      : fallback.approvalPolicy,
+    allowJavascript: typeof value.allowJavascript === 'boolean' ? value.allowJavascript : fallback.allowJavascript,
     allowUploads: value.allowUploads !== false,
     allowPorts: value.allowPorts !== false,
     bindingId: typeof value.bindingId === 'string' && value.bindingId ? value.bindingId : null,

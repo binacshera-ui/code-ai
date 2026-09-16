@@ -65,9 +65,11 @@ deployed copy as the source of truth.
   extension storage.
 - Each active Codex session receives a separate, revocable binding automatically,
   with explicit scopes and a session-specific approval policy.
-- The session UI offers smart, strict, and explicit **free-access** policies. Free
-  access enables every browser capability and auto-approves browser operations
-  for that session; switching away from it restores approval prompts.
+- The session UI offers smart, strict, and **free-access** policies. New session
+  bindings default to free access, which enables every browser capability and
+  auto-approves browser operations for that session. An existing explicit smart
+  or strict choice is preserved; switching away from free access restores
+  approval prompts.
 - High-risk actions are surfaced in the Side Panel for human approval unless the
   user explicitly selected free access for that session.
 - Sensitive form values are redacted from previews and audit records.

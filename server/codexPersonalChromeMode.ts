@@ -59,25 +59,31 @@ let persistTail: Promise<void> = Promise.resolve();
 function nowIso() { return new Date().toISOString(); }
 function key(profileId: string, sessionKey: string) { return `${profileId}:${sessionKey}`; }
 function safeToken(value: string) { return value.replace(/[^a-zA-Z0-9._-]+/g, '-'); }
+function normalizeApprovalPolicy(value: unknown, fallback?: PersonalChromeApprovalPolicy): PersonalChromeApprovalPolicy {
+  if (value === 'risky' || value === 'always' || value === 'never') return value;
+  if (fallback === 'risky' || fallback === 'always' || fallback === 'never') return fallback;
+  return 'never';
+}
 function defaultMode(): CodexSessionPersonalChromeMode {
   return {
-    enabled: false, deviceId: '', deviceName: '', tabId: null, approvalPolicy: 'risky',
-    allowJavascript: false, allowUploads: true, allowPorts: true, bindingId: null,
+    enabled: false, deviceId: '', deviceName: '', tabId: null, approvalPolicy: 'never',
+    allowJavascript: true, allowUploads: true, allowPorts: true, bindingId: null,
   };
 }
 
 function normalize(value: unknown, current?: PersistedPersonalChromeModeRecord | null): CodexSessionPersonalChromeModeInput {
   const candidate = value && typeof value === 'object' ? value as Partial<CodexSessionPersonalChromeModeInput> : {};
   const tabId = Number(candidate.tabId);
+  const approvalPolicy = normalizeApprovalPolicy(candidate.approvalPolicy, current?.approvalPolicy);
   return {
     enabled: candidate.enabled === true,
     deviceId: typeof candidate.deviceId === 'string' ? candidate.deviceId.trim() : current?.deviceId || '',
     deviceName: typeof candidate.deviceName === 'string' ? candidate.deviceName.trim().slice(0, 120) : current?.deviceName || '',
     tabId: Number.isInteger(tabId) && tabId >= 0 ? tabId : null,
-    approvalPolicy: candidate.approvalPolicy === 'always' || candidate.approvalPolicy === 'never' ? candidate.approvalPolicy : 'risky',
-    allowJavascript: candidate.allowJavascript === true,
-    allowUploads: candidate.allowUploads !== false,
-    allowPorts: candidate.allowPorts !== false,
+    approvalPolicy,
+    allowJavascript: typeof candidate.allowJavascript === 'boolean' ? candidate.allowJavascript : current?.allowJavascript ?? approvalPolicy === 'never',
+    allowUploads: typeof candidate.allowUploads === 'boolean' ? candidate.allowUploads : current?.allowUploads ?? true,
+    allowPorts: typeof candidate.allowPorts === 'boolean' ? candidate.allowPorts : current?.allowPorts ?? true,
     bindingId: typeof candidate.bindingId === 'string' && candidate.bindingId.trim() ? candidate.bindingId.trim() : current?.bindingId || null,
     bindingToken: typeof candidate.bindingToken === 'string' && candidate.bindingToken.trim() ? candidate.bindingToken.trim() : current?.bindingToken || null,
     controlUrl: typeof candidate.controlUrl === 'string' && candidate.controlUrl.trim() ? candidate.controlUrl.trim().replace(/\/+$/, '') : current?.controlUrl || null,

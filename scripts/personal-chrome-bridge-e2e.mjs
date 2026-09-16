@@ -181,9 +181,10 @@ async function main() {
     method: 'POST', headers: { 'content-type': 'application/json', ...extensionHeaders },
     body: JSON.stringify({
       deviceId: claim.deviceId, profileId: profile.id, sessionKey: `${sessionKey}-free-access`,
-      scopes: ['read', 'write', 'javascript', 'upload', 'ports'], approvalPolicy: 'never',
+      scopes: ['read', 'write', 'javascript', 'upload', 'ports'],
     }),
   }, 201);
+  assert.equal(freeAccessBinding.binding.approvalPolicy, 'never', 'new bindings must default to free access');
   const freeAccessBearer = {
     authorization: `Bearer ${freeAccessBinding.bindingToken}`,
     'content-type': 'application/json',

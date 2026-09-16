@@ -65,7 +65,9 @@ test('Chrome extension package is generic, complete, and load-unpacked compatibl
   assert.match(combined, /code-ai:extension-bootstrap/);
   assert.match(combined, /codeAiPersonalChromeInstallationId/);
   assert.match(combined, /frameReady/);
-  assert.match(combined, /current\.approvalPolicy === 'never'/);
+  assert.match(combined, /hasStoredPreference/);
+  assert.match(combined, /current\.approvalPolicy === 'risky'/);
+  assert.match(combined, /:\s*'never'/);
   assert.match(combined, /approvalPolicy === 'never' \|\| !hasStoredPreference/);
   assert.doesNotMatch(panel, /pairing-code|pair-button|קוד חד/);
   assert.match(panel, /<iframe[^>]+id="code-ai-frame"[^>]+allow="clipboard-write"/i);

@@ -250,6 +250,7 @@ async def main():
             )
             assert auto_sync["ok"] is True
             assert auto_sync["personalChromeMode"]["enabled"] is True
+            assert auto_sync["personalChromeMode"]["approvalPolicy"] == "never"
             assert auto_sync["personalChromeMode"]["allowJavascript"] is True
             automatic_mode = await asyncio.to_thread(
                 request_json,

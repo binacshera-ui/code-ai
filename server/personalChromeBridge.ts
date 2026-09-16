@@ -265,7 +265,9 @@ function normalizeBinding(value: unknown): PersonalChromeBindingRecord | null {
     profileId: String(candidate.profileId), sessionKey: String(candidate.sessionKey),
     tabId: Number.isInteger(Number(candidate.tabId)) && Number(candidate.tabId) >= 0 ? Number(candidate.tabId) : null,
     tokenHash: String(candidate.tokenHash),
-    scopes, approvalPolicy: candidate.approvalPolicy === 'always' || candidate.approvalPolicy === 'never' ? candidate.approvalPolicy : 'risky',
+    scopes, approvalPolicy: candidate.approvalPolicy === 'risky' || candidate.approvalPolicy === 'always' || candidate.approvalPolicy === 'never'
+      ? candidate.approvalPolicy
+      : 'never',
     createdAt: candidate.createdAt || nowIso(), updatedAt: candidate.updatedAt || nowIso(), revokedAt: candidate.revokedAt || null,
   };
 }
@@ -914,8 +916,11 @@ export function createPersonalChromeBridgeRouter(requireAccess: AccessMiddleware
     if (!profileId || !sessionKey) { res.status(400).json({ error: 'profileId and sessionKey are required.' }); return; }
     const requestedScopes = Array.isArray(req.body?.scopes) ? req.body.scopes : DEFAULT_SCOPES;
     const scopes = requestedScopes.filter((scope: unknown): scope is PersonalChromeScope => DEFAULT_SCOPES.includes(scope as PersonalChromeScope));
-    const approvalPolicy: PersonalChromeApprovalPolicy = req.body?.approvalPolicy === 'always' || req.body?.approvalPolicy === 'never'
-      ? req.body.approvalPolicy : 'risky';
+    const approvalPolicy: PersonalChromeApprovalPolicy = req.body?.approvalPolicy === 'risky'
+      || req.body?.approvalPolicy === 'always'
+      || req.body?.approvalPolicy === 'never'
+      ? req.body.approvalPolicy
+      : 'never';
     const token = randomBytes(32).toString('base64url');
     const binding: PersonalChromeBindingRecord = {
       id: randomUUID(), ownerId, deviceId, profileId, sessionKey,

@@ -523,15 +523,20 @@ function normalizePersonalChromeMode(value: unknown): CodexSessionPersonalChrome
   if (!value || typeof value !== 'object') return null;
   const candidate = value as Partial<CodexSessionPersonalChromeMode>;
   const tabId = Number(candidate.tabId);
+  const approvalPolicy = candidate.approvalPolicy === 'risky'
+    || candidate.approvalPolicy === 'always'
+    || candidate.approvalPolicy === 'never'
+    ? candidate.approvalPolicy
+    : 'never';
   return {
     enabled: candidate.enabled === true,
     deviceId: typeof candidate.deviceId === 'string' ? candidate.deviceId.trim() : '',
     deviceName: typeof candidate.deviceName === 'string' ? candidate.deviceName.trim() : '',
     tabId: Number.isInteger(tabId) && tabId >= 0 ? tabId : null,
-    approvalPolicy: candidate.approvalPolicy === 'always' || candidate.approvalPolicy === 'never'
-      ? candidate.approvalPolicy
-      : 'risky',
-    allowJavascript: candidate.allowJavascript === true,
+    approvalPolicy,
+    allowJavascript: typeof candidate.allowJavascript === 'boolean'
+      ? candidate.allowJavascript
+      : approvalPolicy === 'never',
     allowUploads: candidate.allowUploads !== false,
     allowPorts: candidate.allowPorts !== false,
     bindingId: typeof candidate.bindingId === 'string' && candidate.bindingId.trim()

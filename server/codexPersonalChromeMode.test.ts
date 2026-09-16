@@ -22,6 +22,10 @@ test('personal Chrome mode persists privately and prepares a session-only MCP ov
   await fs.writeFile(path.join(codexHome, 'config.toml'), 'model = "test-model"\n[mcp_servers.keep_me]\ncommand = "true"\n', 'utf8');
   await fs.writeFile(path.join(codexHome, 'auth.json'), '{"test":true}\n', 'utf8');
 
+  const initial = await getSessionPersonalChromeMode(profileId, draftKey);
+  assert.equal(initial.approvalPolicy, 'never');
+  assert.equal(initial.allowJavascript, true);
+
   const saved = await setSessionPersonalChromeMode(profileId, draftKey, {
     enabled: true,
     deviceId: 'device-1',
@@ -36,6 +40,7 @@ test('personal Chrome mode persists privately and prepares a session-only MCP ov
     controlUrl: 'http://127.0.0.1:4106/',
   });
   assert.equal(saved.enabled, true);
+  assert.equal(saved.approvalPolicy, 'risky');
   assert.equal(Object.hasOwn(saved as object, 'bindingToken'), false);
 
   await rebindSessionPersonalChromeMode(profileId, draftKey, sessionKey);

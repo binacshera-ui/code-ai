@@ -1081,9 +1081,10 @@ async function syncActiveSession(context) {
     }
 
     const hasStoredPreference = current.deviceId === settings.deviceId;
-    const approvalPolicy = current.approvalPolicy === 'always' || current.approvalPolicy === 'never'
+    const approvalPolicy = hasStoredPreference
+      && (current.approvalPolicy === 'risky' || current.approvalPolicy === 'always' || current.approvalPolicy === 'never')
       ? current.approvalPolicy
-      : 'risky';
+      : 'never';
     const allowJavascript = approvalPolicy === 'never' || !hasStoredPreference || current.allowJavascript === true;
     const allowUploads = approvalPolicy === 'never' || !hasStoredPreference || current.allowUploads !== false;
     const allowPorts = approvalPolicy === 'never' || !hasStoredPreference || current.allowPorts !== false;
