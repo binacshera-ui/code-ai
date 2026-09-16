@@ -32,6 +32,7 @@ import {
   Loader2,
   Map as MapIcon,
   Maximize2,
+  Minimize2,
   Network,
   Plus,
   RotateCcw,
@@ -334,6 +335,7 @@ export function FlowModeDialog({
   const [dirty, setDirty] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [isCanvasOnly, setIsCanvasOnly] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -350,6 +352,7 @@ export function FlowModeDialog({
     setDirty(false);
     setNotice(null);
     setShowSettings(!value.enabled && !value.document);
+    setIsCanvasOnly(false);
   }, [isOpen, value.revision]);
 
   useEffect(() => {
@@ -511,8 +514,8 @@ export function FlowModeDialog({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[110] flex flex-col bg-[#f8fafc]" dir="rtl">
-      <header className="relative z-20 flex min-h-[4.5rem] flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 bg-white/95 px-3 py-3 shadow-sm backdrop-blur-xl sm:px-5">
+    <div className="fixed inset-0 z-[110] flex min-h-0 flex-col overflow-hidden bg-[#f8fafc]" dir="rtl">
+      {!isCanvasOnly && <header className="relative z-20 flex min-h-[4.5rem] flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 bg-white/95 px-3 py-3 shadow-sm backdrop-blur-xl sm:px-5">
         <div className="flex min-w-0 items-center gap-3">
           <button type="button" onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-50" aria-label="סגור את הזרימה"><X className="h-5 w-5" /></button>
           <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-100 to-violet-100 text-cyan-700"><Network className="h-5 w-5" /></div>
@@ -527,6 +530,7 @@ export function FlowModeDialog({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {document.nodes.length > 0 && <button type="button" onClick={() => setIsCanvasOnly(true)} className="flex h-11 items-center gap-2 rounded-full border border-teal-200 bg-teal-50 px-3 text-xs font-semibold text-teal-700 transition hover:bg-teal-100" title="פתח רק את הזרימה על כל המסך"><Maximize2 className="h-4 w-4" /><span className="hidden sm:inline">רק הזרימה</span></button>}
           <button type="button" onClick={() => setShowSettings((current) => !current)} className="flex h-11 items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"><Settings2 className="h-4 w-4" /><span className="hidden sm:inline">הגדרות</span></button>
           {document.nodes.length > 0 && <button type="button" onClick={() => downloadFlow(syncDocumentFromCanvas())} className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-50" title="הורד JSON"><Download className="h-4 w-4" /></button>}
           <button type="button" onClick={addModule} className="flex h-11 items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-100"><Plus className="h-4 w-4" /><span>מודול</span></button>
@@ -535,11 +539,11 @@ export function FlowModeDialog({
             <span>{isSaving ? 'שומר…' : dirty ? 'שמור זרימה' : 'שמור'}</span>
           </button>
         </div>
-      </header>
+      </header>}
 
-      {notice && <div className="relative z-20 flex items-center justify-between gap-3 border-b border-emerald-100 bg-emerald-50 px-4 py-2 text-xs font-medium text-emerald-800"><span>{notice}</span><button type="button" onClick={() => setNotice(null)}><X className="h-3.5 w-3.5" /></button></div>}
+      {!isCanvasOnly && notice && <div className="relative z-20 flex items-center justify-between gap-3 border-b border-emerald-100 bg-emerald-50 px-4 py-2 text-xs font-medium text-emerald-800"><span>{notice}</span><button type="button" onClick={() => setNotice(null)}><X className="h-3.5 w-3.5" /></button></div>}
 
-      {showSettings && (
+      {!isCanvasOnly && showSettings && (
         <div className="relative z-20 border-b border-violet-100 bg-gradient-to-l from-cyan-50 via-white to-violet-50 px-4 py-4 shadow-sm">
           <div className="mx-auto grid max-w-6xl gap-4 lg:grid-cols-[1fr_1fr_1.4fr_auto] lg:items-end">
             <div className="grid gap-2">
@@ -563,8 +567,14 @@ export function FlowModeDialog({
         </div>
       )}
 
-      <div className="relative min-h-0 flex-1 lg:grid lg:grid-cols-[minmax(0,1fr)_22rem]" dir="ltr">
-        <section className="relative min-h-[55dvh] overflow-hidden bg-[radial-gradient(circle_at_20%_15%,rgba(207,250,254,0.7),transparent_28%),radial-gradient(circle_at_80%_85%,rgba(237,233,254,0.75),transparent_30%),#f8fafc]">
+      <div className={cn(
+        'relative min-h-0 flex-1',
+        isCanvasOnly ? 'overflow-hidden' : 'overflow-y-auto overscroll-contain lg:grid lg:grid-cols-[minmax(0,1fr)_22rem] lg:overflow-hidden',
+      )} dir="ltr">
+        <section className={cn(
+          'relative overflow-hidden bg-[radial-gradient(circle_at_20%_15%,rgba(207,250,254,0.7),transparent_28%),radial-gradient(circle_at_80%_85%,rgba(237,233,254,0.75),transparent_30%),#f8fafc]',
+          isCanvasOnly ? 'h-full min-h-0' : 'min-h-[58dvh] lg:h-full lg:min-h-0',
+        )}>
           <div className="absolute left-3 right-3 top-3 z-10 flex items-center gap-2 sm:left-4 sm:right-auto">
             <label className="flex h-11 flex-1 items-center gap-2 rounded-full border border-slate-200 bg-white/95 px-3 shadow-sm backdrop-blur sm:w-72" dir="rtl">
               <Search className="h-4 w-4 shrink-0 text-slate-400" />
@@ -572,6 +582,7 @@ export function FlowModeDialog({
               {query && <button type="button" onClick={() => setQuery('')}><X className="h-3.5 w-3.5 text-slate-400" /></button>}
             </label>
             <button type="button" onClick={resetLayout} className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-500 shadow-sm transition hover:text-cyan-700" title="סדר מחדש"><RotateCcw className="h-4 w-4" /></button>
+            {isCanvasOnly && <button type="button" onClick={() => setIsCanvasOnly(false)} className="flex h-11 shrink-0 items-center gap-2 rounded-full border border-teal-200 bg-white/95 px-3 text-xs font-bold text-teal-700 shadow-sm backdrop-blur transition hover:bg-teal-50" title="חזור למסך העריכה"><Minimize2 className="h-4 w-4" /><span className="hidden sm:inline">חזרה לעריכה</span></button>}
           </div>
 
           {document.nodes.length === 0 ? (
@@ -611,6 +622,10 @@ export function FlowModeDialog({
               selectionOnDrag
               multiSelectionKeyCode="Shift"
               deleteKeyCode={null}
+              preventScrolling={isCanvasOnly}
+              zoomOnScroll={isCanvasOnly}
+              panOnDrag
+              zoomOnPinch
               colorMode="light"
               proOptions={{ hideAttribution: true }}
             >
@@ -624,7 +639,7 @@ export function FlowModeDialog({
           )}
         </section>
 
-        <aside className="min-h-0 overflow-y-auto border-t border-slate-200 bg-white p-4 lg:border-l-0 lg:border-r lg:border-t-0" dir="rtl">
+        {!isCanvasOnly && <aside className="min-h-0 overflow-visible border-t border-slate-200 bg-white p-4 lg:overflow-y-auto lg:border-l-0 lg:border-r lg:border-t-0" dir="rtl">
           {selectedNode ? (
             <div className="space-y-4">
               <div className="flex items-start justify-between gap-3">
@@ -663,7 +678,7 @@ export function FlowModeDialog({
             <button type="button" onClick={() => void handoffToAgent()} disabled={!agentRequest.trim() || isSaving} className="mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-full bg-violet-600 px-4 text-xs font-bold text-white transition hover:bg-violet-700 disabled:opacity-40"><Send className="h-4 w-4" />העבר לתיבת ההודעה</button>
             <p className="mt-2 text-center text-[9px] leading-4 text-slate-400">הסוכן יקבל אוטומטית את כל הזרימה העדכנית, לא רק את המודול הנבחר.</p>
           </div>
-        </aside>
+        </aside>}
       </div>
     </div>
   );
