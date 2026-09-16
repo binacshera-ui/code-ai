@@ -1,0 +1,71 @@
+# Flow Creation Mode — architecture and delivery plan
+
+## Product outcome
+
+Flow Creation Mode turns a session into a living, editable system map. The agent explains the real code and runtime in plain Hebrew, CODE-AI renders the result as a calm pastel graph, and every user edit becomes part of the next agent turn.
+
+The complete loop is:
+
+1. The user enables Flow Creation Mode for a draft or an existing session.
+2. CODE-AI adds the current canonical flow and the `bina-flow` contract to every turn.
+3. The agent investigates the real system and ends its answer with one complete `bina-flow` JSON document.
+4. The server validates and versions the document before persisting it.
+5. A “צפה בזרימה” action opens the React Flow canvas.
+6. The user can move, connect, add, edit, or remove modules and save a new revision.
+7. “שאל או בקש שינוי” sends the selected module and instruction back to the same session. The server supplies the latest full flow, so the agent always works from the current visual state.
+
+## Foundation decision
+
+Use `@xyflow/react` as the interaction engine and keep all business semantics inside CODE-AI.
+
+Why:
+
+- The same engine is already proven in Bina Cshera 3.0's workflow builder.
+- It supplies the hard canvas primitives: pan, zoom, fit view, selection, connection handles, keyboard deletion, controls, and MiniMap.
+- It is MIT licensed and actively maintained.
+- It does not dictate our domain model, persistence, validation, prompts, or visual language.
+
+Rejected alternatives:
+
+- A custom SVG/canvas engine would duplicate mature interaction and accessibility work.
+- A Mermaid-only view would be readable but would not support direct manipulation and module-level continuation.
+- Reusing Bina 3.0's workflow document one-to-one would leak execution semantics into an explanatory architecture map.
+
+## Canonical contract
+
+The server owns schema version 1. A document contains:
+
+- Human title, subtitle, and summary.
+- Modules with kind, ownership, status, technology, runtime, repository path or external URL, detailed explanation, tags, evidence, and optional position.
+- Typed connections with a short label and a human explanation.
+- Optional visual groups for domains or layers.
+
+The server enforces IDs, text limits, valid ownership/status values, unique modules, valid connection endpoints, and graph size limits. Unknown fields are discarded. Every accepted change increments an optimistic revision.
+
+## Trust and lifecycle boundaries
+
+- Agent output is untrusted input until it passes canonical validation.
+- The browser never writes storage files directly.
+- Draft-session flow state is rebound atomically to the real session ID.
+- Session deletion also deletes flow state.
+- Existing documents are included in the next prompt as full compact JSON.
+- The agent must distinguish repository-owned code, managed infrastructure, containers, and external services, and attach file/URL/note evidence when known.
+- Invalid or partial `bina-flow` blocks do not replace the last valid document.
+
+## UI architecture
+
+- Mode card: enable/disable, explanation depth, optional brief, current revision and module count.
+- Session chip: shows that Flow Mode is active and opens the canvas.
+- Completion action: shows “צפה בזרימה” only when a validated document exists and the current turn is no longer running.
+- Canvas: custom pastel module nodes, relationship labels, MiniMap, zoom/fit controls, search and filters.
+- Inspector: fully editable agent-authored details and evidence.
+- Editing: add module, connect modules, move, delete, edit, reset layout, save with conflict detection.
+- Continuation: selected-module context plus the user's instruction is placed in the composer; the latest complete graph is injected server-side at send time.
+
+## Verification and rollout
+
+- Unit tests cover normalization, invalid edges, fenced-output extraction, persistence, revision conflicts, and draft rebinding.
+- Production build verifies the React Flow integration and server bundle.
+- Browser QA covers mode activation, canvas opening, edit/save/reload, and composer handoff at desktop and narrow panel widths.
+- Deployment follows the existing CODE-AI multi-host release flow with health checks and rollback-safe releases.
+

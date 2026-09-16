@@ -215,6 +215,13 @@ import {
   validateSessionConversationSearchMode,
 } from './codexConversationSearchMode.js';
 import {
+  deleteSessionFlowMode,
+  getSessionFlowMode,
+  ingestSessionFlowDocumentFromText,
+  rebindSessionFlowMode,
+  setSessionFlowMode,
+} from './codexFlowMode.js';
+import {
   BrowserModeDisabledError,
   closeSessionBrowserViewer,
   inspectSessionBrowserViewerPoint,
@@ -1236,6 +1243,7 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
     deleteSessionUxMode(profileId, sessionId),
     deleteSessionProjectMode(profileId, sessionId),
     deleteSessionConversationSearchMode(profileId, sessionId),
+    deleteSessionFlowMode(profileId, sessionId),
     deleteSessionPersonalChromeMode(profileId, sessionId),
     deleteSessionPhoneMode(profileId, sessionId),
     deleteSessionFinalNotificationPreference(profileId, sessionId),
@@ -4021,6 +4029,54 @@ router.post('/session-project-mode', requireCodexAccess, async (req, res) => {
   }
 });
 
+router.get('/session-flow-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' ? req.query.profileId.trim() : '';
+    const sessionKey = typeof req.query.sessionKey === 'string' ? req.query.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.json({ flowMode: await getSessionFlowMode(profileId, sessionKey) });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load flow mode' });
+  }
+});
+
+router.post('/session-flow-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId.trim() : '';
+    const sessionKey = typeof req.body?.sessionKey === 'string' ? req.body.sessionKey.trim() : '';
+    if (!profileId || !sessionKey) {
+      res.status(400).json({ error: 'Profile id and session key are required' });
+      return;
+    }
+    if (!findConfiguredProfile(profileId)) {
+      res.status(404).json({ error: 'The selected profile was not found' });
+      return;
+    }
+    const flowMode = await setSessionFlowMode(profileId, sessionKey, {
+      enabled: typeof req.body?.flowMode?.enabled === 'boolean' ? req.body.flowMode.enabled : undefined,
+      detail: req.body?.flowMode?.detail,
+      brief: typeof req.body?.flowMode?.brief === 'string' ? req.body.flowMode.brief : undefined,
+      ...(Object.prototype.hasOwnProperty.call(req.body?.flowMode || {}, 'document')
+        ? { document: req.body.flowMode.document }
+        : {}),
+      expectedRevision: Number.isFinite(req.body?.flowMode?.expectedRevision)
+        ? Number(req.body.flowMode.expectedRevision)
+        : undefined,
+      source: 'user',
+    });
+    res.json({ flowMode });
+  } catch (error: any) {
+    res.status(typeof error?.statusCode === 'number' ? error.statusCode : 400).json({
+      error: error.message || 'Failed to update flow mode',
+      issues: Array.isArray(error?.issues) ? error.issues : undefined,
+    });
+  }
+});
+
 router.get('/session-personal-chrome-mode', requireCodexAccess, async (req, res) => {
   try {
     const profileId = typeof req.query.profileId === 'string' ? req.query.profileId.trim() : '';
@@ -6557,6 +6613,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
 
     if (!asyncRequested) {
       const supportSessionKey = sessionId || effectiveQueueKey;
+      const flowModeAtRun = await getSessionFlowMode(visibleProfileId, supportSessionKey);
       if (supportEnvelope) {
         await recordSupportTurnRequest({
           profile: configuredProfile,
@@ -6613,6 +6670,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         await rebindSessionUxMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionProjectMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionConversationSearchMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionFlowMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionFinalNotificationPreference(visibleProfileId, sessionId, result.sessionId);
       }
       if (!sessionId && supportSessionKey !== result.sessionId) {
@@ -6626,6 +6684,7 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         await rebindSessionUxMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionProjectMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionConversationSearchMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionFlowMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionFinalNotificationPreference(visibleProfileId, supportSessionKey, result.sessionId);
       }
       if (supportEnvelope && supportSessionKey !== result.sessionId) {
@@ -6646,6 +6705,12 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
       if (sessionPhoneModeRecord && sessionPhoneModeRecord.enabled !== true) {
         await consumeSessionPhoneModeAfterDispatch(visibleProfileId, result.sessionId);
       }
+      await ingestSessionFlowDocumentFromText(
+        visibleProfileId,
+        result.sessionId,
+        result.finalMessage,
+        flowModeAtRun.enabled ? flowModeAtRun.revision : undefined,
+      );
       await deleteSessionContextSelection(visibleProfileId, supportSessionKey);
       const session = await decorateSessionDetailForClient(
         visibleProfileId,

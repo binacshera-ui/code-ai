@@ -58,6 +58,12 @@ import {
 } from './codexPhoneMode.js';
 import { rebindSessionProjectMode } from './codexProjectMode.js';
 import { rebindSessionConversationSearchMode } from './codexConversationSearchMode.js';
+import {
+  buildSessionFlowModePromptAdditions,
+  getSessionFlowMode,
+  ingestSessionFlowDocumentFromText,
+  rebindSessionFlowMode,
+} from './codexFlowMode.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
 import { getSessionTopicMap, setSessionTopic } from './codexSessionTopics.js';
 import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
@@ -86,6 +92,7 @@ import {
   type CodexQueueStopMode,
   type CodexQueueStopPolicy,
 } from './codexQueueStopPolicy.js';
+import { stripFlowDocumentBlocks } from '../shared/flowMode.js';
 
 export type CodexQueueItemStatus =
   | 'scheduled'
@@ -2067,6 +2074,14 @@ async function processQueueItem(item: CodexQueueItem) {
   const uxModePrompt = item.uxMode
     ? buildSessionUxModePromptAdditions(item.uxMode)
     : null;
+  const flowModeAtRun = await getSessionFlowMode(
+    item.sourceProfileId || item.profileId,
+    resolvedSessionId || item.queueKey,
+  );
+  const flowModePrompt = await buildSessionFlowModePromptAdditions(
+    item.sourceProfileId || item.profileId,
+    resolvedSessionId || item.queueKey,
+  );
   const effectiveRunPrompt = [
     runPrompt,
     restrictionPrompt?.trim() || null,
@@ -2075,6 +2090,7 @@ async function processQueueItem(item: CodexQueueItem) {
     phoneModePrompt?.trim() || null,
     designModePrompt?.trim() || null,
     uxModePrompt?.trim() || null,
+    flowModePrompt?.trim() || null,
   ]
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     .join('\n\n');
@@ -2156,6 +2172,7 @@ async function processQueueItem(item: CodexQueueItem) {
         },
       }
     );
+    const displayFinalMessage = stripFlowDocumentBlocks(result.finalMessage || '');
 
     if (resolvedSessionId && result.sessionId !== resolvedSessionId) {
       await copySessionSidebarMetadataToRecoveredSession(item.profileId, resolvedSessionId, result.sessionId);
@@ -2166,6 +2183,7 @@ async function processQueueItem(item: CodexQueueItem) {
       await rebindSessionUxMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionProjectMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionConversationSearchMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
+      await rebindSessionFlowMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
     }
 
     await rebindSessionFinalNotificationPreference(
@@ -2181,6 +2199,7 @@ async function processQueueItem(item: CodexQueueItem) {
     await rebindSessionUxMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionProjectMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionConversationSearchMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
+    await rebindSessionFlowMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     if (item.browserMode && item.browserMode.enabled !== true) {
       await consumeSessionBrowserModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
     }
@@ -2196,6 +2215,12 @@ async function processQueueItem(item: CodexQueueItem) {
     if (item.uxMode && item.uxMode.enabled !== true) {
       await consumeSessionUxModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
     }
+    await ingestSessionFlowDocumentFromText(
+      item.sourceProfileId || item.profileId,
+      result.sessionId,
+      result.finalMessage,
+      flowModeAtRun.enabled ? flowModeAtRun.revision : undefined,
+    );
 
     if (isRecurringItem(item) && item.stopPolicy?.status === 'stopping') {
       markQueueItemStopped(item);
@@ -2216,7 +2241,7 @@ async function processQueueItem(item: CodexQueueItem) {
     if (isRecurringItem(item)) {
       applyRecurringResult(item, 'completed', {
         sessionId: result.sessionId,
-        finalMessage: result.finalMessage,
+        finalMessage: displayFinalMessage,
       });
       if (item.agentLinkKind === 'planner') {
         await persistPlannerOutputFromDisk(item, result.sessionId);
@@ -2244,7 +2269,7 @@ async function processQueueItem(item: CodexQueueItem) {
       }
       await persistState();
       await enqueueQueueOutcomeNotification(item, 'completed', {
-        finalMessage: result.finalMessage,
+        finalMessage: displayFinalMessage,
         sessionTitle: result.sessionTitle,
       });
       return;
@@ -2252,7 +2277,7 @@ async function processQueueItem(item: CodexQueueItem) {
 
     item.status = 'completed';
     item.sessionId = result.sessionId;
-    item.finalMessage = result.finalMessage;
+    item.finalMessage = displayFinalMessage;
     item.completedAt = nowIso();
     item.updatedAt = item.completedAt;
     item.error = null;
@@ -2290,7 +2315,7 @@ async function processQueueItem(item: CodexQueueItem) {
     }
     await persistState();
     await enqueueQueueOutcomeNotification(item, 'completed', {
-      finalMessage: result.finalMessage,
+      finalMessage: displayFinalMessage,
       sessionTitle: result.sessionTitle,
     });
   } catch (error: any) {

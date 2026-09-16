@@ -141,6 +141,8 @@ import {
   type PhoneModeStatusValue,
   type PhoneModeValue,
 } from './PhoneModeDialog';
+import type { CodexSessionFlowModeValue, FlowModeDetail } from './FlowModeDialog';
+import type { FlowDocument } from '../../../../shared/flowMode';
 import { ConversationShareDialog } from './ConversationShareDialog';
 import {
   ConversationSearchModeDialog,
@@ -156,6 +158,10 @@ import {
 const CodexTerminalDialog = lazy(async () => {
   const module = await import('./CodexTerminalDialog');
   return { default: module.CodexTerminalDialog };
+});
+const FlowModeDialog = lazy(async () => {
+  const module = await import('./FlowModeDialog');
+  return { default: module.FlowModeDialog };
 });
 import {
   installCodexGlobalCrashHandlers,
@@ -1073,6 +1079,7 @@ type CodexSessionProjectMode = CodexSessionProjectModeValue;
 type CodexSessionConversationSearchMode = CodexSessionConversationSearchModeValue;
 type CodexSessionPersonalChromeMode = PersonalChromeModeValue;
 type CodexSessionPhoneMode = PhoneModeValue;
+type CodexSessionFlowMode = CodexSessionFlowModeValue;
 
 interface CodexSessionTasksResponse {
   tasks: CodexSessionTask[];
@@ -1114,6 +1121,10 @@ interface CodexSessionPersonalChromeModeResponse {
 
 interface CodexSessionPhoneModeResponse {
   phoneMode: CodexSessionPhoneMode;
+}
+
+interface CodexSessionFlowModeResponse {
+  flowMode: CodexSessionFlowMode;
 }
 
 interface CodexSessionBrowserViewerTab {
@@ -1478,6 +1489,19 @@ function createEmptySessionPersonalChromeMode(): CodexSessionPersonalChromeMode 
 
 function createEmptySessionPhoneMode(): CodexSessionPhoneMode {
   return { enabled: false, accessPolicy: 'careful', includeCallArchive: true, verboseLogs: true };
+}
+
+function createEmptySessionFlowMode(): CodexSessionFlowMode {
+  return {
+    enabled: false,
+    detail: 'balanced',
+    brief: '',
+    document: null,
+    revision: 0,
+    updatedAt: null,
+    lastGeneratedAt: null,
+    source: null,
+  };
 }
 
 function createDefaultSessionFinalNotificationPreference(): CodexSessionFinalNotificationPreference {
@@ -4695,6 +4719,33 @@ async function saveSessionPhoneMode(profileId: string, sessionKey: string, phone
   return normalizeSessionPhoneModeValue(data.phoneMode);
 }
 
+async function fetchSessionFlowMode(profileId: string, sessionKey: string): Promise<CodexSessionFlowMode> {
+  const data = await fetchJson<CodexSessionFlowModeResponse>(
+    `/api/codex/session-flow-mode?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`,
+    { cache: 'no-store' },
+  );
+  return data.flowMode || createEmptySessionFlowMode();
+}
+
+async function saveSessionFlowMode(
+  profileId: string,
+  sessionKey: string,
+  flowMode: {
+    enabled: boolean;
+    detail: FlowModeDetail;
+    brief: string;
+    document?: FlowDocument | null;
+    expectedRevision: number;
+  },
+): Promise<CodexSessionFlowMode> {
+  const data = await fetchJson<CodexSessionFlowModeResponse>('/api/codex/session-flow-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profileId, sessionKey, flowMode }),
+  });
+  return data.flowMode || createEmptySessionFlowMode();
+}
+
 function unwrapPhoneStatus(value: unknown): Record<string, any> {
   if (!value || typeof value !== 'object') return {};
   const record = value as Record<string, any>;
@@ -6111,6 +6162,15 @@ const MessageMarkdown = memo(function MessageMarkdown({
               const languageMatch = typeof codeProps.className === 'string'
                 ? codeProps.className.match(/language-([A-Za-z0-9_-]+)/)
                 : null;
+
+              if (languageMatch?.[1] === 'bina-flow' || languageMatch?.[1] === 'bina_flow' || languageMatch?.[1] === 'flow-json') {
+                return (
+                  <div className="my-3 flex items-center gap-2 rounded-2xl border border-teal-100 bg-gradient-to-l from-teal-50 to-violet-50 px-4 py-3 text-xs font-medium text-teal-800" dir="rtl">
+                    <GitBranch className="h-4 w-4 shrink-0" />
+                    <span>מפת הזרימה נשמרה בקנבס החזותי של השיחה.</span>
+                  </div>
+                );
+              }
 
               return (
               <CodexCodeBlock
@@ -13038,6 +13098,7 @@ function ModePickerDialog({
   selectedPhoneMode,
   selectedProjectMode,
   selectedConversationSearchMode,
+  selectedFlowMode,
   selectedDesignMode,
   selectedUxMode,
   sharedConversationCount,
@@ -13052,6 +13113,7 @@ function ModePickerDialog({
   onOpenPhoneMode,
   onOpenProjectMode,
   onOpenConversationSearchMode,
+  onOpenFlowMode,
   onOpenDesignMode,
   onOpenUxMode,
   onOpenConversationShare,
@@ -13068,6 +13130,7 @@ function ModePickerDialog({
   selectedPhoneMode: CodexSessionPhoneMode;
   selectedProjectMode: CodexSessionProjectMode;
   selectedConversationSearchMode: CodexSessionConversationSearchMode;
+  selectedFlowMode: CodexSessionFlowMode;
   selectedDesignMode: CodexSessionDesignMode;
   selectedUxMode: CodexSessionUxMode;
   sharedConversationCount: number;
@@ -13082,6 +13145,7 @@ function ModePickerDialog({
   onOpenPhoneMode: () => void;
   onOpenProjectMode: () => void;
   onOpenConversationSearchMode: () => void;
+  onOpenFlowMode: () => void;
   onOpenDesignMode: () => void;
   onOpenUxMode: () => void;
   onOpenConversationShare: () => void;
@@ -13186,6 +13250,36 @@ function ModePickerDialog({
             </div>
             <div className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-full', selectedConversationSearchMode.enabled ? 'bg-blue-100 text-blue-700' : 'bg-white text-blue-500')}>
               <ScanSearch className="h-4 w-4" />
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenFlowMode}
+            className={cn(
+              'flex w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition',
+              selectedFlowMode.enabled
+                ? 'border-teal-200 bg-gradient-to-l from-teal-50 to-violet-50/70'
+                : 'border-slate-100 bg-slate-50/80 hover:border-teal-200 hover:bg-teal-50/50',
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-800">מצב יצירת זרימה</div>
+                {selectedFlowMode.enabled && <span className="rounded-full bg-teal-600 px-2 py-0.5 text-[10px] font-medium text-white">פעיל</span>}
+                <span className="rounded-full bg-white/90 px-2 py-0.5 text-[10px] font-medium text-violet-600">React Flow</span>
+              </div>
+              <div className="mt-1 text-xs leading-6 text-slate-500">הופך קוד ומערכות למפה חיה בעברית פשוטה, עם הסברים, מקורות ועריכה ישירה.</div>
+              <div className="mt-2 text-[11px] leading-5 text-slate-400">
+                {selectedFlowMode.document
+                  ? `${selectedFlowMode.document.nodes.length} מודולים · ${selectedFlowMode.document.edges.length} חיבורים · גרסה ${selectedFlowMode.revision}`
+                  : selectedFlowMode.enabled
+                    ? 'ממתין לזרימה הראשונה מהסוכן.'
+                    : 'מתאים לכל ספק מודל ולכל מערכת שתבקש למפות.'}
+              </div>
+            </div>
+            <div className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-full', selectedFlowMode.enabled ? 'bg-teal-100 text-teal-700' : 'bg-white text-teal-500')}>
+              <GitBranch className="h-4 w-4" />
             </div>
           </button>
 
@@ -15256,6 +15350,7 @@ export function CodexMobileApp() {
   const [isUxModeDialogOpen, setIsUxModeDialogOpen] = useState(false);
   const [isProjectModeDialogOpen, setIsProjectModeDialogOpen] = useState(false);
   const [isConversationSearchModeDialogOpen, setIsConversationSearchModeDialogOpen] = useState(false);
+  const [isFlowModeDialogOpen, setIsFlowModeDialogOpen] = useState(false);
   const [isPersonalChromeModeDialogOpen, setIsPersonalChromeModeDialogOpen] = useState(false);
   const [isPhoneModeDialogOpen, setIsPhoneModeDialogOpen] = useState(false);
   const [isAgentSessionDialogOpen, setIsAgentSessionDialogOpen] = useState(false);
@@ -15329,6 +15424,7 @@ export function CodexMobileApp() {
     createEmptySessionPersonalChromeMode()
   );
   const [sessionPhoneMode, setSessionPhoneMode] = useState<CodexSessionPhoneMode>(createEmptySessionPhoneMode());
+  const [sessionFlowMode, setSessionFlowMode] = useState<CodexSessionFlowMode>(createEmptySessionFlowMode());
   const [instructionDraft, setInstructionDraft] = useState('');
   const [projectAnchors, setProjectAnchors] = useState<CodexProjectAnchor[]>([]);
   const [availableUnifiedSkills, setAvailableUnifiedSkills] = useState<UnifiedSkillSummary[]>([]);
@@ -15349,6 +15445,7 @@ export function CodexMobileApp() {
   const [isSessionConversationSearchModeLoading, setIsSessionConversationSearchModeLoading] = useState(false);
   const [isSessionPersonalChromeModeLoading, setIsSessionPersonalChromeModeLoading] = useState(false);
   const [isSessionPhoneModeLoading, setIsSessionPhoneModeLoading] = useState(false);
+  const [isSessionFlowModeLoading, setIsSessionFlowModeLoading] = useState(false);
   const [isSessionContextSelectionSaving, setIsSessionContextSelectionSaving] = useState(false);
   const [isSessionBrowserModeSaving, setIsSessionBrowserModeSaving] = useState(false);
   const [isSessionDesignModeSaving, setIsSessionDesignModeSaving] = useState(false);
@@ -15357,6 +15454,7 @@ export function CodexMobileApp() {
   const [isSessionConversationSearchModeSaving, setIsSessionConversationSearchModeSaving] = useState(false);
   const [isSessionPersonalChromeModeSaving, setIsSessionPersonalChromeModeSaving] = useState(false);
   const [isSessionPhoneModeSaving, setIsSessionPhoneModeSaving] = useState(false);
+  const [isSessionFlowModeSaving, setIsSessionFlowModeSaving] = useState(false);
   const [isBrowserViewerLoading, setIsBrowserViewerLoading] = useState(false);
   const [isProjectAnchorsLoading, setIsProjectAnchorsLoading] = useState(false);
   const [isUnifiedSkillsLoading, setIsUnifiedSkillsLoading] = useState(false);
@@ -15547,6 +15645,7 @@ export function CodexMobileApp() {
   const latestAgentSessionsLoadTokenRef = useRef(0);
   const latestSessionTasksLoadTokenRef = useRef(0);
   const latestSessionSubtasksLoadTokenRef = useRef(0);
+  const latestSessionFlowModeLoadTokenRef = useRef(0);
   const latestModelCatalogLoadTokenRef = useRef(0);
   const latestRateLimitLoadTokenRef = useRef(0);
   const currentSessionActiveCountRef = useRef(0);
@@ -16108,6 +16207,9 @@ export function CodexMobileApp() {
     const previousCount = currentSessionActiveCountRef.current;
     if (previousCount > 0 && currentSessionActiveQueueCount === 0) {
       setGameSessionCompletionSignal((current) => current + 1);
+      if (profileId && currentQueueKey) {
+        void loadCurrentSessionFlowMode(profileId, currentQueueKey);
+      }
     }
     currentSessionActiveCountRef.current = currentSessionActiveQueueCount;
   }, [currentQueueKey, currentSessionActiveQueueCount]);
@@ -18270,6 +18372,8 @@ export function CodexMobileApp() {
     setPhoneModeDraft(emptyPhoneMode);
     setPhoneModeStatus(null);
     setIsPhoneModeDialogOpen(false);
+    setSessionFlowMode(createEmptySessionFlowMode());
+    setIsFlowModeDialogOpen(false);
     setSessionFinalNotification(createDefaultSessionFinalNotificationPreference());
     setIsFinalNotificationDialogOpen(false);
     clearDraftAttachments();
@@ -18325,6 +18429,7 @@ export function CodexMobileApp() {
     latestSessionUxModeLoadTokenRef.current += 1;
     latestSessionProjectModeLoadTokenRef.current += 1;
     latestSessionConversationSearchModeLoadTokenRef.current += 1;
+    latestSessionFlowModeLoadTokenRef.current += 1;
     latestSessionPersonalChromeModeLoadTokenRef.current += 1;
     latestProjectAnchorsLoadTokenRef.current += 1;
     latestSessionRemindersLoadTokenRef.current += 1;
@@ -18406,6 +18511,8 @@ export function CodexMobileApp() {
     setPhoneModeDraft(emptyPhoneMode);
     setPhoneModeStatus(null);
     setIsPhoneModeDialogOpen(false);
+    setSessionFlowMode(createEmptySessionFlowMode());
+    setIsFlowModeDialogOpen(false);
     setActiveToolEntry(null);
     closeFilePreview();
     clearDraftAttachments();
@@ -20570,6 +20677,64 @@ export function CodexMobileApp() {
     }
   }
 
+  async function loadCurrentSessionFlowMode(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
+    if (!nextProfileId || !nextSessionKey) {
+      setSessionFlowMode(createEmptySessionFlowMode());
+      return;
+    }
+    const requestToken = ++latestSessionFlowModeLoadTokenRef.current;
+    setIsSessionFlowModeLoading(true);
+    try {
+      const mode = await fetchSessionFlowMode(nextProfileId, nextSessionKey);
+      if (requestToken !== latestSessionFlowModeLoadTokenRef.current) return;
+      setSessionFlowMode(mode);
+    } catch (flowModeError: any) {
+      if (requestToken === latestSessionFlowModeLoadTokenRef.current) {
+        setSessionFlowMode(createEmptySessionFlowMode());
+        setError(flowModeError.message || 'לא ניתן היה לטעון את מצב יצירת הזרימה.');
+      }
+    } finally {
+      if (requestToken === latestSessionFlowModeLoadTokenRef.current) setIsSessionFlowModeLoading(false);
+    }
+  }
+
+  async function persistSessionFlowMode(nextMode: {
+    enabled: boolean;
+    detail: FlowModeDetail;
+    brief: string;
+    document?: FlowDocument | null;
+    expectedRevision: number;
+  }): Promise<CodexSessionFlowMode> {
+    if (!profileId || !currentQueueKey) {
+      throw new Error('לא נמצא סשן פעיל לשמירת הזרימה.');
+    }
+    setIsSessionFlowModeSaving(true);
+    setError(null);
+    try {
+      const savedMode = await saveSessionFlowMode(profileId, currentQueueKey, nextMode);
+      setSessionFlowMode(savedMode);
+      return savedMode;
+    } catch (flowModeError: any) {
+      setError(flowModeError.message || 'לא ניתן היה לשמור את הזרימה.');
+      void loadCurrentSessionFlowMode(profileId, currentQueueKey);
+      throw flowModeError;
+    } finally {
+      setIsSessionFlowModeSaving(false);
+    }
+  }
+
+  function openFlowModeDialog() {
+    setIsModePickerDialogOpen(false);
+    setIsFlowModeDialogOpen(true);
+    if (profileId && currentQueueKey) void loadCurrentSessionFlowMode(profileId, currentQueueKey);
+  }
+
+  function moveFlowRequestToComposer(nextPrompt: string) {
+    setPrompt(nextPrompt);
+    setIsFlowModeDialogOpen(false);
+    window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
+  }
+
   async function loadCurrentSessionPersonalChromeMode(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
     if (!nextProfileId || !nextSessionKey) {
       const emptyMode = createEmptySessionPersonalChromeMode();
@@ -22338,6 +22503,7 @@ export function CodexMobileApp() {
     void loadCurrentSessionConversationSearchMode(profileId, currentQueueKey);
     void loadCurrentSessionPersonalChromeMode(profileId, currentQueueKey);
     void loadCurrentSessionPhoneMode(profileId, currentQueueKey);
+    void loadCurrentSessionFlowMode(profileId, currentQueueKey);
     void loadCurrentSessionReminders(profileId, currentQueueKey);
   }, [currentQueueKey, profileId]);
 
@@ -23181,6 +23347,26 @@ export function CodexMobileApp() {
             </div>
           )}
 
+          {sessionFlowMode.document && currentSessionActiveQueueCount === 0 && (
+            <div className="rounded-[1.35rem] border border-teal-200 bg-gradient-to-l from-teal-50 via-white to-violet-50 px-4 py-4 text-right shadow-[0_18px_40px_-34px_rgba(13,148,136,0.55)]" dir="rtl">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white text-teal-700 shadow-sm">
+                    <GitBranch className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-black text-slate-800">הזרימה מוכנה לצפייה ולעבודה</div>
+                    <div className="mt-1 text-[11px] text-slate-500">{sessionFlowMode.document.nodes.length} מודולים · {sessionFlowMode.document.edges.length} חיבורים · אפשר לערוך ולהחזיר לסוכן</div>
+                  </div>
+                </div>
+                <button type="button" onClick={openFlowModeDialog} className="flex h-11 shrink-0 items-center gap-2 rounded-full bg-teal-700 px-4 text-xs font-bold text-white transition hover:bg-teal-800 active:scale-[0.98]">
+                  <Eye className="h-4 w-4" />
+                  צפה בזרימה
+                </button>
+              </div>
+            </div>
+          )}
+
           {isCurrentConversationRunning && !isSending && (
             <div className="flex w-full justify-end px-1 py-1">
               <div dir="rtl" className="flex items-center">
@@ -23324,7 +23510,7 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionProjectMode.enabled || sessionConversationSearchMode.enabled || sessionDesignMode.enabled || sessionUxMode.enabled || sessionPersonalChromeMode.enabled || sessionPhoneMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionProjectModeLoading || isSessionConversationSearchModeLoading || isSessionDesignModeLoading || isSessionUxModeLoading || isSessionPersonalChromeModeLoading || isSessionPhoneModeLoading) && (
+            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionProjectMode.enabled || sessionConversationSearchMode.enabled || sessionFlowMode.enabled || sessionDesignMode.enabled || sessionUxMode.enabled || sessionPersonalChromeMode.enabled || sessionPhoneMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionProjectModeLoading || isSessionConversationSearchModeLoading || isSessionFlowModeLoading || isSessionDesignModeLoading || isSessionUxModeLoading || isSessionPersonalChromeModeLoading || isSessionPhoneModeLoading) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
                 {isProfessionalModeSelected && (
                   <button
@@ -23404,6 +23590,16 @@ export function CodexMobileApp() {
                     <span className="truncate">
                       חיפוש בשיחות · {sessionConversationSearchMode.scope === 'current' ? 'השיחה הזאת' : sessionConversationSearchMode.scope === 'project' ? 'הפרויקט' : 'הכול'}
                     </span>
+                  </button>
+                )}
+                {sessionFlowMode.enabled && (
+                  <button
+                    type="button"
+                    onClick={openFlowModeDialog}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full border border-teal-200 bg-gradient-to-l from-teal-50 to-violet-50 px-3 py-1.5 text-[11px] font-medium text-teal-700 transition hover:border-teal-300"
+                  >
+                    <GitBranch className="h-3.5 w-3.5" />
+                    <span className="truncate">זרימה · {sessionFlowMode.document ? `${sessionFlowMode.document.nodes.length} מודולים` : 'ממתין למפה'}</span>
                   </button>
                 )}
                 {sessionDesignMode.enabled && (
@@ -23505,6 +23701,12 @@ export function CodexMobileApp() {
                   <span className="inline-flex items-center gap-1 rounded-full border border-blue-100 bg-white px-3 py-1.5 text-[11px] font-medium text-blue-500">
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     <span>טוען חיפוש בשיחות...</span>
+                  </span>
+                )}
+                {isSessionFlowModeLoading && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-teal-100 bg-white px-3 py-1.5 text-[11px] font-medium text-teal-600">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>טוען זרימה...</span>
                   </span>
                 )}
               </div>
@@ -24875,6 +25077,7 @@ export function CodexMobileApp() {
         selectedPhoneMode={sessionPhoneMode}
         selectedProjectMode={sessionProjectMode}
         selectedConversationSearchMode={sessionConversationSearchMode}
+        selectedFlowMode={sessionFlowMode}
         selectedDesignMode={sessionDesignMode}
         selectedUxMode={sessionUxMode}
         sharedConversationCount={sharedConversationAttachmentCount}
@@ -24889,6 +25092,7 @@ export function CodexMobileApp() {
         onOpenPhoneMode={openPhoneModeDialog}
         onOpenProjectMode={openProjectModeDialog}
         onOpenConversationSearchMode={openConversationSearchModeDialog}
+        onOpenFlowMode={openFlowModeDialog}
         onOpenDesignMode={openDesignModeDialog}
         onOpenUxMode={openUxModeDialog}
         onOpenConversationShare={openConversationShareDialog}
@@ -24944,6 +25148,26 @@ export function CodexMobileApp() {
         onSave={saveConversationSearchModeDraft}
         onDisable={disableConversationSearchMode}
       />
+
+      {isFlowModeDialogOpen && (
+        <Suspense fallback={(
+          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-50/95 backdrop-blur" dir="rtl">
+            <div className="flex items-center gap-2 rounded-full border border-teal-100 bg-white px-4 py-2 text-xs font-semibold text-teal-700 shadow-lg">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              טוען את קנבס הזרימה…
+            </div>
+          </div>
+        )}>
+          <FlowModeDialog
+            isOpen
+            value={sessionFlowMode}
+            isSaving={isSessionFlowModeSaving || isSessionFlowModeLoading}
+            onClose={() => setIsFlowModeDialogOpen(false)}
+            onSave={persistSessionFlowMode}
+            onSendToComposer={moveFlowRequestToComposer}
+          />
+        </Suspense>
+      )}
 
       <DesignModeDialog
         isOpen={isDesignModeDialogOpen}

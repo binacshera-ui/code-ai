@@ -9,6 +9,7 @@ import {
 } from './codexConversationSearchMode.js';
 import { getSessionRemindersByIds } from './codexSessionReminders.js';
 import { getUnifiedSkillsByIds } from './skillCatalogService.js';
+import { buildSessionFlowModePromptAdditions, getSessionFlowModeRecord } from './codexFlowMode.js';
 
 const CONTEXT_PACK_ROOT = path.join(CODEX_APP_CONFIG.storageRoot, 'context-packs');
 
@@ -81,9 +82,10 @@ export async function buildSessionPromptAdditionsContext(options: {
   sessionKey: string;
   cwd: string | null;
 }): Promise<string | null> {
-  const [selection, conversationSearchMode] = await Promise.all([
+  const [selection, conversationSearchMode, flowMode] = await Promise.all([
     getSessionContextSelection(options.profileId, options.sessionKey),
     getSessionConversationSearchModeRecord(options.profileId, options.sessionKey),
+    getSessionFlowModeRecord(options.profileId, options.sessionKey),
   ]);
   if (
     selection.anchorIds.length === 0
@@ -91,6 +93,7 @@ export async function buildSessionPromptAdditionsContext(options: {
     && selection.reminderIds.length === 0
     && !selection.actionRestriction
     && !conversationSearchMode?.enabled
+    && !flowMode?.enabled
   ) {
     return null;
   }
@@ -109,6 +112,7 @@ export async function buildSessionPromptAdditionsContext(options: {
     && selectedReminders.length === 0
     && !selection.actionRestriction
     && !conversationSearchMode?.enabled
+    && !flowMode?.enabled
   ) {
     return null;
   }
@@ -136,6 +140,13 @@ export async function buildSessionPromptAdditionsContext(options: {
 
   if (conversationSearchBlock) {
     packSections.push('## מצב חיפוש בשיחות', conversationSearchBlock);
+  }
+
+  const flowModeBlock = flowMode?.enabled
+    ? await buildSessionFlowModePromptAdditions(options.profileId, options.sessionKey)
+    : null;
+  if (flowModeBlock) {
+    packSections.push('## מצב יצירת זרימה', flowModeBlock);
   }
 
   if (selectedAnchors.length > 0) {
@@ -176,6 +187,9 @@ export async function buildSessionPromptAdditionsContext(options: {
   const conversationSearchPreview = conversationSearchMode?.enabled
     ? `מצב חיפוש בשיחות פעיל בטווח: ${conversationSearchMode.scope === 'current' ? 'השיחה הזאת' : conversationSearchMode.scope === 'project' ? 'כל שיחות הפרויקט' : 'כל השיחות'}.`
     : null;
+  const flowModePreview = flowMode?.enabled
+    ? `מצב יצירת זרימה פעיל${flowMode.document ? ` עם ${flowMode.document.nodes.length} מודולים בגרסה ${flowMode.revision}` : ' וממתין לזרימה הראשונה'}.`
+    : null;
 
   return [
     anchorsPreview,
@@ -183,6 +197,7 @@ export async function buildSessionPromptAdditionsContext(options: {
     remindersPreview,
     restrictionPreview,
     conversationSearchPreview,
+    flowModePreview,
     'הפריטים הבאים מצורפים להודעה הנוכחית כהקשר להבנה ולביצוע:',
     packContent.trim().replace(/^# Code-AI context pack\s*/m, '').replace(/^הקובץ הזה נוצר על ידי Code-AI כדי לטעון לשיחה עוגנים, סקילים ותזכורות שנבחרו ידנית למהלך השיחה\.\s*/m, '').trim(),
     `קובץ מעקב מקומי: ${packPath}`,
