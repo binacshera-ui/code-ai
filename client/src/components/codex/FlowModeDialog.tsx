@@ -1,6 +1,5 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import {
-  addEdge,
   applyEdgeChanges,
   applyNodeChanges,
   Background,
@@ -17,6 +16,7 @@ import {
   type Node,
   type NodeChange,
   type NodeProps,
+  type ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
@@ -28,6 +28,7 @@ import {
   ExternalLink,
   FileCode2,
   GitBranch,
+  LocateFixed,
   Layers3,
   Loader2,
   Map as MapIcon,
@@ -53,10 +54,18 @@ import {
   type FlowEvidenceKind,
   type FlowModuleNode,
   type FlowNodeKind,
+  type FlowNodeRole,
   type FlowNodeStatus,
   type FlowOwnershipKind,
   type FlowVisualGroup,
 } from '../../../../shared/flowMode';
+import {
+  FLOW_LAYOUT_VERSION,
+  describeFlowLayout,
+  layoutFlowDocument,
+  traceFlowPath,
+  type FlowNodeTopology,
+} from './flowLayout';
 
 export type FlowModeDetail = 'simple' | 'balanced' | 'deep';
 
@@ -75,6 +84,9 @@ type ModuleNodeData = {
   module: FlowModuleNode;
   group: FlowVisualGroup | null;
   dimmed: boolean;
+  pathDimmed: boolean;
+  topology: FlowNodeTopology;
+  direction: FlowDocument['direction'];
 };
 type ModuleCanvasNode = Node<ModuleNodeData, 'flowModule'>;
 type ModuleCanvasEdge = Edge<{ connection: FlowConnectionEdge }>;
@@ -110,6 +122,15 @@ const STATUS_LABELS: Record<FlowNodeStatus, string> = {
   unknown: 'לא ידוע',
 };
 
+const FLOW_ROLE_LABELS: Record<FlowNodeRole, string> = {
+  auto: 'אוטומטי לפי הקשרים',
+  entry: 'התחלה',
+  step: 'שלב בתהליך',
+  decision: 'החלטה / הסתעפות',
+  exit: 'סיום',
+  support: 'רכיב תומך',
+};
+
 const EDGE_KIND_LABELS: Record<FlowEdgeKind, string> = {
   data: 'מידע',
   request: 'בקשה',
@@ -136,95 +157,111 @@ const GROUP_COLORS: Record<FlowVisualGroup['color'], string> = {
   slate: '#f1f5f9',
 };
 
+const DISPLAY_ROLE_META: Record<FlowNodeTopology['displayRole'], { label: string; className: string }> = {
+  start: { label: 'התחלה', className: 'border-emerald-200 bg-emerald-50 text-emerald-800' },
+  step: { label: 'שלב', className: 'border-cyan-200 bg-cyan-50 text-cyan-800' },
+  decision: { label: 'הסתעפות', className: 'border-violet-200 bg-violet-50 text-violet-800' },
+  end: { label: 'סיום', className: 'border-rose-200 bg-rose-50 text-rose-800' },
+  destination: { label: 'יעד', className: 'border-amber-200 bg-amber-50 text-amber-800' },
+  support: { label: 'תומך', className: 'border-slate-200 bg-slate-100 text-slate-700' },
+  isolated: { label: 'ללא חיבור', className: 'border-slate-200 bg-white text-slate-500' },
+};
+
+const EDGE_VISUAL_META: Record<FlowEdgeKind, { color: string; dash?: string }> = {
+  request: { color: '#0891b2' },
+  data: { color: '#0f9f8f' },
+  event: { color: '#7c3aed', dash: '8 5' },
+  control: { color: '#d97706' },
+  dependency: { color: '#64748b', dash: '4 6' },
+  deploy: { color: '#db2777', dash: '10 5' },
+  other: { color: '#94a3b8' },
+};
+
 function randomId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-function autoLayout(document: FlowDocument): FlowDocument {
-  const indegree = new Map(document.nodes.map((node) => [node.id, 0]));
-  const outgoing = new Map(document.nodes.map((node) => [node.id, [] as string[]]));
-  for (const edge of document.edges) {
-    if (!indegree.has(edge.source) || !indegree.has(edge.target)) continue;
-    indegree.set(edge.target, (indegree.get(edge.target) || 0) + 1);
-    outgoing.get(edge.source)?.push(edge.target);
-  }
+const EMPTY_TOPOLOGY: FlowNodeTopology = {
+  stage: 1,
+  stageCount: 1,
+  incoming: 0,
+  outgoing: 0,
+  displayRole: 'isolated',
+  isBranch: false,
+  isMerge: false,
+};
 
-  const level = new Map<string, number>();
-  const queue = document.nodes.filter((node) => (indegree.get(node.id) || 0) === 0).map((node) => node.id);
-  if (queue.length === 0 && document.nodes[0]) queue.push(document.nodes[0].id);
-  for (const id of queue) level.set(id, 0);
-  let cursor = 0;
-  while (cursor < queue.length) {
-    const current = queue[cursor++];
-    const currentLevel = level.get(current) || 0;
-    for (const target of outgoing.get(current) || []) {
-      level.set(target, Math.max(level.get(target) || 0, currentLevel + 1));
-      indegree.set(target, Math.max(0, (indegree.get(target) || 0) - 1));
-      if (indegree.get(target) === 0) queue.push(target);
-    }
-  }
-  for (const node of document.nodes) {
-    if (!level.has(node.id)) level.set(node.id, Math.max(0, ...level.values()) + 1);
-  }
-
-  const rowsByLevel = new Map<number, FlowModuleNode[]>();
-  for (const node of document.nodes) {
-    const nodeLevel = level.get(node.id) || 0;
-    rowsByLevel.set(nodeLevel, [...(rowsByLevel.get(nodeLevel) || []), node]);
-  }
-  const rtlMultiplier = document.direction === 'rtl' ? -1 : 1;
-  const nextNodes = document.nodes.map((node) => {
-    const nodeLevel = level.get(node.id) || 0;
-    const row = rowsByLevel.get(nodeLevel) || [];
-    const rowIndex = row.findIndex((candidate) => candidate.id === node.id);
-    const totalHeight = Math.max(0, row.length - 1) * 190;
-    return {
-      ...node,
-      position: {
-        x: nodeLevel * 360 * rtlMultiplier,
-        y: rowIndex * 190 - totalHeight / 2,
-      },
-    };
-  });
-  return { ...document, nodes: nextNodes, updatedAt: new Date().toISOString() };
+function nodeMatchesQuery(module: FlowModuleNode, query: string) {
+  const normalizedQuery = query.trim().toLocaleLowerCase('he');
+  if (!normalizedQuery) return true;
+  return [
+    module.title,
+    module.summary,
+    module.description,
+    module.technology,
+    module.runtime,
+    module.repositoryPath,
+    ...module.tags,
+  ].join(' ').toLocaleLowerCase('he').includes(normalizedQuery);
 }
 
-function toCanvasNodes(document: FlowDocument, query: string): ModuleCanvasNode[] {
-  const normalizedQuery = query.trim().toLocaleLowerCase('he');
+function toCanvasNodes(
+  document: FlowDocument,
+  query: string,
+  topology: Record<string, FlowNodeTopology>,
+  focusedNodeIds: Set<string> | null = null,
+): ModuleCanvasNode[] {
   const groups = new Map(document.groups.map((group) => [group.id, group]));
-  const positioned = document.nodes.every((node) => node.position) ? document : autoLayout(document);
-  return positioned.nodes.map((module) => ({
+  return document.nodes.map((module) => ({
     id: module.id,
     type: 'flowModule',
     position: module.position || { x: 0, y: 0 },
     data: {
       module,
       group: module.groupId ? groups.get(module.groupId) || null : null,
-      dimmed: Boolean(normalizedQuery && ![
-        module.title,
-        module.summary,
-        module.description,
-        module.technology,
-        module.runtime,
-        module.repositoryPath,
-        ...module.tags,
-      ].join(' ').toLocaleLowerCase('he').includes(normalizedQuery)),
+      dimmed: !nodeMatchesQuery(module, query),
+      pathDimmed: Boolean(focusedNodeIds && !focusedNodeIds.has(module.id)),
+      topology: topology[module.id] || EMPTY_TOPOLOGY,
+      direction: document.direction,
     },
   }));
 }
 
-function toCanvasEdges(document: FlowDocument): ModuleCanvasEdge[] {
+function toCanvasEdges(
+  document: FlowDocument,
+  focusedNodeIds: Set<string> | null = null,
+  showAllLabels = true,
+  selectedEdgeId: string | null = null,
+): ModuleCanvasEdge[] {
   return document.edges.map((connection) => ({
+    ...(focusedNodeIds && focusedNodeIds.has(connection.source) && focusedNodeIds.has(connection.target)
+      ? { zIndex: 4 }
+      : { zIndex: 0 }),
     id: connection.id,
     source: connection.source,
     target: connection.target,
-    label: connection.label || undefined,
+    label: showAllLabels
+      || (focusedNodeIds && focusedNodeIds.has(connection.source) && focusedNodeIds.has(connection.target))
+      || selectedEdgeId === connection.id
+      ? connection.label || undefined
+      : undefined,
     data: { connection },
     type: 'smoothstep',
-    markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: '#94a3b8' },
-    style: { stroke: '#94a3b8', strokeWidth: 1.6 },
+    interactionWidth: 24,
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      width: 20,
+      height: 20,
+      color: EDGE_VISUAL_META[connection.kind].color,
+    },
+    style: {
+      stroke: EDGE_VISUAL_META[connection.kind].color,
+      strokeWidth: focusedNodeIds && focusedNodeIds.has(connection.source) && focusedNodeIds.has(connection.target) ? 2.8 : 1.8,
+      strokeDasharray: EDGE_VISUAL_META[connection.kind].dash,
+      opacity: focusedNodeIds && (!focusedNodeIds.has(connection.source) || !focusedNodeIds.has(connection.target)) ? 0.12 : 0.9,
+    },
     labelStyle: { fill: '#475569', fontSize: 11, fontWeight: 600 },
-    labelBgStyle: { fill: '#ffffff', fillOpacity: 0.92 },
+    labelBgStyle: { fill: '#ffffff', fillOpacity: 0.96, stroke: '#e2e8f0', strokeWidth: 1 },
     labelBgPadding: [6, 4],
     labelBgBorderRadius: 8,
   }));
@@ -232,6 +269,9 @@ function toCanvasEdges(document: FlowDocument): ModuleCanvasEdge[] {
 
 const FlowModuleCard = memo(function FlowModuleCard({ data, selected }: NodeProps<ModuleCanvasNode>) {
   const meta = OWNERSHIP_META[data.module.ownership];
+  const roleMeta = DISPLAY_ROLE_META[data.topology.displayRole];
+  const targetPosition = data.direction === 'rtl' ? Position.Right : Position.Left;
+  const sourcePosition = data.direction === 'rtl' ? Position.Left : Position.Right;
   const statusTone = data.module.status === 'risk'
     ? 'bg-rose-100 text-rose-700'
     : data.module.status === 'planned'
@@ -241,19 +281,24 @@ const FlowModuleCard = memo(function FlowModuleCard({ data, selected }: NodeProp
     <div
       dir="rtl"
       className={cn(
-        'w-[17.5rem] rounded-[1.45rem] border bg-white/95 p-3.5 text-right shadow-[0_18px_45px_-32px_rgba(15,23,42,0.42)] transition duration-200',
-        selected ? 'border-cyan-400 ring-4 ring-cyan-100/80' : 'border-slate-200/90',
-        data.dimmed && 'opacity-25 grayscale',
+        'h-[13rem] w-[17.5rem] overflow-hidden rounded-[1.45rem] border bg-white/95 p-3.5 text-right shadow-[0_18px_45px_-32px_rgba(15,23,42,0.42)] transition duration-200',
+        selected ? 'border-cyan-500 ring-4 ring-cyan-100/80' : data.topology.displayRole === 'start' ? 'border-emerald-300' : data.topology.displayRole === 'end' ? 'border-rose-300' : 'border-slate-200/90',
+        (data.dimmed || data.pathDimmed) && 'opacity-20 grayscale',
       )}
       style={{ boxShadow: data.group ? `0 18px 45px -32px ${GROUP_COLORS[data.group.color]}` : undefined }}
     >
-      <Handle type="target" position={Position.Right} className="!h-3 !w-3 !border-2 !border-white !bg-slate-400" />
-      <Handle type="source" position={Position.Left} className="!h-3 !w-3 !border-2 !border-white !bg-cyan-500" />
+      <Handle type="target" position={targetPosition} className="!h-3.5 !w-3.5 !border-[3px] !border-white !bg-slate-500" />
+      <Handle type="source" position={sourcePosition} className="!h-3.5 !w-3.5 !border-[3px] !border-white !bg-cyan-600" />
+      <div className="mb-2 flex items-center justify-between gap-2 border-b border-slate-100 pb-2">
+        <span className={cn('rounded-full border px-2.5 py-1 text-[9px] font-black', roleMeta.className)}>{roleMeta.label}</span>
+        <span className="text-[9px] font-semibold text-slate-400">שלב {data.topology.stage} מתוך {data.topology.stageCount}</span>
+      </div>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className={cn('rounded-full border px-2 py-0.5 text-[9px] font-semibold', meta.className)}>{meta.label}</span>
             <span className={cn('rounded-full px-2 py-0.5 text-[9px] font-semibold', statusTone)}>{STATUS_LABELS[data.module.status]}</span>
+            {data.group && <span className="max-w-[7rem] truncate rounded-full border border-slate-100 bg-slate-50 px-2 py-0.5 text-[9px] font-semibold text-slate-500">{data.group.title}</span>}
           </div>
           <div className="mt-2 text-[15px] font-black leading-6 text-slate-800">{data.module.title}</div>
         </div>
@@ -263,7 +308,7 @@ const FlowModuleCard = memo(function FlowModuleCard({ data, selected }: NodeProp
       </div>
       <div className="mt-2 line-clamp-3 text-[11px] leading-5 text-slate-500">{data.module.summary || data.module.description || 'לחץ כדי להוסיף הסבר למודול.'}</div>
       <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-100 pt-2 text-[9px] text-slate-400">
-        <span>{NODE_KIND_LABELS[data.module.kind]}</span>
+        <span>{NODE_KIND_LABELS[data.module.kind]}{data.topology.isBranch ? ' · מתפצל' : data.topology.isMerge ? ' · מתכנס' : ''}</span>
         <span className="max-w-[9rem] truncate" dir="ltr">{data.module.technology || data.module.runtime || data.module.repositoryPath || '—'}</span>
       </div>
     </div>
@@ -336,14 +381,21 @@ export function FlowModeDialog({
   const [notice, setNotice] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [isCanvasOnly, setIsCanvasOnly] = useState(false);
+  const [showAllEdgeLabels, setShowAllEdgeLabels] = useState(true);
+  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<ModuleCanvasNode, ModuleCanvasEdge> | null>(null);
+
+  const layoutInfo = useMemo(() => describeFlowLayout(document), [document]);
+  const focusedNodeIds = useMemo(() => traceFlowPath(document, selectedNodeId), [document, selectedNodeId]);
 
   useEffect(() => {
     if (!isOpen) return;
     const nextDocument = value.document || createEmptyFlowDocument();
-    const laidOut = nextDocument.nodes.some((node) => !node.position) ? autoLayout(nextDocument) : nextDocument;
-    setDocument(laidOut);
-    setNodes(toCanvasNodes(laidOut, ''));
-    setEdges(toCanvasEdges(laidOut));
+    const needsLayout = (nextDocument.layoutVersion || 0) < FLOW_LAYOUT_VERSION
+      || nextDocument.nodes.some((node) => !node.position);
+    const prepared = needsLayout ? layoutFlowDocument(nextDocument) : describeFlowLayout(nextDocument);
+    setDocument(prepared.document);
+    setNodes(toCanvasNodes(prepared.document, '', prepared.topology));
+    setEdges(toCanvasEdges(prepared.document, null, prepared.document.edges.length <= 36));
     setDetail(value.detail);
     setBrief(value.brief);
     setSelectedNodeId(null);
@@ -353,20 +405,52 @@ export function FlowModeDialog({
     setNotice(null);
     setShowSettings(!value.enabled && !value.document);
     setIsCanvasOnly(false);
+    setShowAllEdgeLabels(prepared.document.edges.length <= 36);
   }, [isOpen, value.revision]);
 
   useEffect(() => {
+    const presentedNodes = new Map(toCanvasNodes(document, query, layoutInfo.topology, focusedNodeIds).map((node) => [node.id, node]));
     setNodes((current) => current.map((node) => ({
       ...node,
-      data: toCanvasNodes({ ...document, nodes: [node.data.module] }, query)[0]?.data || node.data,
+      data: presentedNodes.get(node.id)?.data || node.data,
     })));
-  }, [query]);
+    setEdges(toCanvasEdges(document, focusedNodeIds, showAllEdgeLabels, selectedEdgeId));
+  }, [document, focusedNodeIds, layoutInfo.topology, query, selectedEdgeId, showAllEdgeLabels]);
+
+  useEffect(() => {
+    if (!isOpen || !flowInstance || nodes.length === 0) return;
+    const timer = window.setTimeout(() => {
+      const liveNodes = flowInstance.getNodes();
+      const explicitEntries = document.nodes.filter((node) => node.flowRole === 'entry').map((node) => node.id);
+      const initialIds = document.nodes.length > 24
+        ? (explicitEntries.length > 0 ? explicitEntries : layoutInfo.startNodeIds).slice(0, 1)
+        : document.nodes.map((node) => node.id);
+      const initialNodes = liveNodes.filter((node) => initialIds.includes(node.id));
+      if (document.nodes.length > 24 && initialNodes[0]) {
+        const initialNode = initialNodes[0];
+        void flowInstance.setCenter(
+          initialNode.position.x + 140,
+          initialNode.position.y + 104,
+          { zoom: 0.82, duration: 450 },
+        );
+      } else {
+        void flowInstance.fitView({
+          nodes: initialNodes.length > 0 ? initialNodes : liveNodes,
+          padding: 0.18,
+          maxZoom: 1,
+          duration: 450,
+        });
+      }
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [document.nodes.length, flowInstance, isOpen, nodes.length, value.revision]);
 
   const selectedNode = useMemo(() => document.nodes.find((node) => node.id === selectedNodeId) || null, [document.nodes, selectedNodeId]);
   const selectedEdge = useMemo(() => document.edges.find((edge) => edge.id === selectedEdgeId) || null, [document.edges, selectedEdgeId]);
 
   const syncDocumentFromCanvas = (base = document): FlowDocument => ({
     ...base,
+    layoutVersion: FLOW_LAYOUT_VERSION,
     nodes: base.nodes.map((module) => {
       const canvasNode = nodes.find((node) => node.id === module.id);
       return canvasNode ? { ...module, position: canvasNode.position } : module;
@@ -453,6 +537,7 @@ export function FlowModeDialog({
       kind: 'service',
       ownership: 'unknown',
       status: 'planned',
+      flowRole: 'auto',
       groupId: null,
       technology: '',
       runtime: '',
@@ -460,10 +545,12 @@ export function FlowModeDialog({
       externalUrl: '',
       tags: [],
       evidence: [],
-      position: { x: 0, y: document.nodes.length * 80 },
+      position: null,
     };
-    setDocument((current) => ({ ...current, nodes: [...current.nodes, module] }));
-    setNodes((current) => [...current, { id, type: 'flowModule', position: module.position!, data: { module, group: null, dimmed: false } }]);
+    const prepared = layoutFlowDocument({ ...document, layoutVersion: 0, nodes: [...document.nodes, module] });
+    setDocument(prepared.document);
+    setNodes(toCanvasNodes(prepared.document, query, prepared.topology));
+    setEdges(toCanvasEdges(prepared.document, null, showAllEdgeLabels));
     setSelectedNodeId(id);
     setSelectedEdgeId(null);
     setDirty(true);
@@ -471,30 +558,42 @@ export function FlowModeDialog({
 
   const deleteNode = () => {
     if (!selectedNodeId) return;
-    setDocument((current) => ({
-      ...current,
-      nodes: current.nodes.filter((node) => node.id !== selectedNodeId),
-      edges: current.edges.filter((edge) => edge.source !== selectedNodeId && edge.target !== selectedNodeId),
-    }));
-    setNodes((current) => current.filter((node) => node.id !== selectedNodeId));
-    setEdges((current) => current.filter((edge) => edge.source !== selectedNodeId && edge.target !== selectedNodeId));
+    const prepared = layoutFlowDocument({
+      ...document,
+      layoutVersion: 0,
+      nodes: document.nodes.filter((node) => node.id !== selectedNodeId),
+      edges: document.edges.filter((edge) => edge.source !== selectedNodeId && edge.target !== selectedNodeId),
+    });
+    setDocument(prepared.document);
+    setNodes(toCanvasNodes(prepared.document, query, prepared.topology));
+    setEdges(toCanvasEdges(prepared.document, null, showAllEdgeLabels));
     setSelectedNodeId(null);
     setDirty(true);
   };
 
   const deleteEdge = () => {
     if (!selectedEdgeId) return;
-    setDocument((current) => ({ ...current, edges: current.edges.filter((edge) => edge.id !== selectedEdgeId) }));
-    setEdges((current) => current.filter((edge) => edge.id !== selectedEdgeId));
+    const prepared = layoutFlowDocument({ ...document, layoutVersion: 0, edges: document.edges.filter((edge) => edge.id !== selectedEdgeId) });
+    setDocument(prepared.document);
+    setNodes(toCanvasNodes(prepared.document, query, prepared.topology));
+    setEdges(toCanvasEdges(prepared.document, null, showAllEdgeLabels));
     setSelectedEdgeId(null);
     setDirty(true);
   };
 
   const resetLayout = () => {
-    const next = autoLayout({ ...document, nodes: document.nodes.map((node) => ({ ...node, position: null })) });
-    setDocument(next);
-    setNodes(toCanvasNodes(next, query));
+    const prepared = layoutFlowDocument({ ...document, layoutVersion: 0, nodes: document.nodes.map((node) => ({ ...node, position: null })) });
+    setDocument(prepared.document);
+    setNodes(toCanvasNodes(prepared.document, query, prepared.topology, focusedNodeIds));
+    setEdges(toCanvasEdges(prepared.document, focusedNodeIds, showAllEdgeLabels, selectedEdgeId));
     setDirty(true);
+    window.setTimeout(() => void flowInstance?.fitView({ padding: 0.18, maxZoom: 1, duration: 500 }), 0);
+  };
+
+  const focusNodeIds = (nodeIds: string[]) => {
+    const targets = nodes.filter((node) => nodeIds.includes(node.id));
+    if (targets.length === 0) return;
+    void flowInstance?.fitView({ nodes: targets, padding: 0.45, maxZoom: 1.15, duration: 500 });
   };
 
   const handoffToAgent = async () => {
@@ -575,15 +674,37 @@ export function FlowModeDialog({
           'relative overflow-hidden bg-[radial-gradient(circle_at_20%_15%,rgba(207,250,254,0.7),transparent_28%),radial-gradient(circle_at_80%_85%,rgba(237,233,254,0.75),transparent_30%),#f8fafc]',
           isCanvasOnly ? 'h-full min-h-0' : 'h-[58dvh] min-h-[24rem] lg:h-full lg:min-h-0',
         )}>
-          <div className="absolute left-3 right-3 top-3 z-10 flex items-center gap-2 sm:left-4 sm:right-auto">
-            <label className="flex h-11 flex-1 items-center gap-2 rounded-full border border-slate-200 bg-white/95 px-3 shadow-sm backdrop-blur sm:w-72" dir="rtl">
+          <div className="absolute left-3 right-3 top-3 z-10 flex items-center gap-2 sm:left-4 sm:right-auto" dir="rtl">
+            {isCanvasOnly && <button type="button" onClick={() => setIsCanvasOnly(false)} className="flex h-11 shrink-0 items-center gap-2 rounded-full border border-teal-200 bg-white/95 px-3 text-xs font-bold text-teal-700 shadow-sm backdrop-blur transition hover:bg-teal-50" title="חזור למסך העריכה"><Minimize2 className="h-4 w-4" /><span className="hidden sm:inline">חזרה לעריכה</span></button>}
+            <label className="flex h-11 min-w-0 flex-1 items-center gap-2 rounded-full border border-slate-200 bg-white/95 px-3 shadow-sm backdrop-blur sm:w-72" dir="rtl">
               <Search className="h-4 w-4 shrink-0 text-slate-400" />
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חפש מודול, טכנולוגיה או נתיב" className="min-w-0 flex-1 bg-transparent text-right text-xs text-slate-700 outline-none" />
               {query && <button type="button" onClick={() => setQuery('')}><X className="h-3.5 w-3.5 text-slate-400" /></button>}
             </label>
-            <button type="button" onClick={resetLayout} className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-500 shadow-sm transition hover:text-cyan-700" title="סדר מחדש"><RotateCcw className="h-4 w-4" /></button>
-            {isCanvasOnly && <button type="button" onClick={() => setIsCanvasOnly(false)} className="flex h-11 shrink-0 items-center gap-2 rounded-full border border-teal-200 bg-white/95 px-3 text-xs font-bold text-teal-700 shadow-sm backdrop-blur transition hover:bg-teal-50" title="חזור למסך העריכה"><Minimize2 className="h-4 w-4" /><span className="hidden sm:inline">חזרה לעריכה</span></button>}
+            <button type="button" onClick={() => void flowInstance?.fitView({ padding: 0.18, maxZoom: 1, duration: 500 })} className="hidden h-11 w-11 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-500 shadow-sm transition hover:text-cyan-700 sm:flex" title="הצג את כל המפה"><LocateFixed className="h-4 w-4" /></button>
+            <button type="button" onClick={() => setShowAllEdgeLabels((current) => !current)} className={cn('hidden h-11 w-11 shrink-0 items-center justify-center rounded-full border bg-white/95 shadow-sm transition sm:flex', showAllEdgeLabels ? 'border-violet-200 text-violet-700' : 'border-slate-200 text-slate-400')} title={showAllEdgeLabels ? 'הסתר את כל כותרות הקשרים' : 'הצג את כל כותרות הקשרים'}><GitBranch className="h-4 w-4" /></button>
+            <button type="button" onClick={resetLayout} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-500 shadow-sm transition hover:text-cyan-700" title="סדר מחדש כזרימת ארכיטקטורה"><RotateCcw className="h-4 w-4" /></button>
           </div>
+
+          {document.nodes.length > 0 && (
+            <div className="absolute left-3 right-3 top-[4.25rem] z-10 flex items-center gap-2 overflow-x-auto rounded-2xl border border-white/80 bg-white/90 p-2 shadow-sm backdrop-blur sm:left-4 sm:right-4" dir="rtl">
+              <button type="button" onClick={() => focusNodeIds(layoutInfo.startNodeIds)} className="flex h-9 shrink-0 items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-[10px] font-black text-emerald-800">
+                התחלה <span className="rounded-full bg-white/80 px-1.5 py-0.5">{layoutInfo.startNodeIds.length}</span>
+              </button>
+              <span className="shrink-0 text-slate-300">←</span>
+              <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
+                {layoutInfo.stages.slice(1, -1).map((stage) => (
+                  <button key={stage.index} type="button" onClick={() => focusNodeIds(stage.nodeIds)} className="h-9 shrink-0 rounded-xl border border-slate-200 bg-white px-3 text-[10px] font-bold text-slate-600 transition hover:border-cyan-200 hover:text-cyan-700">
+                    שלב {stage.index} · {stage.nodeIds.length}
+                  </button>
+                ))}
+              </div>
+              <span className="shrink-0 text-slate-300">←</span>
+              <button type="button" onClick={() => focusNodeIds(layoutInfo.endNodeIds)} className="flex h-9 shrink-0 items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 text-[10px] font-black text-rose-800">
+                סיום<span className="hidden sm:inline"> ויעדים</span> <span className="rounded-full bg-white/80 px-1.5 py-0.5">{layoutInfo.endNodeIds.length}</span>
+              </button>
+            </div>
+          )}
 
           {document.nodes.length === 0 ? (
             <div className="flex h-full min-h-[55dvh] items-center justify-center p-6" dir="rtl">
@@ -599,13 +720,16 @@ export function FlowModeDialog({
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
+              onInit={setFlowInstance}
               onNodesChange={(changes: NodeChange<ModuleCanvasNode>[]) => { setNodes((current) => applyNodeChanges(changes, current)); if (changes.some((change) => change.type === 'position' && !change.dragging)) setDirty(true); }}
               onEdgesChange={(changes: EdgeChange<ModuleCanvasEdge>[]) => { setEdges((current) => applyEdgeChanges(changes, current)); if (changes.some((change) => change.type === 'remove')) { setDocument((current) => ({ ...current, edges: current.edges.filter((edge) => !changes.some((change) => change.type === 'remove' && change.id === edge.id)) })); setDirty(true); } }}
               onConnect={(connection: Connection) => {
                 if (!connection.source || !connection.target) return;
                 const nextConnection: FlowConnectionEdge = { id: randomId('connection'), source: connection.source, target: connection.target, label: 'מעביר אל', description: '', kind: 'request' };
-                setDocument((current) => ({ ...current, edges: [...current.edges, nextConnection] }));
-                setEdges((current) => addEdge({ ...connection, id: nextConnection.id, type: 'smoothstep', label: nextConnection.label, data: { connection: nextConnection }, markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8' }, style: { stroke: '#94a3b8', strokeWidth: 1.6 } }, current));
+                const prepared = layoutFlowDocument({ ...document, layoutVersion: 0, edges: [...document.edges, nextConnection] });
+                setDocument(prepared.document);
+                setNodes(toCanvasNodes(prepared.document, query, prepared.topology));
+                setEdges(toCanvasEdges(prepared.document, null, showAllEdgeLabels, nextConnection.id));
                 setSelectedEdgeId(nextConnection.id);
                 setSelectedNodeId(null);
                 setDirty(true);
@@ -613,9 +737,8 @@ export function FlowModeDialog({
               onNodeClick={(_, node) => { setSelectedNodeId(node.id); setSelectedEdgeId(null); }}
               onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedNodeId(null); }}
               onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }}
-              fitView
-              fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
-              minZoom={0.15}
+              fitViewOptions={{ padding: 0.18, maxZoom: 0.92 }}
+              minZoom={0.08}
               maxZoom={1.8}
               snapToGrid
               snapGrid={[16, 16]}
@@ -650,7 +773,7 @@ export function FlowModeDialog({
               <TextField label="מה הוא עושה במשפט אחד" value={selectedNode.summary} onChange={(summary) => updateNode({ summary })} />
               <label className="block text-right"><span className="text-[10px] font-semibold text-slate-500">הסבר מלא</span><textarea value={selectedNode.description} onChange={(event) => updateNode({ description: event.target.value })} rows={5} className="mt-1 w-full resize-y rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-700 outline-none focus:border-cyan-300" /></label>
               <div className="grid grid-cols-2 gap-2"><SelectField label="סוג" value={selectedNode.kind} options={NODE_KIND_LABELS} onChange={(kind) => updateNode({ kind })} /><SelectField label="בעלות" value={selectedNode.ownership} options={Object.fromEntries(Object.entries(OWNERSHIP_META).map(([id, meta]) => [id, meta.label])) as Record<FlowOwnershipKind, string>} onChange={(ownership) => updateNode({ ownership })} /></div>
-              <SelectField label="מצב" value={selectedNode.status} options={STATUS_LABELS} onChange={(status) => updateNode({ status })} />
+              <div className="grid grid-cols-2 gap-2"><SelectField label="תפקיד בזרימה" value={selectedNode.flowRole} options={FLOW_ROLE_LABELS} onChange={(flowRole) => updateNode({ flowRole })} /><SelectField label="מצב" value={selectedNode.status} options={STATUS_LABELS} onChange={(status) => updateNode({ status })} /></div>
               <TextField label="טכנולוגיה" value={selectedNode.technology} onChange={(technology) => updateNode({ technology })} placeholder="React, PostgreSQL, Docker…" />
               <TextField label="איפה הוא רץ" value={selectedNode.runtime} onChange={(runtime) => updateNode({ runtime })} placeholder="שרת, קונטיינר, ענן…" />
               <TextField label="נתיב בריפו" value={selectedNode.repositoryPath} onChange={(repositoryPath) => updateNode({ repositoryPath })} dir="ltr" />
@@ -668,7 +791,7 @@ export function FlowModeDialog({
             <div className="space-y-4">
               <div className="rounded-[1.5rem] border border-cyan-100 bg-gradient-to-br from-cyan-50 to-white p-4"><div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-cyan-700 shadow-sm"><CircleHelp className="h-5 w-5" /></div><h3 className="mt-3 text-base font-black text-slate-800">לחץ על כל מודול</h3><p className="mt-2 text-xs leading-6 text-slate-500">כאן יופיע ההסבר המלא שהסוכן כתב, המקור שלו, מקום הריצה והראיות שמחברות את המפה לקוד האמיתי.</p></div>
               {document.summary && <div className="rounded-[1.5rem] border border-slate-100 bg-slate-50/80 p-4"><div className="text-[10px] font-semibold text-slate-400">על המפה</div><p className="mt-2 text-xs leading-6 text-slate-600">{document.summary}</p></div>}
-              <div className="rounded-[1.5rem] border border-violet-100 bg-violet-50/60 p-4"><div className="flex items-center gap-2 text-xs font-bold text-violet-800"><GitBranch className="h-4 w-4" />איך עורכים?</div><ul className="mt-2 space-y-1 text-[11px] leading-5 text-violet-700/80"><li>• גרור מודולים כדי לסדר את המפה.</li><li>• גרור מהנקודה הכחולה לאפורה כדי לחבר.</li><li>• הוסף מודול מהכפתור למעלה.</li><li>• שמור לפני שמבקשים מהסוכן שינוי.</li></ul></div>
+              <div className="rounded-[1.5rem] border border-violet-100 bg-violet-50/60 p-4"><div className="flex items-center gap-2 text-xs font-bold text-violet-800"><GitBranch className="h-4 w-4" />איך קוראים ועורכים?</div><ul className="mt-2 space-y-1 text-[11px] leading-5 text-violet-700/80"><li>• מתחילים בצד ימין ומתקדמים עם החצים שמאלה.</li><li>• לחץ על מודול כדי להאיר את כל המסלול שמגיע אליו ויוצא ממנו.</li><li>• קו מקווקו מסמן אירוע, תלות או פריסה; קו מלא מסמן מעבר ישיר.</li><li>• גרור מודולים או חבר בין הנקודה הכחולה לאפורה, ואז שמור.</li></ul></div>
             </div>
           )}
 

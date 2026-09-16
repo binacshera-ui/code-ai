@@ -16,7 +16,7 @@ The complete loop is:
 
 ## Foundation decision
 
-Use `@xyflow/react` as the interaction engine and keep all business semantics inside CODE-AI.
+Use `@xyflow/react` 12.11.6 as the interaction engine, pin `@dagrejs/dagre` 3.1.1 (MIT) as the directed layered-layout engine, and keep all business semantics inside CODE-AI.
 
 Why:
 
@@ -24,12 +24,22 @@ Why:
 - It supplies the hard canvas primitives: pan, zoom, fit view, selection, connection handles, keyboard deletion, controls, and MiniMap.
 - It is MIT licensed and actively maintained.
 - It does not dictate our domain model, persistence, validation, prompts, or visual language.
+- Dagre replaces the original hand-written topological layout. It handles cycles, rank assignment, branch ordering, crossing reduction, and disconnected components while React Flow remains the renderer/editor.
 
 Rejected alternatives:
 
 - A custom SVG/canvas engine would duplicate mature interaction and accessibility work.
+- ELK Layered is stronger for deeply nested compound graphs and advanced port routing, but `elkjs` 0.12.0 adds a substantially larger runtime and its EPL-2.0/GPL licensing is less convenient for this client bundle. The current product does not need those missing capabilities.
 - A Mermaid-only view would be readable but would not support direct manipulation and module-level continuation.
 - Reusing Bina 3.0's workflow document one-to-one would leak execution semantics into an explanatory architecture map.
+
+Known Dagre boundary and integration plan:
+
+- Dagre owns only deterministic rank assignment and initial coordinates. React Flow owns rendering, interaction, handles, zoom, selection, and manual edits.
+- Groups remain semantic badges rather than compound layout containers. Typed smooth-step edges provide the visual routing layer that Dagre itself does not render.
+- Tarjan strongly connected components are collapsed before stage numbering, so cycles stay readable and do not corrupt start/end semantics.
+- `dependency` and `deploy` edges are secondary context and do not move a module to a later primary-flow stage.
+- Saved documents carry `layoutVersion`. Missing, zero, or older versions are migrated once through the current layout; current manual positions remain stable until the user chooses “reset layout”.
 
 ## Canonical contract
 
@@ -59,7 +69,8 @@ The server enforces IDs, text limits, valid ownership/status values, unique modu
 - Completion action: shows “צפה בזרימה” only when a validated document exists and the current turn is no longer running.
 - Canvas: custom pastel module nodes, relationship labels, MiniMap, zoom/fit controls, search and filters.
 - Inspector: fully editable agent-authored details and evidence.
-- Editing: add module, connect modules, move, delete, edit, reset layout, save with conflict detection.
+- Reading: explicit start/end anchors, numbered stages, right-to-left direction, typed arrow styling, and click-to-focus ancestor/descendant paths.
+- Editing: add module, connect modules, move, delete, edit, assign a flow role, reset the layered layout, save with conflict detection.
 - Continuation: selected-module context plus the user's instruction is placed in the composer; the latest complete graph is injected server-side at send time.
 
 ## Verification and rollout
@@ -68,4 +79,3 @@ The server enforces IDs, text limits, valid ownership/status values, unique modu
 - Production build verifies the React Flow integration and server bundle.
 - Browser QA covers mode activation, canvas opening, edit/save/reload, and composer handoff at desktop and narrow panel widths.
 - Deployment follows the existing CODE-AI multi-host release flow with health checks and rollback-safe releases.
-

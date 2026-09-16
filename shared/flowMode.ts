@@ -27,12 +27,14 @@ export const FLOW_OWNERSHIP_KINDS = [
 ] as const;
 
 export const FLOW_NODE_STATUSES = ['active', 'planned', 'risk', 'unknown'] as const;
+export const FLOW_NODE_ROLES = ['auto', 'entry', 'step', 'decision', 'exit', 'support'] as const;
 export const FLOW_EDGE_KINDS = ['data', 'request', 'event', 'dependency', 'control', 'deploy', 'other'] as const;
 export const FLOW_EVIDENCE_KINDS = ['path', 'url', 'runtime', 'note'] as const;
 
 export type FlowNodeKind = typeof FLOW_NODE_KINDS[number];
 export type FlowOwnershipKind = typeof FLOW_OWNERSHIP_KINDS[number];
 export type FlowNodeStatus = typeof FLOW_NODE_STATUSES[number];
+export type FlowNodeRole = typeof FLOW_NODE_ROLES[number];
 export type FlowEdgeKind = typeof FLOW_EDGE_KINDS[number];
 export type FlowEvidenceKind = typeof FLOW_EVIDENCE_KINDS[number];
 
@@ -56,6 +58,7 @@ export interface FlowModuleNode {
   kind: FlowNodeKind;
   ownership: FlowOwnershipKind;
   status: FlowNodeStatus;
+  flowRole: FlowNodeRole;
   groupId: string | null;
   technology: string;
   runtime: string;
@@ -89,6 +92,8 @@ export interface FlowDocument {
   subtitle: string;
   summary: string;
   direction: 'rtl' | 'ltr';
+  /** Client layout revision. Missing/zero means that the graph needs a fresh automatic layout. */
+  layoutVersion?: number;
   groups: FlowVisualGroup[];
   nodes: FlowModuleNode[];
   edges: FlowConnectionEdge[];
@@ -147,6 +152,7 @@ export function createEmptyFlowDocument(now = new Date().toISOString()): FlowDoc
     subtitle: '',
     summary: '',
     direction: 'rtl',
+    layoutVersion: 0,
     groups: [],
     nodes: [],
     edges: [],
@@ -210,6 +216,7 @@ export function normalizeFlowDocument(input: unknown, now = new Date().toISOStri
       kind: enumValue(node.kind, FLOW_NODE_KINDS, 'other'),
       ownership: enumValue(node.ownership, FLOW_OWNERSHIP_KINDS, 'unknown'),
       status: enumValue(node.status, FLOW_NODE_STATUSES, 'active'),
+      flowRole: enumValue(node.flowRole, FLOW_NODE_ROLES, 'auto'),
       groupId: groupId && groupIds.has(groupId) ? groupId : null,
       technology: text(node.technology, '', 180),
       runtime: text(node.runtime, '', 260),
@@ -270,6 +277,9 @@ export function normalizeFlowDocument(input: unknown, now = new Date().toISOStri
     subtitle: text(raw.subtitle, '', 300),
     summary: text(raw.summary, '', 1400),
     direction: raw.direction === 'ltr' ? 'ltr' : 'rtl',
+    layoutVersion: Number.isFinite(raw.layoutVersion)
+      ? Math.max(0, Math.min(100, Math.floor(Number(raw.layoutVersion))))
+      : 0,
     groups,
     nodes,
     edges,

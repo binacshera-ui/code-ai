@@ -26,6 +26,8 @@ test('normalizes a canonical flow and rejects dangling edges', () => {
   const document = normalizeFlowDocument(validDocument);
   assert.equal(document.nodes.length, 2);
   assert.equal(document.edges[0].source, 'ui');
+  assert.equal(document.nodes[0].flowRole, 'auto');
+  assert.equal(document.layoutVersion, 0);
   assert.throws(() => normalizeFlowDocument({
     ...validDocument,
     edges: [{ source: 'missing', target: 'api' }],

@@ -32,6 +32,8 @@
     "test:browser-mode": "esbuild server/codexBrowserMode.test.ts --bundle --platform=node --format=esm --outfile=/tmp/code-ai-codex-browser-mode.test.mjs && node --test /tmp/code-ai-codex-browser-mode.test.mjs",
     "test:design-mode": "design_test_root=$(mktemp -d /tmp/code-ai-design-mode-test-XXXXXX) && esbuild server/codexDesignMode.test.ts --bundle --platform=node --format=esm --outfile=/tmp/code-ai-codex-design-mode.test.mjs && CODEX_APP_ROOT=$PWD CODEX_STORAGE_ROOT=$design_test_root node --test /tmp/code-ai-codex-design-mode.test.mjs",
     "test:flow-mode": "flow_test_root=$(mktemp -d /tmp/code-ai-flow-mode-test-XXXXXX) && esbuild server/codexFlowMode.test.ts --bundle --platform=node --format=esm --outfile=$flow_test_root/test.mjs && CODEX_APP_ROOT=$PWD CODEX_STORAGE_ROOT=$flow_test_root node --test $flow_test_root/test.mjs",
+    "test:flow-layout": "flow_layout_root=$(mktemp -d /tmp/code-ai-flow-layout-test-XXXXXX) && esbuild client/src/components/codex/flowLayout.test.ts --bundle --platform=node --format=esm --outfile=$flow_layout_root/test.mjs && node --test $flow_layout_root/test.mjs",
+    "test:flow-mode:visual": ".venv/bin/python scripts/flow-mode-visual-e2e.py",
     "test:gemini-process-env": "esbuild server/geminiProcessEnv.test.ts --bundle --platform=node --format=esm --outfile=/tmp/code-ai-gemini-process-env.test.mjs && node --test /tmp/code-ai-gemini-process-env.test.mjs",
     "test:provider-process-env": "esbuild server/providerProcessEnv.test.ts --bundle --platform=node --format=esm --outfile=/tmp/code-ai-provider-process-env.test.mjs && node --test /tmp/code-ai-provider-process-env.test.mjs",
     "test:design-mode:visual": ".venv/bin/python scripts/design-mode-visual-e2e.py",
@@ -75,6 +77,7 @@
     "export:standalone": "node deploy/code-ai/export-standalone.mjs"
   },
   "dependencies": {
+    "@dagrejs/dagre": "3.1.1",
     "@radix-ui/react-dialog": "^1.1.4",
     "@radix-ui/react-label": "^2.1.1",
     "@radix-ui/react-progress": "^1.1.1",
