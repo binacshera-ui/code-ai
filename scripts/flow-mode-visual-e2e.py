@@ -41,13 +41,17 @@ def configured_device_password() -> str:
     return fallback.group(2) if fallback else ""
 
 
-def open_flow(page) -> None:
+def open_flow(page, composer_draft: str = "") -> None:
     password = configured_device_password()
     if not password:
         raise RuntimeError("CODEX_DEVICE_ADMIN_PASSWORD is not configured")
     unlock = page.request.post(f"{BASE_URL}/api/codex/device-unlock", data={"password": password})
     assert unlock.ok, f"device unlock failed with HTTP {unlock.status}"
     page.goto(f"{BASE_URL}/chat/session/{PROFILE_ID}/{SESSION_ID}", wait_until="domcontentloaded")
+    if composer_draft:
+        composer = page.get_by_placeholder("הודעה חדשה, בקשה או תזמון...")
+        composer.wait_for(state="visible", timeout=30_000)
+        composer.fill(composer_draft)
     flow_chip = page.get_by_text(re.compile(r"^זרימה ·"))
     flow_chip.wait_for(state="visible", timeout=30_000)
     flow_chip.click()
@@ -96,7 +100,8 @@ def main() -> None:
         desktop = browser.new_page(viewport={"width": 1440, "height": 960}, device_scale_factor=1)
         desktop.set_default_timeout(20_000)
         desktop.on("pageerror", lambda error: errors.append(str(error)))
-        open_flow(desktop)
+        existing_draft = "זו טיוטה שכבר נכתבה ואסור למחוק אותה"
+        open_flow(desktop, existing_draft)
         desktop.get_by_role("button", name="מפה חדשה").click()
         desktop.get_by_role("heading", name="יצירת מפה חדשה").wait_for(state="visible")
         desktop.get_by_role("textbox", name="שם המפה").wait_for(state="visible")
@@ -109,6 +114,16 @@ def main() -> None:
         desktop.locator(f'.react-flow__node[data-id="{visible_desktop_nodes[0]}"]').click()
         assert desktop.locator(".react-flow__node .opacity-20").count() > 0, "node click did not focus its route"
         desktop.screenshot(path="/tmp/code-ai-flow-layout-desktop.png", full_page=True)
+        flow_request = "בדוק את המודול הזה והמשך לטפל בו"
+        desktop.locator(
+            'textarea[placeholder^="מה תרצה"], textarea[placeholder^="למשל:"]'
+        ).first.fill(flow_request)
+        desktop.get_by_role("button", name="העבר לתיבת ההודעה").click()
+        composer = desktop.get_by_placeholder("הודעה חדשה, בקשה או תזמון...")
+        composer.wait_for(state="visible")
+        combined_prompt = composer.input_value()
+        assert combined_prompt.startswith(existing_draft), "flow handoff replaced the existing composer draft"
+        assert flow_request in combined_prompt, "flow handoff was not appended to the composer"
 
         mobile = browser.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=1)
         mobile.set_default_timeout(20_000)

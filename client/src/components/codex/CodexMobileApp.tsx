@@ -142,6 +142,7 @@ import {
   type PhoneModeValue,
 } from './PhoneModeDialog';
 import type { CodexSessionFlowModeValue, FlowModeMutation } from './FlowModeDialog';
+import { appendComposerPrompt } from './composerPrompt';
 import { ConversationShareDialog } from './ConversationShareDialog';
 import {
   ConversationSearchModeDialog,
@@ -20763,7 +20764,7 @@ export function CodexMobileApp() {
   }
 
   function moveFlowRequestToComposer(nextPrompt: string) {
-    setPrompt(nextPrompt);
+    setPrompt((currentPrompt) => appendComposerPrompt(currentPrompt, nextPrompt));
     setIsFlowModeDialogOpen(false);
     window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
   }
