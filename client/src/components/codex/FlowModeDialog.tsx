@@ -573,7 +573,7 @@ export function FlowModeDialog({
       )} dir="ltr">
         <section className={cn(
           'relative overflow-hidden bg-[radial-gradient(circle_at_20%_15%,rgba(207,250,254,0.7),transparent_28%),radial-gradient(circle_at_80%_85%,rgba(237,233,254,0.75),transparent_30%),#f8fafc]',
-          isCanvasOnly ? 'h-full min-h-0' : 'min-h-[58dvh] lg:h-full lg:min-h-0',
+          isCanvasOnly ? 'h-full min-h-0' : 'h-[58dvh] min-h-[24rem] lg:h-full lg:min-h-0',
         )}>
           <div className="absolute left-3 right-3 top-3 z-10 flex items-center gap-2 sm:left-4 sm:right-auto">
             <label className="flex h-11 flex-1 items-center gap-2 rounded-full border border-slate-200 bg-white/95 px-3 shadow-sm backdrop-blur sm:w-72" dir="rtl">
