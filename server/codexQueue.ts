@@ -2219,7 +2219,9 @@ async function processQueueItem(item: CodexQueueItem) {
       item.sourceProfileId || item.profileId,
       result.sessionId,
       result.finalMessage,
-      flowModeAtRun.enabled ? flowModeAtRun.revision : undefined,
+      flowModeAtRun.enabled && flowModeAtRun.activeMapId
+        ? { mapId: flowModeAtRun.activeMapId, mapRevision: flowModeAtRun.mapRevision }
+        : undefined,
     );
 
     if (isRecurringItem(item) && item.stopPolicy?.status === 'stopping') {

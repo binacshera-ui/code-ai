@@ -2,17 +2,18 @@
 
 ## Product outcome
 
-Flow Creation Mode turns a session into a living, editable system map. The agent explains the real code and runtime in plain Hebrew, CODE-AI renders the result as a calm pastel graph, and every user edit becomes part of the next agent turn.
+Flow Creation Mode turns a session into a living library of editable system maps. The agent explains the real code and runtime in plain Hebrew, CODE-AI renders the active map as a calm pastel graph, and every user edit becomes part of the next agent turn.
 
 The complete loop is:
 
 1. The user enables Flow Creation Mode for a draft or an existing session.
-2. CODE-AI adds the current canonical flow and the `bina-flow` contract to every turn.
-3. The agent investigates the real system and ends its answer with one complete `bina-flow` JSON document.
-4. The server validates and versions the document before persisting it.
-5. A “צפה בזרימה” action opens the React Flow canvas.
-6. The user can move, connect, add, edit, or remove modules and save a new revision.
-7. “שאל או בקש שינוי” sends the selected module and instruction back to the same session. The server supplies the latest full flow, so the agent always works from the current visual state.
+2. The user creates, names, duplicates, deletes, or switches maps inside the same session.
+3. CODE-AI adds the active canonical flow, a lightweight map index, and the `bina-flow` contract to every turn.
+4. The agent investigates the real system and ends its answer with one complete `bina-flow` JSON document for that active map only.
+5. The server validates and versions the document before persisting it into the targeted map.
+6. A “צפה בזרימה” action opens the React Flow canvas and map shelf.
+7. The user can move, connect, add, edit, or remove modules and save a new map revision.
+8. “שאל או בקש שינוי” sends the selected module, active map identity, and instruction back to the same session. The server supplies the latest full active map, so the agent always works from the current visual state.
 
 ## Foundation decision
 
@@ -25,6 +26,7 @@ Why:
 - It is MIT licensed and actively maintained.
 - It does not dictate our domain model, persistence, validation, prompts, or visual language.
 - Dagre replaces the original hand-written topological layout. It handles cycles, rank assignment, branch ordering, crossing reduction, and disconnected components while React Flow remains the renderer/editor.
+- Multiple maps do not require a second canvas engine or a client-side global graph store. CODE-AI owns a server-side map library and renders one controlled React Flow instance for the active map. This keeps large sessions bounded and preserves the established editor behavior.
 
 Rejected alternatives:
 
@@ -43,14 +45,16 @@ Known Dagre boundary and integration plan:
 
 ## Canonical contract
 
-The server owns schema version 1. A document contains:
+The server owns schema version 1 for each map document. A session flow record contains a lightweight ordered map library, an `activeMapId`, and the full documents on the server. The client receives summaries for every map and the full document for the active map only.
+
+A map document contains:
 
 - Human title, subtitle, and summary.
 - Modules with kind, ownership, status, technology, runtime, repository path or external URL, detailed explanation, tags, evidence, and optional position.
 - Typed connections with a short label and a human explanation.
 - Optional visual groups for domains or layers.
 
-The server enforces IDs, text limits, valid ownership/status values, unique modules, valid connection endpoints, and graph size limits. Unknown fields are discarded. Every accepted change increments an optimistic revision.
+The server enforces IDs, text limits, valid ownership/status values, unique modules, valid connection endpoints, and graph size limits. Unknown fields are discarded. Every accepted session operation increments a library revision; every map edit independently increments that map's optimistic revision. Version-1 single-map records are promoted automatically without losing their document.
 
 ## Trust and lifecycle boundaries
 
@@ -59,14 +63,17 @@ The server enforces IDs, text limits, valid ownership/status values, unique modu
 - Draft-session flow state is rebound atomically to the real session ID.
 - Session deletion also deletes flow state.
 - Existing documents are included in the next prompt as full compact JSON.
+- Only the active map is included as full JSON. Other maps are represented by a small title/count index, preventing prompt growth from multiplying with the number of maps.
+- A running agent turn is pinned to the active map ID and map revision captured at dispatch time. If the user switches maps meanwhile, valid output returns to the original map instead of overwriting the newly selected map. If that original map changed meanwhile, the stale output is rejected.
 - The agent must distinguish repository-owned code, managed infrastructure, containers, and external services, and attach file/URL/note evidence when known.
 - Invalid or partial `bina-flow` blocks do not replace the last valid document.
 
 ## UI architecture
 
-- Mode card: enable/disable, explanation depth, optional brief, current revision and module count.
-- Session chip: shows that Flow Mode is active and opens the canvas.
+- Mode card: enable/disable, explanation depth, optional brief, active-map revision and module count.
+- Session chip: shows the map count and active map, and opens the canvas.
 - Completion action: shows “צפה בזרימה” only when a validated document exists and the current turn is no longer running.
+- Map shelf: horizontal, touch-friendly tabs for switching maps plus create, rename, duplicate, and guarded delete actions. Dirty edits are saved before switching or creating another map.
 - Canvas: custom pastel module nodes, relationship labels, MiniMap, zoom/fit controls, search and filters.
 - Inspector: fully editable agent-authored details and evidence.
 - Reading: explicit start/end anchors, numbered stages, right-to-left direction, typed arrow styling, and click-to-focus ancestor/descendant paths.
@@ -75,7 +82,7 @@ The server enforces IDs, text limits, valid ownership/status values, unique modu
 
 ## Verification and rollout
 
-- Unit tests cover normalization, invalid edges, fenced-output extraction, persistence, revision conflicts, and draft rebinding.
+- Unit tests cover normalization, invalid edges, fenced-output extraction, persistence, legacy migration, library operations, per-map revision conflicts, asynchronous agent targeting, and draft rebinding.
 - Production build verifies the React Flow integration and server bundle.
 - Browser QA covers mode activation, canvas opening, edit/save/reload, and composer handoff at desktop and narrow panel widths.
 - Deployment follows the existing CODE-AI multi-host release flow with health checks and rollback-safe releases.

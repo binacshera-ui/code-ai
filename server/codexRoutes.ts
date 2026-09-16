@@ -4057,14 +4057,20 @@ router.post('/session-flow-mode', requireCodexAccess, async (req, res) => {
       return;
     }
     const flowMode = await setSessionFlowMode(profileId, sessionKey, {
+      operation: req.body?.flowMode?.operation,
       enabled: typeof req.body?.flowMode?.enabled === 'boolean' ? req.body.flowMode.enabled : undefined,
       detail: req.body?.flowMode?.detail,
       brief: typeof req.body?.flowMode?.brief === 'string' ? req.body.flowMode.brief : undefined,
+      mapId: typeof req.body?.flowMode?.mapId === 'string' ? req.body.flowMode.mapId : undefined,
+      title: typeof req.body?.flowMode?.title === 'string' ? req.body.flowMode.title : undefined,
       ...(Object.prototype.hasOwnProperty.call(req.body?.flowMode || {}, 'document')
         ? { document: req.body.flowMode.document }
         : {}),
       expectedRevision: Number.isFinite(req.body?.flowMode?.expectedRevision)
         ? Number(req.body.flowMode.expectedRevision)
+        : undefined,
+      expectedMapRevision: Number.isFinite(req.body?.flowMode?.expectedMapRevision)
+        ? Number(req.body.flowMode.expectedMapRevision)
         : undefined,
       source: 'user',
     });
@@ -6709,7 +6715,9 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         visibleProfileId,
         result.sessionId,
         result.finalMessage,
-        flowModeAtRun.enabled ? flowModeAtRun.revision : undefined,
+        flowModeAtRun.enabled && flowModeAtRun.activeMapId
+          ? { mapId: flowModeAtRun.activeMapId, mapRevision: flowModeAtRun.mapRevision }
+          : undefined,
       );
       await deleteSessionContextSelection(visibleProfileId, supportSessionKey);
       const session = await decorateSessionDetailForClient(

@@ -9,7 +9,7 @@ import {
 } from './codexConversationSearchMode.js';
 import { getSessionRemindersByIds } from './codexSessionReminders.js';
 import { getUnifiedSkillsByIds } from './skillCatalogService.js';
-import { buildSessionFlowModePromptAdditions, getSessionFlowModeRecord } from './codexFlowMode.js';
+import { buildSessionFlowModePromptAdditions, getSessionFlowMode } from './codexFlowMode.js';
 
 const CONTEXT_PACK_ROOT = path.join(CODEX_APP_CONFIG.storageRoot, 'context-packs');
 
@@ -85,7 +85,7 @@ export async function buildSessionPromptAdditionsContext(options: {
   const [selection, conversationSearchMode, flowMode] = await Promise.all([
     getSessionContextSelection(options.profileId, options.sessionKey),
     getSessionConversationSearchModeRecord(options.profileId, options.sessionKey),
-    getSessionFlowModeRecord(options.profileId, options.sessionKey),
+    getSessionFlowMode(options.profileId, options.sessionKey),
   ]);
   if (
     selection.anchorIds.length === 0
@@ -188,7 +188,7 @@ export async function buildSessionPromptAdditionsContext(options: {
     ? `מצב חיפוש בשיחות פעיל בטווח: ${conversationSearchMode.scope === 'current' ? 'השיחה הזאת' : conversationSearchMode.scope === 'project' ? 'כל שיחות הפרויקט' : 'כל השיחות'}.`
     : null;
   const flowModePreview = flowMode?.enabled
-    ? `מצב יצירת זרימה פעיל${flowMode.document ? ` עם ${flowMode.document.nodes.length} מודולים בגרסה ${flowMode.revision}` : ' וממתין לזרימה הראשונה'}.`
+    ? `מצב יצירת זרימה פעיל עם ${flowMode.maps.length} מפות${flowMode.document ? `; במפה הפעילה יש ${flowMode.document.nodes.length} מודולים בגרסה ${flowMode.mapRevision}` : ' וממתין למפה הראשונה'}.`
     : null;
 
   return [

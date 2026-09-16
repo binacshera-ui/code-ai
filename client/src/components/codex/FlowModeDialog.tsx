@@ -24,6 +24,7 @@ import {
   Box,
   Check,
   CircleHelp,
+  Copy,
   Download,
   ExternalLink,
   FileCode2,
@@ -35,6 +36,7 @@ import {
   Maximize2,
   Minimize2,
   Network,
+  Pencil,
   Plus,
   RotateCcw,
   Save,
@@ -53,6 +55,7 @@ import {
   type FlowEvidence,
   type FlowEvidenceKind,
   type FlowModuleNode,
+  type FlowMapSummary,
   type FlowNodeKind,
   type FlowNodeRole,
   type FlowNodeStatus,
@@ -73,11 +76,28 @@ export interface CodexSessionFlowModeValue {
   enabled: boolean;
   detail: FlowModeDetail;
   brief: string;
+  activeMapId: string | null;
+  maps: FlowMapSummary[];
   document: FlowDocument | null;
+  mapRevision: number;
   revision: number;
   updatedAt: string | null;
   lastGeneratedAt: string | null;
   source: 'agent' | 'user' | null;
+}
+
+export type FlowMapOperation = 'save' | 'create' | 'select' | 'rename' | 'duplicate' | 'delete';
+
+export interface FlowModeMutation {
+  operation?: FlowMapOperation;
+  enabled?: boolean;
+  detail?: FlowModeDetail;
+  brief?: string;
+  mapId?: string | null;
+  title?: string;
+  document?: FlowDocument | null;
+  expectedRevision?: number;
+  expectedMapRevision?: number;
 }
 
 type ModuleNodeData = {
@@ -353,6 +373,11 @@ function downloadFlow(document: FlowDocument) {
   URL.revokeObjectURL(url);
 }
 
+type FlowMapDialogState = {
+  kind: 'create' | 'rename' | 'duplicate' | 'delete';
+  title: string;
+} | null;
+
 export function FlowModeDialog({
   isOpen,
   value,
@@ -365,7 +390,7 @@ export function FlowModeDialog({
   value: CodexSessionFlowModeValue;
   isSaving: boolean;
   onClose: () => void;
-  onSave: (next: { enabled: boolean; detail: FlowModeDetail; brief: string; document?: FlowDocument | null; expectedRevision: number }) => Promise<CodexSessionFlowModeValue>;
+  onSave: (next: FlowModeMutation) => Promise<CodexSessionFlowModeValue>;
   onSendToComposer: (prompt: string) => void;
 }) {
   const [document, setDocument] = useState<FlowDocument>(() => value.document || createEmptyFlowDocument());
@@ -382,6 +407,7 @@ export function FlowModeDialog({
   const [showSettings, setShowSettings] = useState(false);
   const [isCanvasOnly, setIsCanvasOnly] = useState(false);
   const [showAllEdgeLabels, setShowAllEdgeLabels] = useState(true);
+  const [mapDialog, setMapDialog] = useState<FlowMapDialogState>(null);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<ModuleCanvasNode, ModuleCanvasEdge> | null>(null);
 
   const layoutInfo = useMemo(() => describeFlowLayout(document), [document]);
@@ -403,10 +429,11 @@ export function FlowModeDialog({
     setQuery('');
     setDirty(false);
     setNotice(null);
+    setMapDialog(null);
     setShowSettings(!value.enabled && !value.document);
     setIsCanvasOnly(false);
     setShowAllEdgeLabels(prepared.document.edges.length <= 36);
-  }, [isOpen, value.revision]);
+  }, [isOpen, value.activeMapId, value.revision]);
 
   useEffect(() => {
     const presentedNodes = new Map(toCanvasNodes(document, query, layoutInfo.topology, focusedNodeIds).map((node) => [node.id, node]));
@@ -488,28 +515,103 @@ export function FlowModeDialog({
     setDirty(true);
   };
 
-  const handleSave = async () => {
+  const handleSave = async (): Promise<CodexSessionFlowModeValue | null> => {
     try {
       const nextDocument = syncDocumentFromCanvas();
-      const saved = await onSave({ enabled: true, detail, brief, document: nextDocument, expectedRevision: value.revision });
+      const saved = await onSave({
+        operation: 'save',
+        enabled: true,
+        detail,
+        brief,
+        mapId: value.activeMapId,
+        document: nextDocument,
+        expectedRevision: value.revision,
+        expectedMapRevision: value.mapRevision,
+      });
       setDocument(saved.document || nextDocument);
       setDirty(false);
-      setNotice('הזרימה נשמרה. הסוכן יקבל את הגרסה הזאת בהודעה הבאה.');
-      return true;
+      setNotice('המפה נשמרה. הסוכן יקבל את הגרסה הזאת בהודעה הבאה.');
+      return saved;
     } catch (error: any) {
-      setNotice(error?.message || 'השמירה נכשלה. הזרימה המקומית נשארה פתוחה.');
-      return false;
+      setNotice(error?.message || 'השמירה נכשלה. המפה המקומית נשארה פתוחה.');
+      return null;
+    }
+  };
+
+  const saveBeforeMapChange = async (): Promise<CodexSessionFlowModeValue | null> => {
+    if (!dirty) return value;
+    return handleSave();
+  };
+
+  const selectMap = async (mapId: string) => {
+    if (mapId === value.activeMapId || isSaving) return;
+    const base = await saveBeforeMapChange();
+    if (!base) return;
+    try {
+      await onSave({ operation: 'select', mapId, expectedRevision: base.revision });
+      setNotice(null);
+    } catch (error: any) {
+      setNotice(error?.message || 'לא ניתן היה לעבור למפה המבוקשת.');
+    }
+  };
+
+  const submitMapDialog = async () => {
+    if (!mapDialog || isSaving) return;
+    if (mapDialog.kind === 'delete') {
+      if (!value.activeMapId) return;
+      try {
+        await onSave({
+          operation: 'delete',
+          mapId: value.activeMapId,
+          expectedRevision: value.revision,
+          expectedMapRevision: value.mapRevision,
+        });
+        setDirty(false);
+        setMapDialog(null);
+        setNotice('המפה נמחקה. מפות אחרות בסשן נשארו ללא שינוי.');
+      } catch (error: any) {
+        setNotice(error?.message || 'לא ניתן היה למחוק את המפה.');
+      }
+      return;
+    }
+
+    const title = mapDialog.title.trim();
+    if (!title) {
+      setNotice('יש להזין שם למפה.');
+      return;
+    }
+    const base = await saveBeforeMapChange();
+    if (!base) return;
+    try {
+      await onSave({
+        operation: mapDialog.kind,
+        mapId: base.activeMapId,
+        title,
+        expectedRevision: base.revision,
+        expectedMapRevision: base.mapRevision,
+      });
+      setMapDialog(null);
+      setNotice(mapDialog.kind === 'create'
+        ? 'נוצרה מפה חדשה והיא כעת המפה הפעילה.'
+        : mapDialog.kind === 'duplicate'
+          ? 'נוצר עותק עצמאי של המפה.'
+          : 'שם המפה עודכן.');
+    } catch (error: any) {
+      setNotice(error?.message || 'לא ניתן היה לבצע את הפעולה במפה.');
     }
   };
 
   const enableMode = async () => {
     try {
       await onSave({
+        operation: 'save',
         enabled: true,
         detail,
         brief,
+        mapId: value.activeMapId,
         document: syncDocumentFromCanvas(),
         expectedRevision: value.revision,
+        expectedMapRevision: value.mapRevision,
       });
       setNotice('מצב יצירת זרימה פעיל. בקש מהסוכן למפות מערכת או תהליך.');
       setShowSettings(false);
@@ -520,7 +622,7 @@ export function FlowModeDialog({
 
   const disableMode = async () => {
     try {
-      await onSave({ enabled: false, detail, brief, expectedRevision: value.revision });
+      await onSave({ operation: 'save', enabled: false, detail, brief, expectedRevision: value.revision });
       onClose();
     } catch (error: any) {
       setNotice(error?.message || 'לא ניתן היה לכבות את המצב.');
@@ -607,7 +709,8 @@ export function FlowModeDialog({
       : selectedEdge
         ? `אני מתייחס לחיבור "${selectedEdge.label || selectedEdge.id}" (id: ${selectedEdge.id}).`
         : 'אני מתייחס לזרימה כולה.';
-    onSendToComposer(`${selectedContext}\n\n${request}\n\nהשתמש בזרימה הקנונית העדכנית של מצב יצירת הזרימה, בצע את הבדיקה או עבודת הקוד הנדרשת, ובסוף עדכן את הזרימה כך שתשקף את המצב האמיתי.`);
+    const mapContext = `המפה הפעילה היא "${document.title}" (mapId: ${value.activeMapId || 'new-map'}).`;
+    onSendToComposer(`${mapContext}\n${selectedContext}\n\n${request}\n\nהשתמש במפה הפעילה העדכנית מתוך ספריית המפות של הסשן, בצע את הבדיקה או עבודת הקוד הנדרשת, ובסוף עדכן רק את המפה הזאת כך שתשקף את המצב האמיתי.`);
   };
 
   if (!isOpen) return null;
@@ -624,7 +727,7 @@ export function FlowModeDialog({
               {value.enabled && <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[9px] font-semibold text-emerald-700">פעיל</span>}
               {dirty && <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[9px] font-semibold text-amber-700">יש שינויים</span>}
             </div>
-            <div className="mt-0.5 truncate text-[11px] text-slate-400">{document.nodes.length} מודולים · {document.edges.length} חיבורים · גרסה {value.revision}</div>
+            <div className="mt-0.5 truncate text-[11px] text-slate-400">{value.maps.length} מפות בסשן · {document.nodes.length} מודולים · {document.edges.length} חיבורים · גרסת מפה {value.mapRevision}</div>
           </div>
         </div>
 
@@ -639,6 +742,45 @@ export function FlowModeDialog({
           </button>
         </div>
       </header>}
+
+      {!isCanvasOnly && (
+        <div className="relative z-20 flex min-h-[4rem] items-center gap-2 border-b border-slate-200/80 bg-slate-50/90 px-3 py-2 sm:px-5" dir="rtl">
+          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto pb-0.5" role="tablist" aria-label="מפות הזרימה בסשן">
+            {value.maps.map((map) => {
+              const active = map.id === value.activeMapId;
+              return (
+                <button
+                  key={map.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => void selectMap(map.id)}
+                  disabled={isSaving}
+                  className={cn(
+                    'flex h-11 max-w-[15rem] shrink-0 items-center gap-2 rounded-2xl border px-3 text-right transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500 disabled:opacity-50',
+                    active
+                      ? 'border-cyan-200 bg-white text-slate-800 shadow-sm'
+                      : 'border-transparent bg-transparent text-slate-500 hover:border-slate-200 hover:bg-white/80',
+                  )}
+                >
+                  <MapIcon className={cn('h-4 w-4 shrink-0', active ? 'text-cyan-700' : 'text-slate-400')} />
+                  <span className="min-w-0">
+                    <span className="block truncate text-xs font-bold">{map.title}</span>
+                    <span className="block truncate text-[9px] text-slate-400">{map.nodeCount} מודולים · גרסה {map.revision}</span>
+                  </span>
+                </button>
+              );
+            })}
+            {value.maps.length === 0 && <span className="px-2 text-xs text-slate-400">עוד לא נוצרה מפה בסשן הזה</span>}
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5 border-r border-slate-200 pr-2">
+            {value.activeMapId && <button type="button" onClick={() => setMapDialog({ kind: 'rename', title: document.title })} disabled={isSaving} className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:text-cyan-700 disabled:opacity-50" title="שנה את שם המפה" aria-label="שנה את שם המפה"><Pencil className="h-4 w-4" /></button>}
+            {value.activeMapId && <button type="button" onClick={() => setMapDialog({ kind: 'duplicate', title: `${document.title} — עותק` })} disabled={isSaving} className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:text-violet-700 disabled:opacity-50" title="שכפל מפה" aria-label="שכפל מפה"><Copy className="h-4 w-4" /></button>}
+            {value.activeMapId && <button type="button" onClick={() => setMapDialog({ kind: 'delete', title: document.title })} disabled={isSaving} className="flex h-11 w-11 items-center justify-center rounded-full border border-rose-100 bg-white text-rose-500 transition hover:bg-rose-50 disabled:opacity-50" title="מחק מפה" aria-label="מחק מפה"><Trash2 className="h-4 w-4" /></button>}
+            <button type="button" onClick={() => setMapDialog({ kind: 'create', title: `מפה ${value.maps.length + 1}` })} disabled={isSaving} className="flex h-11 shrink-0 items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 text-xs font-bold text-cyan-700 transition hover:bg-cyan-100 disabled:opacity-50" aria-label="מפה חדשה"><Plus className="h-4 w-4" /><span className="hidden sm:inline">מפה חדשה</span></button>
+          </div>
+        </div>
+      )}
 
       {!isCanvasOnly && notice && <div className="relative z-20 flex items-center justify-between gap-3 border-b border-emerald-100 bg-emerald-50 px-4 py-2 text-xs font-medium text-emerald-800"><span>{notice}</span><button type="button" onClick={() => setNotice(null)}><X className="h-3.5 w-3.5" /></button></div>}
 
@@ -661,6 +803,39 @@ export function FlowModeDialog({
             </label>
             <div className="flex gap-2">
               {!value.enabled ? <button type="button" onClick={() => void enableMode()} disabled={isSaving} className="h-11 rounded-full bg-violet-600 px-5 text-xs font-bold text-white hover:bg-violet-700 disabled:opacity-50">הפעל מצב זרימה</button> : <button type="button" onClick={() => void disableMode()} disabled={isSaving} className="h-11 rounded-full border border-rose-200 bg-white px-4 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50">כבה מצב</button>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!isCanvasOnly && mapDialog && (
+        <div className="fixed inset-0 z-[170] flex items-center justify-center bg-slate-950/25 p-4 backdrop-blur-sm" dir="rtl" onMouseDown={(event) => { if (event.target === event.currentTarget) setMapDialog(null); }}>
+          <div className="w-full max-w-md rounded-[1.75rem] border border-slate-200 bg-white p-5 text-right shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-cyan-600">ספריית המפות</div>
+                <h3 className="mt-1 text-lg font-black text-slate-800">
+                  {mapDialog.kind === 'create' ? 'יצירת מפה חדשה' : mapDialog.kind === 'duplicate' ? 'שכפול המפה' : mapDialog.kind === 'rename' ? 'שינוי שם המפה' : 'מחיקת המפה'}
+                </h3>
+              </div>
+              <button type="button" onClick={() => setMapDialog(null)} className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 text-slate-500 hover:bg-slate-50" aria-label="סגור"><X className="h-4 w-4" /></button>
+            </div>
+            {mapDialog.kind === 'delete' ? (
+              <div className="mt-4 rounded-2xl border border-rose-100 bg-rose-50 p-4 text-sm leading-6 text-rose-800">
+                למחוק את “{mapDialog.title}”? המחיקה תשפיע רק על מפה זו; שאר המפות והשיחה יישארו ללא שינוי.
+              </div>
+            ) : (
+              <label className="mt-5 block">
+                <span className="text-xs font-bold text-slate-600">שם המפה</span>
+                <input autoFocus value={mapDialog.title} onChange={(event) => setMapDialog({ ...mapDialog, title: event.target.value })} onKeyDown={(event) => { if (event.key === 'Enter') void submitMapDialog(); }} className="mt-2 h-12 w-full rounded-2xl border border-slate-200 bg-white px-4 text-sm text-slate-800 outline-none focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100" />
+              </label>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setMapDialog(null)} className="h-11 rounded-full border border-slate-200 bg-white px-4 text-xs font-bold text-slate-600 hover:bg-slate-50">ביטול</button>
+              <button type="button" onClick={() => void submitMapDialog()} disabled={isSaving || (mapDialog.kind !== 'delete' && !mapDialog.title.trim())} className={cn('flex h-11 items-center gap-2 rounded-full px-5 text-xs font-bold text-white disabled:opacity-40', mapDialog.kind === 'delete' ? 'bg-rose-600 hover:bg-rose-700' : 'bg-slate-900 hover:bg-slate-800')}>
+                {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : mapDialog.kind === 'delete' ? <Trash2 className="h-4 w-4" /> : mapDialog.kind === 'duplicate' ? <Copy className="h-4 w-4" /> : mapDialog.kind === 'rename' ? <Pencil className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                {mapDialog.kind === 'delete' ? 'מחק מפה' : mapDialog.kind === 'duplicate' ? 'צור עותק' : mapDialog.kind === 'rename' ? 'שמור שם' : 'צור מפה'}
+              </button>
             </div>
           </div>
         </div>

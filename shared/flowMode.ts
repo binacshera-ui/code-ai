@@ -1,6 +1,7 @@
 export const FLOW_DOCUMENT_SCHEMA_VERSION = 1 as const;
 export const FLOW_MAX_NODES = 240;
 export const FLOW_MAX_EDGES = 640;
+export const FLOW_MAX_MAPS_PER_SESSION = 40;
 
 export const FLOW_NODE_KINDS = [
   'system',
@@ -98,6 +99,19 @@ export interface FlowDocument {
   nodes: FlowModuleNode[];
   edges: FlowConnectionEdge[];
   updatedAt: string;
+}
+
+export interface FlowMapSummary {
+  id: string;
+  title: string;
+  subtitle: string;
+  nodeCount: number;
+  edgeCount: number;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  lastGeneratedAt: string | null;
+  source: 'agent' | 'user' | null;
 }
 
 export class FlowDocumentValidationError extends Error {

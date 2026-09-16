@@ -141,8 +141,7 @@ import {
   type PhoneModeStatusValue,
   type PhoneModeValue,
 } from './PhoneModeDialog';
-import type { CodexSessionFlowModeValue, FlowModeDetail } from './FlowModeDialog';
-import type { FlowDocument } from '../../../../shared/flowMode';
+import type { CodexSessionFlowModeValue, FlowModeMutation } from './FlowModeDialog';
 import { ConversationShareDialog } from './ConversationShareDialog';
 import {
   ConversationSearchModeDialog,
@@ -1496,11 +1495,55 @@ function createEmptySessionFlowMode(): CodexSessionFlowMode {
     enabled: false,
     detail: 'balanced',
     brief: '',
+    activeMapId: null,
+    maps: [],
     document: null,
+    mapRevision: 0,
     revision: 0,
     updatedAt: null,
     lastGeneratedAt: null,
     source: null,
+  };
+}
+
+function normalizeSessionFlowModeValue(value: Partial<CodexSessionFlowMode> | null | undefined): CodexSessionFlowMode {
+  const fallback = createEmptySessionFlowMode();
+  if (!value) return fallback;
+  const document = value.document || null;
+  const legacyMapId = document ? `map-${document.id || 'main'}` : null;
+  const maps = Array.isArray(value.maps)
+    ? value.maps
+    : document && legacyMapId
+      ? [{
+          id: legacyMapId,
+          title: document.title,
+          subtitle: document.subtitle,
+          nodeCount: document.nodes.length,
+          edgeCount: document.edges.length,
+          revision: Number.isFinite(value.revision) ? Number(value.revision) : 1,
+          createdAt: value.updatedAt || document.updatedAt,
+          updatedAt: value.updatedAt || document.updatedAt,
+          lastGeneratedAt: value.lastGeneratedAt || null,
+          source: value.source === 'agent' || value.source === 'user' ? value.source : null,
+        }]
+      : [];
+  const activeMapId = maps.some((map) => map.id === value.activeMapId)
+    ? value.activeMapId || null
+    : maps[0]?.id || null;
+  return {
+    enabled: value.enabled === true,
+    detail: value.detail === 'simple' || value.detail === 'deep' ? value.detail : 'balanced',
+    brief: typeof value.brief === 'string' ? value.brief : '',
+    activeMapId,
+    maps,
+    document,
+    mapRevision: Number.isFinite(value.mapRevision)
+      ? Math.max(0, Number(value.mapRevision))
+      : maps.find((map) => map.id === activeMapId)?.revision || 0,
+    revision: Number.isFinite(value.revision) ? Math.max(0, Number(value.revision)) : 0,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : null,
+    lastGeneratedAt: typeof value.lastGeneratedAt === 'string' ? value.lastGeneratedAt : null,
+    source: value.source === 'agent' || value.source === 'user' ? value.source : null,
   };
 }
 
@@ -4724,26 +4767,20 @@ async function fetchSessionFlowMode(profileId: string, sessionKey: string): Prom
     `/api/codex/session-flow-mode?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`,
     { cache: 'no-store' },
   );
-  return data.flowMode || createEmptySessionFlowMode();
+  return normalizeSessionFlowModeValue(data.flowMode);
 }
 
 async function saveSessionFlowMode(
   profileId: string,
   sessionKey: string,
-  flowMode: {
-    enabled: boolean;
-    detail: FlowModeDetail;
-    brief: string;
-    document?: FlowDocument | null;
-    expectedRevision: number;
-  },
+  flowMode: FlowModeMutation,
 ): Promise<CodexSessionFlowMode> {
   const data = await fetchJson<CodexSessionFlowModeResponse>('/api/codex/session-flow-mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profileId, sessionKey, flowMode }),
   });
-  return data.flowMode || createEmptySessionFlowMode();
+  return normalizeSessionFlowModeValue(data.flowMode);
 }
 
 function unwrapPhoneStatus(value: unknown): Record<string, any> {
@@ -20698,13 +20735,7 @@ export function CodexMobileApp() {
     }
   }
 
-  async function persistSessionFlowMode(nextMode: {
-    enabled: boolean;
-    detail: FlowModeDetail;
-    brief: string;
-    document?: FlowDocument | null;
-    expectedRevision: number;
-  }): Promise<CodexSessionFlowMode> {
+  async function persistSessionFlowMode(nextMode: FlowModeMutation): Promise<CodexSessionFlowMode> {
     if (!profileId || !currentQueueKey) {
       throw new Error('לא נמצא סשן פעיל לשמירת הזרימה.');
     }
@@ -23347,7 +23378,7 @@ export function CodexMobileApp() {
             </div>
           )}
 
-          {sessionFlowMode.document && currentSessionActiveQueueCount === 0 && (
+          {sessionFlowMode.maps.length > 0 && sessionFlowMode.document && currentSessionActiveQueueCount === 0 && (
             <div className="rounded-[1.35rem] border border-teal-200 bg-gradient-to-l from-teal-50 via-white to-violet-50 px-4 py-4 text-right shadow-[0_18px_40px_-34px_rgba(13,148,136,0.55)]" dir="rtl">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-3">
@@ -23355,13 +23386,13 @@ export function CodexMobileApp() {
                     <GitBranch className="h-5 w-5" />
                   </div>
                   <div className="min-w-0">
-                    <div className="text-sm font-black text-slate-800">הזרימה מוכנה לצפייה ולעבודה</div>
-                    <div className="mt-1 text-[11px] text-slate-500">{sessionFlowMode.document.nodes.length} מודולים · {sessionFlowMode.document.edges.length} חיבורים · אפשר לערוך ולהחזיר לסוכן</div>
+                    <div className="text-sm font-black text-slate-800">{sessionFlowMode.maps.length === 1 ? 'המפה מוכנה לצפייה ולעבודה' : `${sessionFlowMode.maps.length} מפות מוכנות לעבודה`}</div>
+                    <div className="mt-1 text-[11px] text-slate-500">פעילה: {sessionFlowMode.document.title} · {sessionFlowMode.document.nodes.length} מודולים · אפשר להחליף, ליצור ולערוך</div>
                   </div>
                 </div>
                 <button type="button" onClick={openFlowModeDialog} className="flex h-11 shrink-0 items-center gap-2 rounded-full bg-teal-700 px-4 text-xs font-bold text-white transition hover:bg-teal-800 active:scale-[0.98]">
                   <Eye className="h-4 w-4" />
-                  צפה בזרימה
+                  {sessionFlowMode.maps.length === 1 ? 'צפה במפה' : 'פתח את המפות'}
                 </button>
               </div>
             </div>
@@ -23599,7 +23630,7 @@ export function CodexMobileApp() {
                     className="inline-flex max-w-full items-center gap-1 rounded-full border border-teal-200 bg-gradient-to-l from-teal-50 to-violet-50 px-3 py-1.5 text-[11px] font-medium text-teal-700 transition hover:border-teal-300"
                   >
                     <GitBranch className="h-3.5 w-3.5" />
-                    <span className="truncate">זרימה · {sessionFlowMode.document ? `${sessionFlowMode.document.nodes.length} מודולים` : 'ממתין למפה'}</span>
+                    <span className="truncate">זרימה · {sessionFlowMode.maps.length > 0 ? `${sessionFlowMode.maps.length} מפות · ${sessionFlowMode.document?.title || 'ללא מפה פעילה'}` : 'ממתין למפה'}</span>
                   </button>
                 )}
                 {sessionDesignMode.enabled && (
