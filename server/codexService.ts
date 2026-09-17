@@ -57,6 +57,7 @@ import { getCodexCliAutoUpdateSnapshot } from './codexCliAutoUpdate.js';
 import { normalizeCodexSessionRow } from './codexSessionMessages.js';
 import { walkJsonlFiles } from './codexSessionFiles.js';
 import { isolateProviderProcessEnv } from './providerProcessEnv.js';
+import { isUserSelectableCodexModel } from './codexModelVisibility.js';
 
 export interface CodexProfile {
   id: string;
@@ -4680,7 +4681,7 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
   const payload = safeJsonParse<RawCodexDebugModelsResponse>((result.stdout || '').trim());
   const rawModels = Array.isArray(payload?.models) ? payload.models : [];
   const models = rawModels
-    .filter((entry) => !['hide', 'hidden'].includes(String(entry?.visibility || '').toLowerCase()))
+    .filter(isUserSelectableCodexModel)
     .map((entry): CodexAvailableModel | null => {
       const slug = normalizeExecutionSettingValue(entry?.slug);
       if (!slug) {
