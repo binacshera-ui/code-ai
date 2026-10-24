@@ -9,8 +9,8 @@ import {
 } from './personalPortForwardBroker.js';
 
 const execFileAsync = promisify(execFile);
-const sourceSshTarget = process.env.CODE_AI_REMOTE_RELAY_TARGET || 'beam-10g';
-const sourceServerId = process.env.CODE_AI_REMOTE_RELAY_SERVER_ID || 'beam-10g';
+const sourceSshTarget = process.env.CODE_AI_REMOTE_RELAY_TARGET || 'remote-a';
+const sourceServerId = process.env.CODE_AI_REMOTE_RELAY_SERVER_ID || 'remote-a';
 const personalSshTarget = process.env.CODE_AI_PERSONAL_SSH_TARGET || 'personal-windows-ssh';
 
 function startRemoteHttp(marker: string): Promise<{ child: ChildProcessWithoutNullStreams; port: number }> {

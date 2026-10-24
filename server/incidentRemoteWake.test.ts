@@ -20,8 +20,8 @@ test('remote wake sends one token-authenticated mutation to its owner and return
       return Response.json({ ...result, private_key: token });
     }) as typeof fetch,
   });
-  assert.deepEqual(await wake('beam-10g', task), result);
-  assert.deepEqual(discovery, ['beam-10g']);
+  assert.deepEqual(await wake('remote-a', task), result);
+  assert.deepEqual(discovery, ['remote-a']);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, 'http://127.0.0.1:19223/api/codex/incident-cases/icase_remote_1/wake');
   assert.deepEqual(JSON.parse(String(requests[0].options.body)), {
@@ -53,7 +53,7 @@ test('HTTP failures preserve a safe status code without reading or exposing remo
     ensureEndpoint: async () => endpoint,
     fetch: (async () => { requests += 1; return Response.json({ error: `Authorization: Bearer ${token}` }, { status: 403 }); }) as typeof fetch,
   });
-  await assert.rejects(wake('pci', task), (error: any) => {
+  await assert.rejects(wake('remote-b', task), (error: any) => {
     assert.equal(error.message, 'incident_remote_wake_http_403');
     assert.equal(error.statusCode, 403);
     return true;
@@ -67,7 +67,7 @@ test('transport errors are sanitized and mutation acceptance is never retried au
     ensureEndpoint: async () => endpoint,
     fetch: (async () => { requests += 1; throw new Error(`x-code-ai-remote-token: ${token}`); }) as typeof fetch,
   });
-  await assert.rejects(wake('pci', task), { message: 'incident_remote_wake_failed' });
+  await assert.rejects(wake('remote-b', task), { message: 'incident_remote_wake_failed' });
   assert.equal(requests, 1);
 });
 
@@ -77,7 +77,7 @@ test('missing or credential-bearing fields are not accepted as a successful queu
       ensureEndpoint: async () => endpoint,
       fetch: (async () => Response.json(body)) as typeof fetch,
     });
-    await assert.rejects(wake('pci', task), { message: 'incident_remote_wake_response_invalid' });
+    await assert.rejects(wake('remote-b', task), { message: 'incident_remote_wake_response_invalid' });
   }
 });
 
@@ -93,7 +93,7 @@ test('the mutation has a bounded timeout and aborts without a retry', async () =
       return new Promise<Response>(() => {});
     }) as typeof fetch,
   });
-  await assert.rejects(wake('pci', task), (error: any) => error.message === 'incident_remote_wake_timeout' && error.statusCode === 504);
+  await assert.rejects(wake('remote-b', task), (error: any) => error.message === 'incident_remote_wake_timeout' && error.statusCode === 504);
   assert.equal(signal?.aborted, true);
   assert.equal(requests, 1);
 });
@@ -106,7 +106,7 @@ test('slow endpoint discovery cannot issue a late mutation after timeout', async
     ensureEndpoint: () => new Promise((resolve) => { finishDiscovery = resolve; }),
     fetch: (async () => { requests += 1; return Response.json(result); }) as typeof fetch,
   });
-  await assert.rejects(wake('pci', task), { message: 'incident_remote_wake_timeout' });
+  await assert.rejects(wake('remote-b', task), { message: 'incident_remote_wake_timeout' });
   finishDiscovery(endpoint);
   await Promise.resolve();
   await Promise.resolve();

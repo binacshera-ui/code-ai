@@ -29,12 +29,12 @@ for (const kind of ['rational', 'decision', 'focus'] as WorkModeKind[]) {
     const api = legacyEndpoint(), before = {...api.mode()};
     const draft = {...before, rationalEnabled: true, decisionEnabled: false, enabled: false, goal: 'Updated goal'};
     const patch = workModePatch(kind, draft);
-    const result = await saveWorkModePreferences(api.request, 'beam-10g', 'p', 's', patch, () => true);
+    const result = await saveWorkModePreferences(api.request, 'remote-a', 'p', 's', patch, () => true);
     assert.deepEqual(result, {...before, ...patch});
     assert.deepEqual(api.mode(), {...before, ...patch});
     assert.equal(api.calls.length, 2);
     assert.equal(api.calls[0].init?.cache, 'no-store');
-    assert.ok(api.calls.every(x => x.server === 'beam-10g'));
+    assert.ok(api.calls.every(x => x.server === 'remote-a'));
     const body = JSON.parse(String(api.calls[1].init?.body));
     assert.deepEqual(body.focusMode, {enabled: before.enabled, goal: before.goal, ...patch});
   });
@@ -42,7 +42,7 @@ for (const kind of ['rational', 'decision', 'focus'] as WorkModeKind[]) {
 
 test('reads canonical required fields rather than a stale editor snapshot', async () => {
   const api = legacyEndpoint();
-  const result = await saveWorkModePreferences(api.request, 'pci', 'p + א', 'session/א', {decisionEnabled: false}, () => true);
+  const result = await saveWorkModePreferences(api.request, 'remote-b', 'p + א', 'session/א', {decisionEnabled: false}, () => true);
   assert.equal(result?.goal, 'Preserve engineering goal');
   assert.equal(result?.enabled, true);
   const query = new URL(api.calls[0].url, 'https://example.test').searchParams;

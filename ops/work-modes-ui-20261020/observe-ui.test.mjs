@@ -1,5 +1,0 @@
-import test from'node:test';import assert from'node:assert/strict';import{createHash}from'node:crypto';import{observeUi}from'./observe-ui.mjs';
-const hash=s=>createHash('sha256').update(s).digest('hex');
-test('a known old shell is a bounded transition, not immediate failure',async()=>{let count=0;const result=await observeUi('http://test',hash('new'),hash('old'),{fetch:async()=>new Response(++count<3?'old':'new'),pause:async()=>{}});assert.equal(result.attempts,3);});
-test('an unknown shell or a real HTTP error is never masked as a handoff',async()=>{await assert.rejects(observeUi('http://test',hash('new'),hash('old'),{fetch:async()=>new Response('bad')}));await assert.rejects(observeUi('http://test',hash('new'),hash('old'),{fetch:async()=>new Response('missing',{status:404})}));});
-test('a permanently old shell times out without an endless retry loop',async()=>{let clock=0;await assert.rejects(observeUi('http://test',hash('new'),hash('old'),{fetch:async()=>new Response('old'),timeoutMs:2,now:()=>clock++,pause:async()=>{}}));assert.ok(clock<10);});

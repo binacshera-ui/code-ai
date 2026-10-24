@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import WebSocket from 'ws';
-import { nativeOwnerArguments } from '../ops/native-owner/profile-artifacts.mjs';
+import { nativeOwnerArguments } from '../server/nativeOwnerProfile.mjs';
 
 let root, owner, ws;
 try {

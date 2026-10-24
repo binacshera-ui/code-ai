@@ -10,7 +10,7 @@ This file is the operator handoff for `code-ai`.
 
 The canonical public source repository is https://github.com/binacshera-ui/code-ai (`origin`, `main`). After completing an authorized code change, commit the relevant current source and push it there as part of delivery. Preserve concurrent edits and remote history; never force-push. A successful deployment is not evidence that source was pushed: verify the remote commit separately.
 
-Do not publish `.env`, device passwords, tokens, private keys, provider credentials, conversation data, runtime state, deployment receipts, backups, generated releases, or machine-specific symlinks. Operator source scripts may be published; their private input/output artifacts stay local. Configure credentials through environment/private pairing files, never hardcoded credential defaults. Inspect publication candidates for secrets before pushing.
+Do not publish `.env`, device passwords, tokens, private keys, provider credentials, conversation data, runtime state, deployment receipts, backups, generated releases, or machine-specific symlinks. Host-specific operator scripts, private integrations and their input/output artifacts stay outside the public repository. Configure credentials through environment/private pairing files, never hardcoded credential defaults. Inspect publication candidates for secrets before pushing.
 
 `code-ai` is a shared mobile workspace for 3 provider CLIs:
 

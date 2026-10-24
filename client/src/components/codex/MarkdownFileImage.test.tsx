@@ -6,7 +6,7 @@ import { HtmlFilePreview } from './HtmlFilePreview';
 import { MarkdownFileImage, MarkdownImageLinkContext } from './MarkdownFileImage';
 import { markdownFileUrlTransform } from './markdownFiles';
 
-function renderMarkdownImage(text: string, serverId = 'beam', cwd = '/root/design') {
+function renderMarkdownImage(text: string, serverId = 'beam', cwd = '/workspace/design') {
   return renderToStaticMarkup(
     <ReactMarkdown
       urlTransform={markdownFileUrlTransform}
@@ -18,7 +18,7 @@ function renderMarkdownImage(text: string, serverId = 'beam', cwd = '/root/desig
 }
 
 test('the real Markdown pipeline renders an absolute local screenshot inline through the authorized route', () => {
-  const markup = renderMarkdownImage('![צילום מסך](/root/projects/business/projects/05/design-lab/dab-crm/screenshots/crm-exact-rtl.png)');
+  const markup = renderMarkdownImage('![צילום מסך](/workspace/projects/business/projects/05/design-lab/dab-crm/screenshots/crm-exact-rtl.png)');
   assert.match(markup, /<img[^>]+src="\/api\/codex\/files\/content\?path=%2Froot%2Fprojects%2Fbusiness%2Fprojects%2F05%2Fdesign-lab%2Fdab-crm%2Fscreenshots%2Fcrm-exact-rtl.png&amp;server=beam"/);
   assert.match(markup, /alt="צילום מסך"/);
   assert.match(markup, /loading="lazy"/);
@@ -28,14 +28,14 @@ test('the real Markdown pipeline renders an absolute local screenshot inline thr
 });
 
 test('file URIs, Windows drives and relative images survive ReactMarkdown transform safely', () => {
-  assert.match(renderMarkdownImage('![URI](file:///root/design/crm.png)'), /path=%2Froot%2Fdesign%2Fcrm.png/);
+  assert.match(renderMarkdownImage('![URI](file:///workspace/design/crm.png)'), /path=%2Froot%2Fdesign%2Fcrm.png/);
   assert.match(renderMarkdownImage('![Windows](C:/Users/Dev/crm.png)'), /path=C%3A%2FUsers%2FDev%2Fcrm.png/);
   assert.match(renderMarkdownImage('![יחסי](screenshots/crm.png)'), /path=%2Froot%2Fdesign%2Fscreenshots%2Fcrm.png/);
 });
 
 test('identical Markdown on another server never reuses the original server content URL', () => {
-  const local = renderMarkdownImage('![תמונה](/root/design/crm.png)', 'local');
-  const remote = renderMarkdownImage('![תמונה](/root/design/crm.png)', 'beam');
+  const local = renderMarkdownImage('![תמונה](/workspace/design/crm.png)', 'local');
+  const remote = renderMarkdownImage('![תמונה](/workspace/design/crm.png)', 'beam');
   assert.match(local, /server=local/);
   assert.match(remote, /server=beam/);
   assert.notEqual(local, remote);
@@ -62,7 +62,7 @@ test('already-authorized Markdown media URLs are also scoped to the message sour
 test('linked images do not create nested interactive buttons', () => {
   const markup = renderToStaticMarkup(
     <MarkdownImageLinkContext.Provider value={true}>
-      <button type="button"><MarkdownFileImage src="/root/crm.png" alt="תמונה" serverId="beam" onOpenFilePreview={() => undefined} /></button>
+      <button type="button"><MarkdownFileImage src="/workspace/crm.png" alt="תמונה" serverId="beam" onOpenFilePreview={() => undefined} /></button>
     </MarkdownImageLinkContext.Provider>
   );
   assert.equal((markup.match(/<button/g) || []).length, 1);

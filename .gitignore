@@ -1,5 +1,6 @@
 # Dependencies and generated releases
 node_modules/
+/node_modules
 dist/
 dist.before-*/
 .deploy-releases/
@@ -25,26 +26,13 @@ __pycache__/
 .cache/
 .vite/
 
-# Do not publish runtime symlinks, temporary bundles or operator receipts.
-/dist
+# Private host operations and generated artifacts never enter the source repository.
+/ops/
+/.private/
 /.question-image-test-build/
-/ops/**
-!/ops/**/
-!/ops/**/*.mjs
-!/ops/**/*.ts
-!/ops/**/*.py
-!/ops/**/*.ps1
-!/ops/**/*.sh
-!/ops/**/*.vbs
+/MIGRATION-RECEIPT.md
+/deploy/code-ai/standalone-private-identifiers.txt
 *.pem
 *.key
 *.p12
 *.pfx
-
-# Historical host-local aliases; their canonical source is under server/.
-/ops/fleet-update-20261014/codexNativeTransport.mjs
-/ops/fleet-update-20261014/codexRpcDiagnostic.mjs
-/ops/fleet-update-20261014/codexSharedHistory.mjs
-/ops/fleet-update-20261014/codexSharedSubmission.mjs
-/ops/fleet-update-20261014/codexUserInput.ts
-/ops/fleet-update-20261014/providerProcessLifecycle.ts

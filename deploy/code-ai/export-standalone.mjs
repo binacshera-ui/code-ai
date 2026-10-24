@@ -222,6 +222,13 @@ async function main() {
     'chrome-extension',
     'skills',
     'scripts',
+    'README.md',
+    '.env.paths.example',
+    'PUBLIC-SOURCE.md',
+    '.gitignore',
+    '.github',
+    'docs',
+    'ui-copy',
     '.env.example',
     'LICENSE',
     'AGENT.md',
@@ -247,8 +254,9 @@ async function main() {
   await sanitizePackageJson(outputDir);
   await writeStandaloneApp(outputDir);
 
-  await writeFile(path.join(outputDir, '.gitignore'), 'node_modules\ndist\n.env\n.code-ai\n__pycache__\n*.pyc\n', 'utf8');
-  await cp(path.join(APP_ROOT, 'deploy/code-ai/README.md'), path.join(outputDir, 'README.md'));
+  if (!existsSync(path.join(outputDir, 'README.md'))) {
+    await cp(path.join(APP_ROOT, 'deploy/code-ai/README.md'), path.join(outputDir, 'README.md'));
+  }
   await cp(path.join(APP_ROOT, 'deploy/code-ai/README.he.md'), path.join(outputDir, 'README.he.md'));
 
   await writeRootWrapper(outputDir, 'install.sh', `#!/usr/bin/env bash
@@ -293,8 +301,10 @@ if ($LASTEXITCODE -ne 0) {
 
   if (gitInit && existsSync(outputDir)) {
     spawnSync('git', ['init'], { cwd: outputDir, stdio: 'ignore' });
+    const check = spawnSync(process.execPath, ['scripts/check-public-source.mjs'], { cwd: outputDir, stdio: 'inherit' });
+    if (check.status !== 0) throw new Error('Public source check failed; export was not committed');
     spawnSync('git', ['add', '.'], { cwd: outputDir, stdio: 'ignore' });
-    spawnSync('git', ['commit', '-m', 'Initial code-ai standalone export'], { cwd: outputDir, stdio: 'ignore' });
+    spawnSync('git', ['-c', 'user.name=Code AI contributors', '-c', 'user.email=contributors@code-ai.invalid', 'commit', '-m', 'Initial code-ai standalone export'], { cwd: outputDir, stdio: 'ignore' });
   }
 
   console.log(`Standalone export created at: ${outputDir}`);

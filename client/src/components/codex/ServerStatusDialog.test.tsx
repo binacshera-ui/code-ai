@@ -5,16 +5,16 @@ import type { ServerStatusSnapshot } from '../../../../shared/serverStatus';
 import { ServerStatusDialog, ServerStatusView } from './ServerStatusDialog';
 
 const snapshot: ServerStatusSnapshot = {
-  version: 1, hostname: 'germany-main', platform: 'linux', sampledAt: '2026-10-21T12:00:00Z', sampleIntervalMs: 2000, uptimeSeconds: 3600,
+  version: 1, hostname: 'example-server', platform: 'linux', sampledAt: '2026-10-21T12:00:00Z', sampleIntervalMs: 2000, uptimeSeconds: 3600,
   cpu: { model: 'Test CPU', logicalCores: 2, usedPercent: 25, freePercent: 75, cores: [30, 20], loadAverage: [1, 2, 3] },
   memory: { totalBytes: 1024 ** 3 * 64, usedBytes: 1024 ** 3 * 16, availableBytes: 1024 ** 3 * 48, freeBytes: 1024 ** 3 * 8, cacheBytes: 1024 ** 3 * 40, usedPercent: 25, swapTotalBytes: 1024 ** 3 * 2, swapUsedBytes: 0 },
-  storage: { sampledAt: '2026-10-21T12:00:00Z', volumes: [{ device: '/dev/md2', mount: '/', filesystem: 'ext4', medium: 'nvme', totalBytes: 1024 ** 4 * 2, usedBytes: 1024 ** 4, availableBytes: 1024 ** 4 - 1024, reservedBytes: 1024, usedPercent: 50 }, { device: '/dev/md127', mount: '/mnt/hdd', filesystem: 'ext4', medium: 'hdd', totalBytes: 1024 ** 4 * 12, usedBytes: 1024 ** 4 * 7, availableBytes: 1024 ** 4 * 5, reservedBytes: 0, usedPercent: 7 / 12 * 100 }] },
+  storage: { sampledAt: '2026-10-21T12:00:00Z', volumes: [{ device: '/dev/md2', mount: '/', filesystem: 'ext4', medium: 'nvme', totalBytes: 1024 ** 4 * 2, usedBytes: 1024 ** 4, availableBytes: 1024 ** 4 - 1024, reservedBytes: 1024, usedPercent: 50 }, { device: '/dev/md127', mount: '/mnt/data', filesystem: 'ext4', medium: 'hdd', totalBytes: 1024 ** 4 * 12, usedBytes: 1024 ** 4 * 7, availableBytes: 1024 ** 4 * 5, reservedBytes: 0, usedPercent: 7 / 12 * 100 }] },
   network: [{ name: 'enp4s0', isDefault: true, state: 'up', linkSpeedMbps: 1000, receivedBytes: 1024 ** 3, transmittedBytes: 1024 ** 2, receiveBytesPerSecond: 1024 ** 2, transmitBytesPerSecond: 1024 }], warnings: [],
 };
 
 test('real metrics expose separate media, CPU free, RAM available and measured network rate', () => {
   const html = renderToStaticMarkup(<ServerStatusView snapshot={snapshot} history={[snapshot]} />);
-  for (const text of ['germany-main', 'NVMe', 'HDD', 'SSD', 'אחר / לא מזוהה', '75.0%', '48 GiB', '1 MiB/s', '1,000 Mbps', '/mnt/hdd', '/dev/md127']) assert.ok(html.includes(text), text);
+  for (const text of ['example-server', 'NVMe', 'HDD', 'SSD', 'אחר / לא מזוהה', '75.0%', '48 GiB', '1 MiB/s', '1,000 Mbps', '/mnt/data', '/dev/md127']) assert.ok(html.includes(text), text);
   assert.ok(html.includes('ליבה 1') && html.includes('ליבה 2'));
   assert.ok(html.includes('לא בדיקת מהירות') && html.includes('ממשקים אינם נסכמים'));
   assert.ok(html.includes('לפני RAID') && html.includes('שמור למערכת'));
@@ -52,6 +52,6 @@ test('dialog has accessible title/description/close/retry and begins empty, scop
   assert.ok(html.includes('data-server-id="local"') && html.includes('השרת בגרמניה'));
   assert.ok(html.includes('סגור מצב שרת') && html.includes('רענן מצב שרת'));
   assert.ok(html.includes('ממתין למדידה אמיתית') && html.includes('לא מוצגים ערכי הדגמה'));
-  assert.ok(!html.includes('germany-main') && !html.includes('data-testid="server-status-metrics"'));
+  assert.ok(!html.includes('example-server') && !html.includes('data-testid="server-status-metrics"'));
   assert.ok(html.includes('max-h-[94dvh]') && html.includes('min-h-0 overflow-y-auto'));
 });

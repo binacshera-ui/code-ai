@@ -8,14 +8,14 @@ const token = Buffer.from(base).toString('base64url');
 const record = (resolvedPath: string) => ({ kind: 'file', file: { resolvedPath } }) as CodexFileResolution;
 
 test('file media routing is narrow, valid and source-specific', () => {
-  assert.equal(readCodexFileSourceServer('GET', '/files/content', 'pci'), 'pci');
+  assert.equal(readCodexFileSourceServer('GET', '/files/content', 'remote-b'), 'remote-b');
   assert.equal(readCodexFileSourceServer('HEAD', '/files/download', 'bm'), 'bm');
-  assert.equal(readCodexFileSourceServer('GET', `/files/asset/pci/${token}/index.html`, undefined), 'pci');
+  assert.equal(readCodexFileSourceServer('GET', `/files/asset/remote-b/${token}/index.html`, undefined), 'remote-b');
   for (const route of ['/sessions', '/files/logs', '/files/preview', '/device-unlock']) {
-    assert.equal(readCodexFileSourceServer('GET', route, 'pci'), '');
+    assert.equal(readCodexFileSourceServer('GET', route, 'remote-b'), '');
   }
-  assert.equal(readCodexFileSourceServer('POST', '/files/content', 'pci'), '');
-  assert.equal(readCodexFileSourceServer('GET', '/files/content', '../pci'), '');
+  assert.equal(readCodexFileSourceServer('POST', '/files/content', 'remote-b'), '');
+  assert.equal(readCodexFileSourceServer('GET', '/files/content', '../remote-b'), '');
 });
 
 test('HTML namespace authorizes the base and each nested asset', async () => {

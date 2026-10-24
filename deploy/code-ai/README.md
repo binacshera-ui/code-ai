@@ -11,7 +11,7 @@ It is designed for operators who want one clean control plane for conversations,
 ## Product Preview
 
 <p align="center">
-  <img src="deploy/code-ai/assets/readme/topic-management.png" alt="Topic management" width="24%" />
+  <img src="deploy/code-ai/assets/readme/public-modes.png" alt="Work modes" width="24%" />
   <img src="deploy/code-ai/assets/readme/history-panel.png" alt="Session history" width="24%" />
   <img src="deploy/code-ai/assets/readme/quick-actions.png" alt="Quick actions" width="24%" />
   <img src="deploy/code-ai/assets/readme/model-panel.png" alt="Model and permissions panel" width="24%" />

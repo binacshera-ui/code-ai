@@ -142,7 +142,6 @@ interface ClaudeActiveRun {
 const DEFAULT_CLAUDE_BIN_CANDIDATES = [
   process.env.CLAUDE_BIN?.trim(),
   'claude',
-  '/home/developer/.vscode-server/extensions/anthropic.claude-code-2.1.126-linux-x64/resources/native-binary/claude',
 ].filter((value): value is string => Boolean(value));
 const CLAUDE_BIN = DEFAULT_CLAUDE_BIN_CANDIDATES.find((candidate) => candidate.includes('/') ? existsSync(candidate) : false)
   || DEFAULT_CLAUDE_BIN_CANDIDATES[0]

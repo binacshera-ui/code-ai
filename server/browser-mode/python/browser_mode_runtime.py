@@ -740,27 +740,6 @@ class BrowserRuntime:
 
         return self._dispatch_action_internal(name, payload)
 
-    # standalone-strip:start private-runtime-integration
-    def dispatch_control_action(self, name: str, arguments: dict | None = None) -> dict:
-        """Run a Code-AI-owned control action that is never exposed as an MCP tool."""
-        payload = dict(arguments or {})
-        if threading.get_ident() != self._owner_thread_id:
-            request = BridgeDispatchRequest(name=name, payload=payload, is_control=True)
-            self._bridge_requests.put(request)
-            if not request.done.wait(timeout=120):
-                raise BrowserRuntimeError(
-                    "BROWSER_MODE_RUNTIME_TIMEOUT",
-                    False,
-                    504,
-                    f"Timed out waiting for browser control action: {name}",
-                    "Restart the browser-mode session and retry the secure connection.",
-                )
-            if request.error is not None:
-                raise request.error
-            return request.result or {}
-
-        return self._dispatch_control_action_internal(name, payload)
-    # standalone-strip:end private-runtime-integration
 
     def _dispatch_action_internal(self, name: str, payload: dict[str, Any]) -> dict:
         with self._dispatch_lock:
@@ -797,99 +776,6 @@ class BrowserRuntime:
                     pass
             return result
 
-    # standalone-strip:start private-runtime-integration
-    def _dispatch_control_action_internal(self, name: str, payload: dict[str, Any]) -> dict:
-        with self._dispatch_lock:
-            if name != "sync_bina_session":
-                raise BrowserRuntimeError(
-                    "BROWSER_CONTROL_VALIDATION_FAILED",
-                    False,
-                    400,
-                    "Unsupported private browser control action.",
-                    "Use a supported Code-AI browser control action.",
-                )
-            return self._sync_bina_session(payload)
-
-    def _sync_bina_session(self, payload: dict[str, Any]) -> dict:
-        forum_session = payload.get("forum_session")
-        runtime_session = payload.get("runtime_session")
-        if forum_session is not None and not isinstance(forum_session, str):
-            raise BrowserRuntimeError(
-                "BROWSER_CONTROL_VALIDATION_FAILED",
-                False,
-                400,
-                "The Bina session value must be a string or null.",
-                "Send a validated central session value or request a session clear.",
-            )
-        if runtime_session is not None and not isinstance(runtime_session, str):
-            raise BrowserRuntimeError(
-                "BROWSER_CONTROL_VALIDATION_FAILED",
-                False,
-                400,
-                "The Bina runtime session value must be a string or null.",
-                "Send a server-issued Bina runtime session or request a session clear.",
-            )
-
-        normalized_session = forum_session.strip() if isinstance(forum_session, str) else ""
-        normalized_runtime_session = runtime_session.strip() if isinstance(runtime_session, str) else ""
-        if len(normalized_session) > 8192 or any(character in normalized_session for character in ("\r", "\n", "\0", ";")):
-            raise BrowserRuntimeError(
-                "BROWSER_CONTROL_VALIDATION_FAILED",
-                False,
-                400,
-                "The Bina session value is not a valid cookie value.",
-                "Validate the central session before installing it.",
-            )
-        if normalized_runtime_session and not re.fullmatch(
-            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-            normalized_runtime_session,
-        ):
-            raise BrowserRuntimeError(
-                "BROWSER_CONTROL_VALIDATION_FAILED",
-                False,
-                400,
-                "The Bina runtime session value is invalid.",
-                "Use a session issued by the Bina runtime SSO endpoint.",
-            )
-
-        session = self._ensure_session()
-        session.context.clear_cookies(
-            name="forum.session",
-            domain=re.compile(r"(^|\.)bina-cshera\.co\.il$"),
-            path="/",
-        )
-        session.context.clear_cookies(
-            name="bina_rt_sid",
-            domain="app.bina-cshera.co.il",
-            path="/",
-        )
-        if normalized_session:
-            session.context.add_cookies([{
-                "name": "forum.session",
-                "value": normalized_session,
-                "domain": ".bina-cshera.co.il",
-                "path": "/",
-                "httpOnly": True,
-                "secure": True,
-                "sameSite": "Lax",
-            }])
-        if normalized_runtime_session:
-            session.context.add_cookies([{
-                "name": "bina_rt_sid",
-                "value": normalized_runtime_session,
-                "domain": "app.bina-cshera.co.il",
-                "path": "/",
-                "httpOnly": True,
-                "secure": True,
-                "sameSite": "Lax",
-            }])
-
-        return {
-            "connected": bool(normalized_session or normalized_runtime_session),
-            "legacyConnected": bool(normalized_session),
-            "runtimeConnected": bool(normalized_runtime_session),
-        }
-    # standalone-strip:end private-runtime-integration
 
     def process_bridge_requests(self, max_requests: int = 8) -> int:
         processed = 0
@@ -2423,9 +2309,6 @@ class BrowserRuntime:
                     self._write_json({"ok": False, "error": {"message": "Unauthorized browser bridge request."}}, 401)
                     return
                 allowed_paths = {"/call"}
-                # standalone-strip:start private-runtime-integration
-                allowed_paths.add("/control/bina-session")
-                # standalone-strip:end private-runtime-integration
                 if self.path not in allowed_paths:
                     self.send_response(404)
                     self.end_headers()
@@ -2437,15 +2320,6 @@ class BrowserRuntime:
                 raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
                 try:
                     payload = json.loads(raw.decode("utf-8") or "{}")
-                    # standalone-strip:start private-runtime-integration
-                    if self.path == "/control/bina-session":
-                        result = runtime.dispatch_control_action("sync_bina_session", {
-                            "forum_session": payload.get("forumSession"),
-                            "runtime_session": payload.get("runtimeSession"),
-                        })
-                        self._write_json({"ok": True, "result": result}, 200)
-                        return
-                    # standalone-strip:end private-runtime-integration
                     name = payload.get("name")
                     if not isinstance(name, str) or not name.strip():
                         raise BrowserRuntimeError(

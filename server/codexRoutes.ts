@@ -2,7 +2,7 @@ import { getCodeAiRuntimeHealth } from './codexRuntimeHealth.mjs';
 import { createHmac, timingSafeEqual, randomUUID } from 'crypto';
 import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
-import { hostname } from 'os';
+import { hostname, homedir } from 'os';
 import path from 'path';
 import { promisify } from 'util';
 import { Router, Request, Response, NextFunction } from 'express';
@@ -236,9 +236,6 @@ import {
   performSessionBrowserViewerAction,
   queueSessionBrowserViewerInput,
   resolveSessionBrowserViewerFramePath,
-  // standalone-strip:start private-runtime-integration
-  syncSessionBrowserViewerBinaAuth,
-  // standalone-strip:end private-runtime-integration
 } from './codexBrowserViewer.js';
 import {
   copySessionReminders,
@@ -290,22 +287,12 @@ import {
   resolveSupportProfileSelection,
   type SupportPromptEnvelope,
 } from './supportAgentService.js';
-// standalone-strip:start private-incident-center
 import {
   buildIncidentDecisionCenterHtml,
   createIncidentDecisionCenterService,
   type IncidentCaseMessageAuthor,
 } from './incidentDecisionCenter.js';
-// standalone-strip:end private-incident-center
 import { deleteSessionChangeRecords } from './sessionChangeTracker.js';
-// standalone-strip:start private-runtime-integration
-import {
-  isSafeForumSessionCookie,
-  readRawCookieValue,
-  validateBinaForumSession,
-} from './binaSso.js';
-import { issueBinaRuntimeWorkbenchSession } from './binaRuntimeSso.js';
-// standalone-strip:end private-runtime-integration
 import { decodeMultipartFileName } from './fileNameNormalizer.js';
 import {
   listCodeAiServers,
@@ -330,9 +317,7 @@ router.use((req, res, next) => {
   }
   next();
 });
-// standalone-strip:start private-incident-center
 const incidentDecisionCenter = createIncidentDecisionCenterService();
-// standalone-strip:end private-incident-center
 const RECURRING_FREQUENCIES = new Set(['daily', 'weekly']);
 const CODEX_CLIENT_LOG_ROOT = path.dirname(CLIENT_CRASH_LOG);
 const CODEX_CLIENT_LOG_FILE = CLIENT_CRASH_LOG;
@@ -1439,7 +1424,7 @@ async function buildAnnotationsModeQueueSpecs(
       prompt: [
         `בדוק כעת מקצה לקצה את "${trimmedGoal}" וכתוב דוח ביאורים מלא לקובץ Markdown.`,
         'חובה לעבוד עם הסקיל הבא ולציית למבנה העבודה שלו:',
-        '/home/developer/.codex/skills/hebrew-code-change-report/SKILL.md',
+        path.join(homedir(), '.codex', 'skills', 'hebrew-code-change-report', 'SKILL.md'),
         `צור או עדכן את הקובץ הבא וכתוב בו את הדוח המלא בעברית:\n${reportPath}`,
         'הדוח חייב לכלול לכל הפחות:',
         '- תקציר מנהלים קצר וברור',
@@ -4317,97 +4302,6 @@ router.get('/session-browser-viewer', requireCodexAccess, async (req, res) => {
   }
 });
 
-// standalone-strip:start private-runtime-integration
-router.post('/session-browser-viewer/bina-sso', requireCodexAccess, async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
-  let cleanupProfile: ReturnType<typeof findConfiguredProfile> = undefined;
-  let cleanupSessionKey: string | null = null;
-  try {
-    const profileId = typeof req.body?.profileId === 'string' && req.body.profileId.trim()
-      ? req.body.profileId.trim()
-      : undefined;
-    const sessionKey = typeof req.body?.sessionKey === 'string' && req.body.sessionKey.trim()
-      ? req.body.sessionKey.trim()
-      : undefined;
-
-    if (!profileId || !sessionKey) {
-      res.status(400).json({ error: 'Profile id and session key are required' });
-      return;
-    }
-
-    const secFetchSite = typeof req.headers['sec-fetch-site'] === 'string'
-      ? req.headers['sec-fetch-site'].toLowerCase()
-      : '';
-    if (secFetchSite && secFetchSite !== 'same-origin') {
-      res.status(403).json({ error: 'The secure Bina connection must originate from this Workbench' });
-      return;
-    }
-    const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
-    if (requestOrigin) {
-      let originHost = '';
-      try {
-        originHost = new URL(requestOrigin).host.toLowerCase();
-      } catch {
-        res.status(403).json({ error: 'The secure Bina connection has an invalid origin' });
-        return;
-      }
-      if (originHost !== readRequestHost(req)) {
-        res.status(403).json({ error: 'The secure Bina connection must originate from this Workbench' });
-        return;
-      }
-    }
-
-    const configuredProfile = findConfiguredProfile(profileId);
-    if (!configuredProfile) {
-      res.status(404).json({ error: 'The selected profile was not found' });
-      return;
-    }
-    cleanupProfile = configuredProfile;
-    cleanupSessionKey = sessionKey;
-    const browserMode = await getSessionBrowserMode(profileId, sessionKey);
-    if (browserMode.enabled !== true) {
-      res.status(409).json({ error: 'Browser mode must be enabled before connecting the Bina session' });
-      return;
-    }
-
-    const runtimeConnection = await issueBinaRuntimeWorkbenchSession({ profileId, sessionKey });
-    const rawForumSession = readRawCookieValue(req.headers.cookie, FORUM_SESSION_COOKIE);
-    let validatedForumSession: string | null = null;
-    if (isSafeForumSessionCookie(rawForumSession)) {
-      try {
-        const legacyValidation = await validateBinaForumSession(rawForumSession);
-        if (legacyValidation.authenticated) validatedForumSession = rawForumSession;
-      } catch (legacyError: any) {
-        console.warn('[workbench-bina-sso] Legacy Bina session verification was skipped', {
-          message: legacyError?.message || 'unknown error',
-        });
-      }
-    }
-
-    const connection = await syncSessionBrowserViewerBinaAuth(configuredProfile, sessionKey, {
-      forumSession: validatedForumSession,
-      runtimeSession: runtimeConnection.runtimeSession,
-    });
-    res.json({
-      connected: connection.runtimeConnected,
-      legacyConnected: connection.legacyConnected,
-      runtimeConnected: connection.runtimeConnected,
-      source: 'bina-runtime-sso',
-    });
-  } catch (error: any) {
-    if (cleanupProfile && cleanupSessionKey) {
-      await syncSessionBrowserViewerBinaAuth(cleanupProfile, cleanupSessionKey, {
-        forumSession: null,
-        runtimeSession: null,
-      }).catch(() => undefined);
-    }
-    console.warn('[workbench-bina-sso] Secure session synchronization failed', {
-      message: error?.message || 'unknown error',
-    });
-    res.status(502).json({ error: 'The secure Bina connection could not be verified' });
-  }
-});
-// standalone-strip:end private-runtime-integration
 
 router.post('/session-browser-viewer/inspect', requireCodexAccess, async (req, res) => {
   try {
@@ -7015,7 +6909,6 @@ async function handleSupportAskRequest(
   }
 }
 
-// standalone-strip:start private-incident-center
 function readIncidentString(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
@@ -7389,7 +7282,6 @@ router.post('/incident-cases/:caseId/actions', requireCodexAccess, async (req, r
 router.post('/incident-cases/:caseId/messages/webhook', requireSupportWebhookAccess, async (req, res) => {
   await handleIncidentCaseMessageRequest(req, res, 'investigator');
 });
-// standalone-strip:end private-incident-center
 
 router.post('/support/ask', requireCodexAccess, async (req, res) => {
   await handleSupportAskRequest(req, res, 'api');

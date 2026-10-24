@@ -10,13 +10,13 @@ const parsed = postcss.parse(css);
 const root = parsed.nodes.find(node => node.type === 'rule' && node.selector === '.code-ai-theme-dark');
 const tokens = Object.fromEntries(root.nodes.filter(node => node.type === 'decl').map(node => [node.prop, node.value]));
 
-test('dark tokens follow the canonical Bina 3.0 neutral palette', () => {
+test('dark tokens follow the neutral charcoal palette', () => {
   for (const [name, expected] of Object.entries({ 'canvas-bg': '#0a0a0a', 'panel-bg': '#171717', 'soft-strong-bg': '#262626',
     'panel-border': '#333333', 'canvas-text': '#ededed', 'text-faint': '#a3a3a3' })) assert.equal(tokens['--code-ai-' + name], expected);
   assert.equal(tokens['color-scheme'], 'dark');
   assert.ok(root.nodes.find(n => n.prop === 'background').important, 'root must beat historical slate utility');
 });
-test('theme rules are scoped to dark Code-AI, never the Bina shell, light mode or document/canvas assets', () => {
+test('theme rules are scoped to dark Code-AI, never the application shell, light mode or document/canvas assets', () => {
   parsed.walkRules(rule => { assert.ok(rule.selector.startsWith('.code-ai-theme-dark'), rule.selector); });
   assert.ok(!css.includes('.code-ai-theme-light') && !css.includes('canvas {') && !css.includes('img {'));
   assert.ok(!/#(?:020617|0f172a|1e293b|111827|334155)\b/i.test(css), 'navy palette must not survive in the new theme');

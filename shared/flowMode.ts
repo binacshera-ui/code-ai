@@ -303,7 +303,7 @@ export function normalizeFlowDocument(input: unknown, now = new Date().toISOStri
 
 export function extractFlowDocumentsFromText(value: string): FlowDocument[] {
   const documents: FlowDocument[] = [];
-  const fencePattern = /```(?:bina-flow|bina_flow|flow-json)\s*([\s\S]*?)```/gi;
+  const fencePattern = /```(?:code-ai-flow|code_ai_flow|flow-json)\s*([\s\S]*?)```/gi;
   let match: RegExpExecArray | null;
   while ((match = fencePattern.exec(value)) !== null) {
     try {
@@ -317,7 +317,7 @@ export function extractFlowDocumentsFromText(value: string): FlowDocument[] {
 
 export function stripFlowDocumentBlocks(value: string): string {
   return value
-    .replace(/```(?:bina-flow|bina_flow|flow-json)\s*[\s\S]*?```/gi, '\n\n_מפת הזרימה נשמרה בקנבס החזותי של השיחה._')
+    .replace(/```(?:code-ai-flow|code_ai_flow|flow-json)\s*[\s\S]*?```/gi, '\n\n_מפת הזרימה נשמרה בקנבס החזותי של השיחה._')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }

@@ -1,4 +1,4 @@
-/* Code-AI dark theme, using Bina Cshera 3.0's neutral charcoal palette.
+/* Code-AI dark theme, using a neutral charcoal palette.
  * One theme boundary: light presets, domain accents and canvas pixels stay intact.
  * Legacy neutral utilities are mapped here until their components use tokens. */
 .code-ai-theme-dark {

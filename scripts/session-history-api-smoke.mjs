@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, appendFile } from 'node:fs/pro
 import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import net from 'node:net';
+import { createCodexDeploymentDrain } from '../server/codexDeploymentDrain.mjs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -41,6 +42,8 @@ const before = await readFile(historyPath);
 const reservation = net.createServer(); reservation.listen(0, '127.0.0.1'); await once(reservation, 'listening');
 const port = reservation.address().port; await new Promise(resolve => reservation.close(resolve));
 const origin = `http://127.0.0.1:${port}`;
+// The passive HTTP candidate needs a synthetic admission owner; it never executes provider work.
+const admission = createCodexDeploymentDrain({ queueRoot: path.join(storage, 'queue'), requiredParticipants: [] });
 let child, log = '', cookie = '';
 const env = {
   ...process.env, PORT: String(port), HOST: '127.0.0.1', NODE_ENV: 'test',
@@ -66,6 +69,7 @@ async function request(route, expected = 200, method = 'GET', body) {
   return response.json();
 }
 try {
+  await admission.startController();
   child = spawn(process.execPath, ['dist/server.js'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', chunk => { log = (log + chunk).slice(-5000); });
   child.stderr.on('data', chunk => { log = (log + chunk).slice(-5000); });
@@ -95,5 +99,6 @@ try {
   console.log(JSON.stringify({ ok: true, checks: ['detached HDD archive', 'SQL projection', 'visible tools and messages', 'pagination', 'profile isolation', 'blocked mutation', 'provider data unchanged', 'live append'] }));
 } finally {
   if (child && child.exitCode === null) { const exit = once(child, 'exit'); child.kill('SIGTERM'); await exit; }
+  await admission.stopController();
   await rm(temporary, { recursive: true, force: true });
 }

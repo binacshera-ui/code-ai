@@ -1,9 +1,0 @@
-import test from 'node:test';import assert from 'node:assert/strict';
-import{isIdle,idleTransaction}from'./idle-contract.mjs';
-const fixture=()=>({profiles:[{threads:[{status:'idle',queued:0,activeGoal:false,backgroundTerminals:0}],journal:[{phase:'uncertain',turnComplete:false,terminalProved:true}]}],queue:[{status:'queued',nativeSubmission:null},{status:'scheduled'}]});
-test('exact terminal custody allows recovery without declaring an uncertain input failed',()=>{const f=fixture();assert.equal(isIdle(f.profiles,f.queue),true);f.profiles[0].journal[0].terminalProved=false;assert.equal(isIdle(f.profiles,f.queue),false);});
-test('native activity, background terminals, goals and accepted app input always block owner restart',()=>{
- for(const mutate of [f=>f.profiles[0].threads[0].status='active',f=>f.profiles[0].threads[0].backgroundTerminals=1,f=>f.profiles[0].threads[0].activeGoal=true,f=>f.profiles[0].threads[0].queued=1,f=>f.queue[0].nativeSubmission={clientUserMessageId:'exact'},f=>f.queue[0].status='running']){const f=fixture();mutate(f);assert.equal(isIdle(f.profiles,f.queue),false);}
-});
-test('admission race thaws the original generations and never replaces owner',async()=>{const f=fixture();let calls=0,thawed=false;const r=await idleTransaction({census:async()=>{const c=fixture();if(++calls>1)c.profiles[0].threads[0].status='active';return c;},freeze:async()=>['exact'],thaw:async x=>{assert.deepEqual(x,['exact']);thawed=true;},replace:async()=>assert.fail()});assert.equal(r.applied,false);assert.equal(thawed,true);});
-test('successful and failed replacements both release only the exact fence',async()=>{for(const fail of [false,true]){let thawed=0;const promise=idleTransaction({census:async()=>fixture(),freeze:async()=>['generation'],thaw:async()=>thawed++,replace:async()=>{if(fail)throw Error('fixture');return true;}});if(fail)await assert.rejects(promise);else assert.equal((await promise).applied,true);assert.equal(thawed,1);}});

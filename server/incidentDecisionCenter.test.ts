@@ -105,7 +105,7 @@ function canonicalFixture() {
 const parkedInput = {
   requestId: 'park_native_turn_1', title: 'תקלה בתמיכה', summary: 'התקלה זוהתה, אך נדרשת הכרעה על דרך התיקון.',
   operatorQuestion: 'האם לפשט את הנתיב הקיים?', failureTicketId: 'failure_123',
-  investigatorProfileId: 'developer', investigatorSessionId: '01a05cd0-8a16-7752-9558-1dbe4f9ebd3f',
+  investigatorProfileId: 'developer', investigatorSessionId: '00000000-0000-4000-8000-000000000103',
 };
 
 test('decision mode parks one canonical case with its original owner and ticket, without pausing or queueing work', async () => {
@@ -129,13 +129,13 @@ test('decision mode parks one canonical case with its original owner and ticket,
 test('a sidecar stamps its own configured case origin and cannot fabricate another wake target', async () => {
   const fixture = canonicalFixture();
   const previous = process.env.CODEX_REMOTE_INCIDENT_SERVER_ID;
-  process.env.CODEX_REMOTE_INCIDENT_SERVER_ID = 'beam-10g';
+  process.env.CODEX_REMOTE_INCIDENT_SERVER_ID = 'remote-a';
   try {
     const service = createIncidentDecisionCenterService(fixture);
-    const parked = await service.parkCase({ ...parkedInput, metadata: { codeAiServerId: 'pci', preserved: true } });
-    assert.equal(parked.caseRecord?.metadata.codeAiServerId, 'beam-10g');
+    const parked = await service.parkCase({ ...parkedInput, metadata: { codeAiServerId: 'remote-b', preserved: true } });
+    assert.equal(parked.caseRecord?.metadata.codeAiServerId, 'remote-a');
     assert.equal(parked.caseRecord?.metadata.preserved, true);
-    assert.equal(fixture.writes.find((write) => write.pathname === '/v1/incident-cases')?.body.metadata.codeAiServerId, 'beam-10g');
+    assert.equal(fixture.writes.find((write) => write.pathname === '/v1/incident-cases')?.body.metadata.codeAiServerId, 'remote-a');
   } finally {
     if (previous === undefined) delete process.env.CODEX_REMOTE_INCIDENT_SERVER_ID;
     else process.env.CODEX_REMOTE_INCIDENT_SERVER_ID = previous;
@@ -144,7 +144,7 @@ test('a sidecar stamps its own configured case origin and cannot fabricate anoth
 
 test('a remote case verdict on main delegates once before any local context or queue admission', async () => {
   const fixture = canonicalFixture();
-  const sidecar = createIncidentDecisionCenterService({ ...fixture, serverId: 'beam-10g' });
+  const sidecar = createIncidentDecisionCenterService({ ...fixture, serverId: 'remote-a' });
   const parked = await sidecar.parkCase(parkedInput);
   const delegated: any[] = [];
   const main = createIncidentDecisionCenterService({
@@ -157,7 +157,7 @@ test('a remote case verdict on main delegates once before any local context or q
   const result = await main.recordOperatorVerdict(parked.caseRecord!.caseId, { requestId: 'remote_verdict_1', summary: 'תקנו באותו סשן מרוחק.' });
   assert.equal(result.wakeResult.status, 'queued');
   assert.deepEqual(delegated, [{
-    serverId: 'beam-10g', caseId: parked.caseRecord!.caseId, taskType: 'execute_decision',
+    serverId: 'remote-a', caseId: parked.caseRecord!.caseId, taskType: 'execute_decision',
     decisionId: 'decision_1', idempotencyKey: `execute_decision:${parked.caseRecord!.caseId}:decision_1`,
   }]);
   assert.equal(fixture.queue.size, 0);
@@ -169,7 +169,7 @@ test('the owning sidecar wakes the original same-case session locally and preser
   const fixture = canonicalFixture();
   let delegatedAgain = 0;
   const owner = createIncidentDecisionCenterService({
-    ...fixture, serverId: 'pci', delegateWake: async () => { delegatedAgain += 1; throw new Error('must_not_delegate_from_owner'); },
+    ...fixture, serverId: 'remote-b', delegateWake: async () => { delegatedAgain += 1; throw new Error('must_not_delegate_from_owner'); },
   });
   const parked = await owner.parkCase(parkedInput);
   await owner.recordDecision(parked.caseRecord!.caseId, { decisionKind: 'approved_for_execution', summary: 'owner decision' });
@@ -220,7 +220,7 @@ test('unknown or malformed remote origins surface failure and never fall back to
 
 test('canonical transport exposes non-success HTTP status for scoped gateway ownership preflight', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => Response.json({ error: 'incident_case_not_found' }, { status: 404 }));
-  await assert.rejects(requestIncidentJson('/v1/incident-cases/missing/package'), (error: any) => error.statusCode === 404 && error.message === 'incident_case_not_found');
+  await assert.rejects(requestIncidentJson('/v1/incident-cases/missing/package', {}, 'https://incident.example'), (error: any) => error.statusCode === 404 && error.message === 'incident_case_not_found');
 });
 
 test('existing case identity is reused and another investigator cannot silently steal it', async () => {
@@ -419,9 +419,9 @@ function decisionBrowserFixture(search = '', storedServer: string | null = null,
 
 test('HTML listing chooses explicit URL server, then app storage, then local without losing explicit main mode', async () => {
   for (const [query, stored, expected, blocked] of [
-    ['?server=local', 'beam-10g', 'local', false],
-    ['?server=pci', 'beam-10g', 'pci', false],
-    ['', 'beam-10g', 'beam-10g', false],
+    ['?server=local', 'remote-a', 'local', false],
+    ['?server=remote-b', 'remote-a', 'remote-b', false],
+    ['', 'remote-a', 'remote-a', false],
     ['', null, 'local', false],
     ['', null, 'local', true],
   ] as const) {
@@ -433,31 +433,31 @@ test('HTML listing chooses explicit URL server, then app storage, then local wit
 });
 
 test('HTML main/global listing routes remote detail and actions to case origin while list refresh stays on main', async () => {
-  const browser = decisionBrowserFixture('?server=local', 'pci');
+  const browser = decisionBrowserFixture('?server=local', 'remote-b');
   await browser.api.loadCases(false);
   browser.requests.length = 0;
-  const remote = { caseId: 'icase_from_beam', metadata: { codeAiServerId: 'beam-10g' } };
+  const remote = { caseId: 'icase_from_remote', metadata: { codeAiServerId: 'remote-a' } };
   browser.api.state.cases = [remote];
   await browser.api.loadCase(remote.caseId);
   await browser.api.submitAction(remote, 'operator_verdict');
-  assert.equal((browser.requests.find((entry) => entry.url.endsWith('/icase_from_beam'))!.options.headers as any)['x-code-ai-server-id'], 'beam-10g');
-  assert.equal((browser.requests.find((entry) => entry.url.endsWith('/verdict'))!.options.headers as any)['x-code-ai-server-id'], 'beam-10g');
+  assert.equal((browser.requests.find((entry) => entry.url.endsWith('/icase_from_remote'))!.options.headers as any)['x-code-ai-server-id'], 'remote-a');
+  assert.equal((browser.requests.find((entry) => entry.url.endsWith('/verdict'))!.options.headers as any)['x-code-ai-server-id'], 'remote-a');
   assert.equal((browser.requests.find((entry) => entry.url === './incident-cases')!.options.headers as any)['x-code-ai-server-id'], 'local');
   assert.equal(browser.api.state.serverId, 'local');
 });
 
 test('HTML remote context preserves legacy origin fallback and retry request identity for dispatch-pending verdicts', async () => {
-  const browser = decisionBrowserFixture('', 'pci');
+  const browser = decisionBrowserFixture('', 'remote-b');
   await browser.api.loadCases(false);
   const legacy = { caseId: 'legacy_remote_case', metadata: {} };
-  assert.equal(browser.api.caseServerId(legacy), 'pci');
+  assert.equal(browser.api.caseServerId(legacy), 'remote-b');
   browser.setPostResult({ wakeResult: { status: 'dispatch_pending' } });
   await browser.api.submitAction(legacy, 'operator_verdict');
   await browser.api.submitAction(legacy, 'operator_verdict');
   const posts = browser.requests.filter((entry) => entry.options.method === 'POST');
   assert.equal(posts.length, 2);
   assert.equal(JSON.parse(String(posts[0].options.body)).requestId, JSON.parse(String(posts[1].options.body)).requestId);
-  assert.ok(posts.every((entry) => (entry.options.headers as any)['x-code-ai-server-id'] === 'pci'));
+  assert.ok(posts.every((entry) => (entry.options.headers as any)['x-code-ai-server-id'] === 'remote-b'));
   assert.equal(browser.api.state.drafts[legacy.caseId].note, 'המשיכו בטיפול מרחוק.');
 });
 
@@ -486,4 +486,11 @@ test('only the operator closes the case and closing it never fabricates linked f
   assert.equal(result.caseRecord?.status, 'completed');
   assert.deepEqual(result.linkedTicketCompletion, { failureTicketId: 'failure_123', status: 'not_verified' });
   assert.match(buildIncidentDecisionCenterHtml(), /סגירת טיקט הכשל המקושר לא אומתה כאן/);
+});
+
+
+test('canonical transport requires explicit service configuration before any network call', async (t) => {
+  const fetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected_network_call'); });
+  await assert.rejects(requestIncidentJson('/v1/incident-cases', {}, ''), /CODEX_INCIDENT_FAILURE_URL is required/);
+  assert.equal(fetch.mock.callCount(), 0);
 });

@@ -37,16 +37,16 @@ test('normalizes a canonical flow and rejects dangling edges', () => {
 
 test('extracts only valid fenced flow snapshots', () => {
   const documents = extractFlowDocumentsFromText([
-    '```bina-flow',
+    '```code-ai-flow',
     '{bad json',
     '```',
-    '```bina-flow',
+    '```code-ai-flow',
     JSON.stringify(validDocument),
     '```',
   ].join('\n'));
   assert.equal(documents.length, 1);
   assert.equal(documents[0].title, 'מערכת לדוגמה');
-  const visible = stripFlowDocumentBlocks(`הסבר אנושי\n\n\`\`\`bina-flow\n${JSON.stringify(validDocument)}\n\`\`\``);
+  const visible = stripFlowDocumentBlocks(`הסבר אנושי\n\n\`\`\`code-ai-flow\n${JSON.stringify(validDocument)}\n\`\`\``);
   assert.match(visible, /הסבר אנושי/);
   assert.doesNotMatch(visible, /"nodes"/);
 });
@@ -89,7 +89,7 @@ test('persists, ingests, conflicts and rebinds a session flow', async () => {
   const ingested = await ingestSessionFlowDocumentFromText(
     profileId,
     draftKey,
-    `תשובה\n\`\`\`bina-flow\n${JSON.stringify(validDocument)}\n\`\`\``,
+    `תשובה\n\`\`\`code-ai-flow\n${JSON.stringify(validDocument)}\n\`\`\``,
   );
   assert.equal(ingested?.document?.nodes.length, 2);
   await assert.rejects(() => setSessionFlowMode(profileId, draftKey, {
@@ -107,7 +107,7 @@ test('persists, ingests, conflicts and rebinds a session flow', async () => {
   const staleAgentUpdate = await ingestSessionFlowDocumentFromText(
     profileId,
     draftKey,
-    `תשובה ישנה\n\`\`\`bina-flow\n${JSON.stringify(validDocument)}\n\`\`\``,
+    `תשובה ישנה\n\`\`\`code-ai-flow\n${JSON.stringify(validDocument)}\n\`\`\``,
     { mapId: ingested!.activeMapId!, mapRevision: ingested!.mapRevision - 1 },
   );
   assert.equal(staleAgentUpdate, null);
@@ -207,7 +207,7 @@ test('agent output returns to its original map after the user switches maps', as
   const ingested = await ingestSessionFlowDocumentFromText(
     profileId,
     sessionKey,
-    `תשובה\n\`\`\`bina-flow\n${JSON.stringify({ ...validDocument, title: 'מפת הסוכן המעודכנת' })}\n\`\`\``,
+    `תשובה\n\`\`\`code-ai-flow\n${JSON.stringify({ ...validDocument, title: 'מפת הסוכן המעודכנת' })}\n\`\`\``,
     target,
   );
   assert.equal(ingested?.activeMapId, second.activeMapId);

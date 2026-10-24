@@ -1,8 +1,0 @@
-import fs from'node:fs/promises';import path from'node:path';import{createRequire}from'node:module';import{execFileSync}from'node:child_process';import{createHash}from'node:crypto';
-const stage='/mnt/hdd/code-ai-builds/sessions-read-source-20261020',root=stage+'/payload',ops='/root/projects/code-ai/ops/sessions-outage-20261020';const{build}=createRequire('/root/projects/code-ai/package.json')('esbuild');
-const temp=await fs.mkdtemp('/mnt/hdd/code-ai-builds/sessions-unit-');await fs.symlink(await fs.realpath('/root/projects/code-ai/node_modules'),temp+'/node_modules');const results=[];
-for(const file of ['server/codexSessionReadSnapshot.test.ts','server/codexSessionRealtime.test.ts','server/codexSessionMessages.test.ts','server/codexSharedHistory.test.ts']){
- const out=temp+'/'+path.basename(file).replace('.ts','.mjs');await build({absWorkingDir:root,entryPoints:[file],outfile:out,bundle:true,platform:'node',format:'esm',packages:'external',target:'node22',logLevel:'warning'});
- try{const log=execFileSync(process.execPath,['--test',out],{cwd:root,env:{...process.env,CODEX_DEVICE_ADMIN_PASSWORD:'synthetic-unit-only',SESSION_SECRET:'synthetic-unit-only'},encoding:'utf8',timeout:90000,stdio:'pipe'});await fs.writeFile(ops+'/'+path.basename(file)+'.log',log);results.push({file,passed:true})}catch(e){await fs.writeFile(ops+'/'+path.basename(file)+'.log',(e.stdout||'')+(e.stderr||''));results.push({file,passed:false});}
-}
-await fs.writeFile(ops+'/targeted-tests.json',JSON.stringify({results,passed:results.every(x=>x.passed)},null,2));console.log(JSON.stringify(results));if(results.some(x=>!x.passed))process.exitCode=1;

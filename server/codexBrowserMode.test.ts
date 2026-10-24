@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { CODEX_APP_CONFIG } from './config.js';
 
 import {
   ensureOverlaySymlink,
@@ -63,7 +64,7 @@ test('overlay symlink setup corrects a stale link target', async () => {
 });
 
 test('persisted browser sessions are rebased after the Code AI repository moves', () => {
-  const legacyAppRoot = '/root/projects/legacy-monorepo/web/code-ai';
+  const legacyAppRoot = '/workspace/projects/legacy-monorepo/web/code-ai';
   const sessionDir = path.join(
     legacyAppRoot,
     '.code-ai/local/browser-mode/sessions/developer/session-123',
@@ -89,12 +90,12 @@ test('persisted browser sessions are rebased after the Code AI repository moves'
 
   assert.ok(record);
   assert.equal(record.sessionDir, path.join(
-    process.cwd(),
-    '.code-ai/local/browser-mode/sessions/developer/session-123',
+    CODEX_APP_CONFIG.storageRoot,
+    'local/browser-mode/sessions/developer/session-123',
   ));
   assert.equal(record.profileDir, path.join(record.sessionDir, 'profile'));
   assert.equal(record.serverScriptPath, path.join(
-    process.cwd(),
+    CODEX_APP_CONFIG.appRoot,
     'server/browser-mode/python/browser_mode_mcp_server.py',
   ));
   assert.equal(record.sessionDir.includes(legacyAppRoot), false);

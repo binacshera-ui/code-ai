@@ -13,7 +13,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 BASE_URL = os.environ.get("CODE_AI_E2E_BASE_URL", "http://127.0.0.1:4107").rstrip("/")
 PROFILE_ID = os.environ.get("CODE_AI_E2E_PROFILE_ID", "developer")
-SESSION_ID = os.environ.get("CODE_AI_E2E_FLOW_SESSION_ID", "01a07747-f2f5-7640-8327-629bb570c214")
+SESSION_ID = os.environ["CODE_AI_E2E_FLOW_SESSION_ID"]
 CHROMIUM = os.environ.get("CODE_AI_E2E_CHROMIUM", "/snap/bin/chromium")
 
 

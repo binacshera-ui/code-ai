@@ -59,7 +59,7 @@ test('filesystem capacities are deduplicated, virtual mounts excluded and RAID m
     fsSize: async () => [
       { fs: '/dev/md2', type: 'ext4', size: 1_000, used: 600, available: 350, mount: '/' },
       { fs: '/dev/md2', type: 'ext4', size: 1_000, used: 600, available: 350, mount: '/bound' },
-      { fs: '/dev/md127', type: 'xfs', size: 3_000, used: 1_000, available: 2_000, mount: '/mnt/hdd' },
+      { fs: '/dev/md127', type: 'xfs', size: 3_000, used: 1_000, available: 2_000, mount: '/mnt/data' },
       { fs: '/dev/loop8', type: 'xfs', size: 4_000, used: 0, available: 4_000, mount: '/build' },
       { fs: 'overlay', type: 'overlay', size: 1_000, used: 600, available: 350, mount: '/docker' },
       { fs: '/dev/mixed', type: 'ext4', size: 100, used: 10, available: 90, mount: '/mixed' },
@@ -70,7 +70,7 @@ test('filesystem capacities are deduplicated, virtual mounts excluded and RAID m
       { name: 'nvme0n1p3', type: 'part', group: 'md2' }, { name: 'nvme1n1p3', type: 'part', group: 'md2' },
       { name: 'md2', type: 'raid1', mount: '/' },
       { name: 'sda', type: 'disk', physical: 'HDD', group: 'md127' }, { name: 'sdb', type: 'disk', physical: 'HDD', group: 'md127' },
-      { name: 'md127', type: 'raid0', mount: '/mnt/hdd' },
+      { name: 'md127', type: 'raid0', mount: '/mnt/data' },
       { name: 'sdc', type: 'disk', physical: 'SSD' }, { name: 'sdc1', type: 'part' },
       { name: 'nvme0n1p4', type: 'part', group: 'mixed' }, { name: 'sdd', type: 'disk', physical: 'HDD', group: 'mixed' },
     ],
@@ -90,7 +90,7 @@ test('filesystem capacities are deduplicated, virtual mounts excluded and RAID m
 
 test('unknown media stays unknown instead of guessing from the HDD mount name; cyclic metadata terminates', async () => {
   const subject = fixture({
-    fsSize: async () => [{ fs: '/dev/unknown', mount: '/mnt/hdd', type: 'xfs', size: 100, used: 10, available: 90 }],
+    fsSize: async () => [{ fs: '/dev/unknown', mount: '/mnt/data', type: 'xfs', size: 100, used: 10, available: 90 }],
     blockDevices: async () => [{ name: 'unknown', group: 'cycle' }, { name: 'cycle', group: 'unknown' }],
   });
   assert.equal((await subject.getServerStatus()).storage?.volumes[0].medium, 'other');
@@ -127,7 +127,7 @@ test('Linux sysfs adapter resolves nested RAID/LVM and partition ancestry withou
   assert.ok(!requested.some((path) => /unsafe|loop8|nbd0/.test(path)));
   const subject = fixture({ blockDevices: async () => metadata, fsSize: async () => [
     { fs: '/dev/dm-0', mount: '/', type: 'ext4', size: 100, used: 10, available: 90 },
-    { fs: '/dev/md127', mount: '/mnt/hdd', type: 'xfs', size: 100, used: 10, available: 90 },
+    { fs: '/dev/md127', mount: '/mnt/data', type: 'xfs', size: 100, used: 10, available: 90 },
     { fs: '/dev/odd-part', mount: '/part', type: 'ext4', size: 100, used: 10, available: 90 },
   ] });
   const snapshot = await subject.getServerStatus();

@@ -2,6 +2,7 @@
 import { existsSync } from 'fs';
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import os from 'os';
+import { randomBytes } from 'node:crypto';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
@@ -86,7 +87,7 @@ function parseArgs(argv) {
   const defaults = {
     appName: process.env.PM2_APP_NAME || 'code-ai-app',
     port: process.env.PORT || '4000',
-    pm2Bin: getDefaultPm2Bin(),
+    pm2Bin: process.env.PM2_BIN || '',
     codexHome: process.env.CODEX_HOME_PATH || path.join(HOME_DIR, '.codex'),
     workspace: process.env.WORKSPACE_PATH || APP_ROOT,
     profileId: process.env.PROFILE_ID || 'default',
@@ -98,9 +99,9 @@ function parseArgs(argv) {
     allowAnyPaths: process.env.CODEX_ALLOW_ANY_PATHS || 'true',
     extraReadableRoots: process.env.CODEX_ALLOWED_FILE_ROOTS || '',
     databaseUrl: process.env.DATABASE_URL || '',
-    sessionSecret: process.env.SESSION_SECRET || 'code-ai-session-secret',
+    sessionSecret: process.env.SESSION_SECRET || randomBytes(48).toString('hex'),
     cookieDomain: process.env.SESSION_COOKIE_DOMAIN || '',
-    devicePassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || '403005Ashim@',
+    devicePassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || '',
     codexBin: process.env.CODEX_BIN || getDefaultCodexBin(),
     skipNpmInstall: false,
     skipBuild: false,
@@ -198,6 +199,8 @@ function parseArgs(argv) {
     }
   }
 
+  if (!options.devicePassword.trim()) throw new Error('--device-password or CODEX_DEVICE_ADMIN_PASSWORD is required');
+  if (!options.pm2Bin) options.pm2Bin = options.skipPm2 ? 'pm2' : getDefaultPm2Bin();
   return options;
 }
 

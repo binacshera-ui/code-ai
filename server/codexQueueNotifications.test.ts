@@ -16,7 +16,7 @@ test('cancelling a queued conversation creates a durable stopped notification', 
   process.env.CODEX_NTFY_URL = 'https://ntfy.test/code-ai-test';
   process.env.CODEX_NTFY_ENABLED = 'true';
   process.env.CODEX_NTFY_DEFAULT_ENABLED = 'true';
-  process.env.CODEX_SERVER_ID = 'beam-10g';
+  process.env.CODEX_SERVER_ID = 'remote-a';
   process.env.CODEX_SERVER_LABEL = 'BEAM 10G';
   resetCodexFinalNotificationRuntimeForTests();
 
@@ -40,7 +40,7 @@ test('cancelling a queued conversation creates a durable stopped notification', 
   const deliveries = Object.values(persisted.deliveriesById);
   assert.equal(deliveries.length, 1);
   assert.equal(deliveries[0]?.outcome, 'cancelled');
-  assert.equal(deliveries[0]?.serverId, 'beam-10g');
+  assert.equal(deliveries[0]?.serverId, 'remote-a');
   assert.equal(deliveries[0]?.sessionId, 'draft:cancelled-conversation');
   assert.equal(deliveries[0]?.status, 'pending');
   assert.match(deliveries[0]?.finalMessage || '', /המשך במשימה/u);

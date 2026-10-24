@@ -1,0 +1,13 @@
+name: Public source privacy
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  privacy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Check publication contents
+        run: node scripts/check-public-source.mjs
+      - name: Verify privacy guard regressions
+        run: node --test scripts/check-public-source.test.mjs

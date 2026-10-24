@@ -554,22 +554,6 @@ class BrowserBridgeProxy:
     def dispatch_action(self, name: str, arguments: dict | None = None) -> dict:
         return self._post("/call", {"name": name, "arguments": dict(arguments or {})})
 
-    # standalone-strip:start private-runtime-integration
-    def dispatch_control_action(self, name: str, arguments: dict | None = None) -> dict:
-        if name != "sync_bina_session":
-            raise BrowserRuntimeError(
-                "BROWSER_CONTROL_VALIDATION_FAILED",
-                False,
-                400,
-                "Unsupported private browser control action.",
-                "Use a supported Code-AI browser control action.",
-            )
-        payload = dict(arguments or {})
-        return self._post("/control/bina-session", {
-            "forumSession": payload.get("forum_session"),
-            "runtimeSession": payload.get("runtime_session"),
-        })
-    # standalone-strip:end private-runtime-integration
 
     def process_bridge_requests(self) -> None:
         return None
@@ -640,23 +624,6 @@ def main():
             send_result(request_id, {"tools": TOOL_DEFS})
             return
 
-        # standalone-strip:start private-runtime-integration
-        # This method is intentionally absent from tools/list. Only the trusted
-        # Code-AI viewer parent process uses it; the model cannot invoke it as a
-        # browser tool and the session value is never included in the result.
-        if method == "code-ai/control/sync-bina-session":
-            try:
-                result = runtime.dispatch_control_action("sync_bina_session", {
-                    "forum_session": params.get("forumSession"),
-                    "runtime_session": params.get("runtimeSession"),
-                })
-                send_result(request_id, result)
-            except BrowserRuntimeError as exc:
-                send_error(request_id, -32001, str(exc))
-            except Exception:
-                send_error(request_id, -32002, "Failed to synchronize the Bina session.")
-            return
-        # standalone-strip:end private-runtime-integration
 
         if method == "tools/call":
             try:
