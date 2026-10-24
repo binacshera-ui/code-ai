@@ -1,4 +1,0 @@
-interface:
-  display_name: "מחבר טריגרי סשן"
-  short_description: "ממפה איך כל שירות יעיר סשן רגיל ב-code-ai"
-  default_prompt: "Use $bina-cshera-session-trigger-integrator to identify where a Bina Cshera service should configure and emit a regular code-ai session trigger."

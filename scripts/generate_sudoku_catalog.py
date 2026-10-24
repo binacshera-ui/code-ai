@@ -363,7 +363,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("/root/projects/bina-cshera/web/app/client/src/components/codex/sudokuCatalog.ts"),
+        default=Path(__file__).resolve().parents[1] / "client/src/components/codex/sudokuCatalog.ts",
     )
     args = parser.parse_args()
 

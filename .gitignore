@@ -2,3 +2,15 @@ node_modules
 dist
 .env
 .code-ai
+# Private host operations and generated artifacts never enter the source repository.
+/ops/
+/.private/
+/.question-image-test-build/
+/MIGRATION-RECEIPT.md
+/deploy/code-ai/standalone-private-identifiers.txt
+*.pem
+*.key
+*.p12
+*.pfx
+
+/node_modules

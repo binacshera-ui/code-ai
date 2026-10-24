@@ -1,5 +1,6 @@
 import { existsSync } from 'fs';
 import path from 'path';
+import { homedir } from 'os';
 
 export type AppProvider = 'codex' | 'claude' | 'gemini';
 export type AppMode = 'standard' | 'support' | 'agent';
@@ -112,60 +113,17 @@ function inferWorkspaceRoot(appRoot: string): string {
   return appRoot;
 }
 
-function getDefaultProfiles(appRoot: string): CodexProfileConfig[] {
-  const workspaceRoot = inferWorkspaceRoot(appRoot);
-
-  return [
-    {
-      id: 'developer',
-      label: 'Developer',
-      provider: 'codex',
-      mode: 'standard',
-      codexHome: '/home/developer/.codex',
-      workspaceCwd: workspaceRoot,
-      defaultProfile: true,
-    },
-    {
-      id: 'developer2',
-      label: 'Developer 2',
-      provider: 'codex',
-      mode: 'standard',
-      codexHome: '/home/developer2/.codex',
-      workspaceCwd: workspaceRoot,
-    },
-    {
-      id: 'claude-developer',
-      label: 'Developer',
-      provider: 'claude',
-      mode: 'standard',
-      codexHome: '/home/developer/.claude',
-      workspaceCwd: workspaceRoot,
-    },
-    {
-      id: 'claude-developer2',
-      label: 'Developer 2',
-      provider: 'claude',
-      mode: 'standard',
-      codexHome: '/home/developer2/.claude',
-      workspaceCwd: workspaceRoot,
-    },
-    {
-      id: 'gemini-developer',
-      label: 'Developer',
-      provider: 'gemini',
-      mode: 'standard',
-      codexHome: '/home/developer/.gemini',
-      workspaceCwd: workspaceRoot,
-    },
-    {
-      id: 'gemini-developer2',
-      label: 'Developer 2',
-      provider: 'gemini',
-      mode: 'standard',
-      codexHome: '/home/developer2/.gemini',
-      workspaceCwd: workspaceRoot,
-    },
-  ];
+function getDefaultProfiles(appRoot: string, configuredWorkspaceRoot?: string): CodexProfileConfig[] {
+  const workspaceRoot = configuredWorkspaceRoot || inferWorkspaceRoot(appRoot);
+  return (['codex', 'claude', 'gemini'] as const).map((provider, index) => ({
+    id: `${provider}-main`,
+    label: provider === 'codex' ? 'Codex' : provider === 'claude' ? 'Claude Code' : 'Gemini CLI',
+    provider,
+    mode: 'standard',
+    codexHome: path.join(homedir(), `.${provider}`),
+    workspaceCwd: workspaceRoot,
+    defaultProfile: index === 0,
+  }));
 }
 
 function buildDerivedSupportProfiles(baseProfiles: CodexProfileConfig[], appRoot: string): CodexProfileConfig[] {
@@ -350,8 +308,8 @@ export const CODEX_APP_CONFIG = {
   allowAnyPaths: ALLOW_ANY_PATHS,
   allowedFileRoots: ALLOWED_FILE_ROOTS,
   searchableFileRoots: BASE_ALLOWED_FILE_ROOTS,
-  deviceAdminPassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || '403005Ashim@',
-  sessionSecret: process.env.SESSION_SECRET || 'code-ai-session-secret',
+  deviceAdminPassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || '',
+  sessionSecret: process.env.SESSION_SECRET || '',
   databaseUrl: process.env.DATABASE_URL?.trim() || '',
   sessionCookieDomain: process.env.SESSION_COOKIE_DOMAIN?.trim() || '',
 };

@@ -90,8 +90,6 @@ function resolveGeminiBinary(): string {
   }
 
   const candidateHomes = new Set<string>();
-  candidateHomes.add('/home/developer');
-  candidateHomes.add('/home/developer2');
 
   const envHome = normalizeString(process.env.HOME);
   if (envHome) {

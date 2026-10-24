@@ -156,7 +156,7 @@ app.get('*', (req, res) => {
 const server = app.listen(PORT);
 
 server.once('error', (error: NodeJS.ErrnoException) => {
-  console.error(`❌ Failed to start Bina App server on port ${PORT}:`, error);
+  console.error(`❌ Failed to start Code AI server on port ${PORT}:`, error);
   void recordCodexServerCrash({
     type: 'serverStartupError',
     origin: `listen:${PORT}`,
@@ -170,7 +170,7 @@ server.once('error', (error: NodeJS.ErrnoException) => {
 });
 
 server.once('listening', () => {
-  console.log(`🚀 Bina App server running on port ${PORT}`);
+  console.log(`🚀 Code AI server running on port ${PORT}`);
 
   void startCodexQueueWorker()
     .then(() => {

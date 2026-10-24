@@ -8,7 +8,8 @@
     "preview": "vite preview",
     "start": "node dist/server.js",
     "deploy:install": "node deploy/code-ai/install.mjs",
-    "export:standalone": "node deploy/code-ai/export-standalone.mjs"
+    "export:standalone": "node deploy/code-ai/export-standalone.mjs",
+    "check:public-source": "node scripts/check-public-source.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.4",
@@ -53,5 +54,6 @@
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.0",
     "vite": "^6.0.0"
-  }
+  },
+  "license": "MIT"
 }

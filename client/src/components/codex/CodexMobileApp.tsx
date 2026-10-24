@@ -4370,7 +4370,7 @@ function FolderPickerDialog({
                   onOpenPath();
                 }
               }}
-              placeholder="/root/projects או C:\\repo"
+              placeholder="/workspace או C:\\repo"
               dir="ltr"
               className="h-10 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm text-slate-700 outline-none transition focus:border-slate-300"
             />
@@ -7445,7 +7445,7 @@ function TopicManagerDialog({
             <input
               value={triggerLabel}
               onChange={(event) => onChangeTriggerLabel(event.target.value)}
-              placeholder="שם לטריגר, לדוגמה התראות MAKE2"
+              placeholder="שם לטריגר, לדוגמה התראות הפרויקט"
               className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-700 outline-none transition focus:border-indigo-300"
             />
 
