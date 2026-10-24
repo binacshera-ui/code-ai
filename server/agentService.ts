@@ -106,6 +106,10 @@ import {
   getSessionWorkspaceMap,
   getSessionWorkspaceOverride,
 } from './codexSessionWorkspaces.js';
+import {
+  acquireCodexDeploymentAdmission,
+  registerCodexDeploymentDrainParticipant,
+} from './codexDeploymentDrain.mjs';
 
 export type AgentProfile = CodexProfile;
 
@@ -460,12 +464,34 @@ export async function disconnectAgentCodexAccount(profileId?: string): Promise<v
   await disconnectCodexAccount(profile);
 }
 
+// The ticket covers preparation and post-processing too: there must be no gap
+// between an accepted request and the provider child appearing in its run map.
+registerCodexDeploymentDrainParticipant('agent', () => ({ ready: true, active: 0 }));
+
 export async function runAgentPrompt(
+  ...args: Parameters<typeof runAdmittedAgentPrompt>
+): Promise<AgentRunResult> {
+  const admission = acquireCodexDeploymentAdmission('agent', args[4]?.deploymentAdmission);
+  try {
+    return await runAdmittedAgentPrompt(...args);
+  } finally {
+    admission.release();
+  }
+}
+
+async function runAdmittedAgentPrompt(
   prompt: string,
   sessionId?: string,
   profileId?: string,
   attachments: CodexUploadedAttachment[] = [],
   options: {
+    deploymentAdmission?: unknown;
+    nativeSubmission?: import('./codexAppServer.js').CodexSharedSubmission | null;
+    nativeRunId?: string;
+    onNativeSubmissionChanged?: (submission: import('./codexAppServer.js').CodexSharedSubmission) => Promise<void>;
+    progressGuardEnabled?: boolean;
+    onProgressGuardClaim?: import('./codexAppServer.js').CodexAppServerRunOptions['onProgressGuardClaim'];
+    onProgressGuardWarning?: import('./codexAppServer.js').CodexAppServerRunOptions['onProgressGuardWarning'];
     runId?: string;
     cwd?: string;
     injectDirectoryContext?: boolean;

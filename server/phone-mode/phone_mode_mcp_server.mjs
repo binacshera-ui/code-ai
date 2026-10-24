@@ -1,13 +1,6 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
 
-const bridgeUrl = String(process.env.CODE_AI_PHONE_BRIDGE_URL || '').replace(/\/+$/, '');
-const bridgeToken = String(process.env.CODE_AI_PHONE_BRIDGE_TOKEN || '');
-if (!bridgeUrl || !bridgeToken) {
-  process.stderr.write('phone_mode MCP is missing its private bridge URL or token.\n');
-  process.exit(2);
-}
-
 const genericCommandProperties = {
   tool: { type: 'string', pattern: '^mobile_[a-z_]+$', description: 'Reapre mobile layer, for example mobile_system or mobile_ui.' },
   command: { type: 'string', minLength: 1, maxLength: 80 },
@@ -56,6 +49,17 @@ const tools = [
     annotations: { readOnlyHint: true, destructiveHint: false },
   },
 ];
+
+if (process.argv.includes('--describe-tools')) {
+  process.stdout.write(JSON.stringify({ tools }) + '\n');
+  process.exit(0);
+}
+const bridgeUrl = String(process.env.CODE_AI_PHONE_BRIDGE_URL || '').replace(/\/+$/, '');
+const bridgeToken = String(process.env.CODE_AI_PHONE_BRIDGE_TOKEN || '');
+if (!bridgeUrl || !bridgeToken) {
+  process.stderr.write('phone_mode MCP is missing its private bridge URL or token.\n');
+  process.exit(2);
+}
 
 function write(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
 function findImagePayload(value, depth = 0) {

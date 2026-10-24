@@ -5,7 +5,7 @@ export interface PendingDraftQueueItem {
   cwd: string | null;
   prompt: string;
   promptPreview: string;
-  status: 'scheduled' | 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
+  status: 'draft' | 'scheduled' | 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
   scheduledAt: string;
   createdAt: string;
   updatedAt: string;

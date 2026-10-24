@@ -96,6 +96,7 @@ export function prepareSessionDetailForClient(
 
   return {
     ...session,
+    timelineProjectionVersion:2,
     // The client renders the timeline. Returning messages as well duplicates
     // the largest strings and can double the JSON parse cost on mobile.
     messages: [],

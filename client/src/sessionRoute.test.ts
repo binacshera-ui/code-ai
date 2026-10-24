@@ -21,6 +21,19 @@ test('remote notification links preserve the selected server', () => {
   });
 });
 
+test('local notification links explicitly override a previously selected remote server', () => {
+  const route = readSessionRoute('https://code-ai.test/session/developer/session-123?server=local');
+  assert.equal(route?.serverId, 'local');
+  assert.equal(route?.profileId, 'developer');
+  assert.equal(route?.sessionId, 'session-123');
+});
+
+test('older local notification links without a server still open locally', () => {
+  const route = readSessionRoute('https://code-ai.test/session/developer/session-123');
+  assert.equal(route?.serverId, 'local');
+  assert.equal(route?.sessionId, 'session-123');
+});
+
 test('session navigation keeps the remote server query parameter', () => {
   assert.equal(
     buildSessionHref(

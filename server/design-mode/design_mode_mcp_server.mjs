@@ -12,6 +12,11 @@ const tools = contract.tools.map((tool) => ({
   inputSchema: typeof tool.inputSchema?.$ref === 'string' ? commonInputSchema : tool.inputSchema,
 }));
 
+if (process.argv.includes('--describe-tools')) {
+  process.stdout.write(JSON.stringify({ tools }) + '\n');
+  process.exit(0);
+}
+
 function readArgument(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : null;

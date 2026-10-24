@@ -10,6 +10,8 @@ export interface CodexProfileConfig {
   provider: AppProvider;
   mode?: AppMode;
   codexHome: string;
+  /** Administrator-configured, profile-owned archive locations. */
+  sessionArchiveRoots?: string[];
   workspaceCwd: string;
   sourceProfileId?: string;
   sandboxCwd?: string;
@@ -79,6 +81,9 @@ function normalizeProfile(profile: Partial<CodexProfileConfig>): CodexProfileCon
     provider,
     mode,
     codexHome: path.resolve(profile.codexHome),
+    sessionArchiveRoots: Array.isArray(profile.sessionArchiveRoots)
+      ? profile.sessionArchiveRoots.filter((value) => typeof value === 'string' && path.isAbsolute(value)).map((value) => path.resolve(value))
+      : undefined,
     workspaceCwd: path.resolve(profile.workspaceCwd),
     sourceProfileId: typeof profile.sourceProfileId === 'string' && profile.sourceProfileId.trim()
       ? profile.sourceProfileId.trim()
@@ -122,6 +127,7 @@ function getDefaultProfiles(appRoot: string, configuredWorkspaceRoot?: string): 
       provider: 'codex',
       mode: 'standard',
       codexHome: '/home/developer/.codex',
+      sessionArchiveRoots: ['/mnt/hdd/codex/session-days'],
       workspaceCwd: workspaceRoot,
       defaultProfile: true,
     },
@@ -359,7 +365,7 @@ export const CODEX_APP_CONFIG = {
   allowAnyPaths: ALLOW_ANY_PATHS,
   allowedFileRoots: ALLOWED_FILE_ROOTS,
   searchableFileRoots: BASE_ALLOWED_FILE_ROOTS,
-  deviceAdminPassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || '403005Ashim@',
+  deviceAdminPassword: process.env.CODEX_DEVICE_ADMIN_PASSWORD || '',
   trustedPersonalChromeExtensionIds: parseCsv(process.env.CODEX_PERSONAL_CHROME_TRUSTED_EXTENSION_IDS)
     .map((extensionId) => extensionId.toLowerCase())
     .filter((extensionId) => /^[a-p]{32}$/.test(extensionId)),

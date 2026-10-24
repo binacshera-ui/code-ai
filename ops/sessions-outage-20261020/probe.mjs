@@ -1,0 +1,10 @@
+import fs from 'node:fs/promises';import assert from 'node:assert/strict';import{execFileSync}from'node:child_process';
+const base='/root/projects/code-ai/ops/sessions-outage-20261020',root='/mnt/hdd/code-ai-builds/fleet-20261016-a36efe942200';const headers={'content-type':'application/json'};
+const {preserveRuntimeAuthentication,parseRuntimeEnvironment}=await import(root+'/runtime-auth.mjs');const rec=JSON.parse(execFileSync('/root/.nvm/versions/node/v24.12.0/bin/pm2',['jlist'],{encoding:'utf8'})).find(x=>x.name==='code-ai-app');const env={...rec.pm2_env.env,...parseRuntimeEnvironment(await fs.readFile('/proc/'+rec.pid+'/environ'))};const req=JSON.parse(await fs.readFile(root+'/fleet-request.json','utf8'));env.CODE_AI_AUTH_BASELINE_MODULE=req.authenticationBaselineModule;env.CODE_AI_AUTH_BASELINE_SHA256=req.authenticationBaselineSha256;await preserveRuntimeAuthentication(env);
+const unlock=await fetch('http://127.0.0.1:4000/api/codex/device-unlock',{method:'POST',headers,body:JSON.stringify({password:env.CODEX_DEVICE_ADMIN_PASSWORD}),signal:AbortSignal.timeout(10000)});assert.equal(unlock.status,200);headers.cookie=unlock.headers.getSetCookie().map(v=>v.split(';')[0]).join('; ');
+const report={at:new Date().toISOString(),pid:rec.pid,checks:[]};
+for(const profile of ['developer','developer2']){
+ const route='/sessions?profile='+profile+'&limit=20',at=Date.now();const row={profile,route};report.checks.push(row);
+ try{const r=await fetch('http://127.0.0.1:4000/api/codex'+route,{headers,signal:AbortSignal.timeout(20000)});const body=await r.json();row.status=r.status;row.elapsedMs=Date.now()-at;row.count=body.sessions?.length;row.sessionIds=body.sessions?.map(s=>({id:s.id,path:s.path,updatedAt:s.updatedAt,source:s.source}));row.error=body.error||null;assert.equal(r.status,200)}catch(e){row.elapsedMs=Date.now()-at;row.error=e.name}
+ await fs.writeFile(base+'/private/session-probe.json',JSON.stringify(report,null,2),{mode:0o600});console.log(JSON.stringify({...row,sessionIds:undefined}));
+}

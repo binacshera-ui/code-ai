@@ -2,6 +2,8 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import type { Server as HttpServer, IncomingMessage } from 'http';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { normalizeProfileIdentity } from '../chrome-extension/profileIdentity.js';
+import { adoptInitialProfile, profileRevision, profileSnapshot, updateProfile } from '../chrome-extension/profileSync.js';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import { CODEX_APP_CONFIG } from './config.js';
@@ -39,6 +41,8 @@ interface PersonalChromeDeviceRecord {
   lastSeenAt: string | null;
   revokedAt: string | null;
   capabilities: string[];
+  profileIdentity?: ReturnType<typeof normalizeProfileIdentity>;
+  profileRevision?: number;
 }
 
 interface PersonalChromeTrustedExtensionRecord {
@@ -142,6 +146,7 @@ let state: BridgeState = { version: 1, devices: [], bindings: [], trustedExtensi
 let loaded: Promise<void> | null = null;
 let persistTail: Promise<void> = Promise.resolve();
 let auditTail: Promise<void> = Promise.resolve();
+let profileMutationTail: Promise<void> = Promise.resolve();
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let socketServer: WebSocketServer | null = null;
 
@@ -227,6 +232,8 @@ function normalizeDevice(value: unknown): PersonalChromeDeviceRecord | null {
   if (!candidate.id || !candidate.ownerId || !candidate.tokenHash || !candidate.name) return null;
   return {
     id: String(candidate.id), ownerId: String(candidate.ownerId), name: String(candidate.name).slice(0, 120),
+    profileIdentity: candidate.profileIdentity === undefined ? undefined : normalizeProfileIdentity(candidate.profileIdentity),
+    profileRevision: profileRevision(candidate.profileRevision),
     tokenHash: String(candidate.tokenHash), extensionId: candidate.extensionId ? String(candidate.extensionId) : null,
     installationId: candidate.installationId ? String(candidate.installationId).slice(0, 120) : null,
     platform: candidate.platform ? String(candidate.platform).slice(0, 120) : null,
@@ -295,7 +302,7 @@ async function ensureLoaded() {
 
 async function persist() {
   const snapshot = JSON.stringify(state, null, 2);
-  persistTail = persistTail.then(async () => {
+  persistTail = persistTail.catch(() => undefined).then(async () => {
     await fs.mkdir(BRIDGE_ROOT, { recursive: true, mode: 0o700 });
     const temporary = `${STATE_FILE}.${process.pid}.${Date.now()}.tmp`;
     await fs.writeFile(temporary, `${snapshot}\n`, { mode: 0o600 });
@@ -338,7 +345,10 @@ function publicDevice(device: PersonalChromeDeviceRecord) {
   const connection = deviceConnections.get(device.id);
   return {
     id: device.id,
-    name: device.name,
+    name: device.profileIdentity?.name || device.name,
+    profileIdentity: device.profileIdentity || null,
+    profileRevision: profileRevision(device.profileRevision),
+    connectionType: 'chrome-extension' as const,
     extensionId: device.extensionId,
     platform: device.platform,
     browserVersion: device.browserVersion,
@@ -349,6 +359,30 @@ function publicDevice(device: PersonalChromeDeviceRecord) {
     connectedAt: connection?.connectedAt || null,
     capabilities: device.capabilities,
   };
+}
+
+function publishDeviceProfile(device: PersonalChromeDeviceRecord) {
+  const connection = deviceConnections.get(device.id);
+  if (connection?.ws.readyState === WebSocket.OPEN) {
+    try {
+      sendEnvelope(connection.ws, { type: 'profile_updated', version: PERSONAL_CHROME_PROTOCOL_VERSION,
+        ...profileSnapshot(device.profileIdentity, device.profileRevision) });
+    } catch { /* Durable save succeeded; reconnect will deliver the revision. */ }
+  }
+}
+
+function saveDeviceProfile(device: PersonalChromeDeviceRecord, input: { baseRevision: number; profileIdentity: unknown }): Promise<void> {
+  const operation = profileMutationTail.catch(() => undefined).then(async () => {
+    const previous = profileSnapshot(device.profileIdentity, device.profileRevision);
+    const previousUpdatedAt = device.updatedAt;
+    const next = updateProfile(previous, input);
+    Object.assign(device, next, { updatedAt: nowIso() });
+    try { await persist(); }
+    catch (error) { Object.assign(device, previous, { updatedAt: previousUpdatedAt }); throw error; }
+    publishDeviceProfile(device);
+  });
+  profileMutationTail = operation;
+  return operation;
 }
 
 function findExtensionTrust(ownerId: string, extensionId: string, installationId: string) {
@@ -596,6 +630,19 @@ function handleSocketEnvelope(connection: DeviceConnection, raw: RawData) {
       void persist();
     }
   }
+  if (envelope.type === 'event' && envelope.name === 'profile_identity') {
+    const device = state.devices.find((entry) => entry.id === connection.deviceId && !entry.revokedAt);
+    if (device) {
+      // Legacy panels emit this only after an explicit user edit. New panels
+      // use the revisioned HTTP route, which acknowledges durable storage.
+      try {
+        // A legacy URL avatar was historically sanitized rather than fetched.
+        void saveDeviceProfile(device, {
+          profileIdentity: normalizeProfileIdentity(envelope.payload), baseRevision: profileRevision(device.profileRevision),
+        }).catch(() => undefined);
+      } catch { /* A malformed/empty legacy event must not erase a saved profile. */ }
+    }
+  }
 }
 
 async function authenticateSocket(ws: WebSocket, raw: RawData): Promise<DeviceConnection | null> {
@@ -612,8 +659,10 @@ async function authenticateSocket(ws: WebSocket, raw: RawData): Promise<DeviceCo
   device.lastSeenAt = nowIso();
   device.updatedAt = nowIso();
   if (envelope.extensionId) device.extensionId = envelope.extensionId.slice(0, 120);
+  Object.assign(device, adoptInitialProfile(profileSnapshot(device.profileIdentity, device.profileRevision), envelope.profileIdentity));
   await persist();
-  sendEnvelope(ws, { type: 'auth_ok', version: PERSONAL_CHROME_PROTOCOL_VERSION, deviceId: device.id, connectedAt: connection.connectedAt });
+  sendEnvelope(ws, { type: 'auth_ok', version: PERSONAL_CHROME_PROTOCOL_VERSION, deviceId: device.id, connectedAt: connection.connectedAt,
+    ...profileSnapshot(device.profileIdentity, device.profileRevision), profileSyncSupported: true });
   void audit({ event: 'device_connected', deviceId: device.id });
   return connection;
 }
@@ -632,8 +681,14 @@ function handleSocketConnection(ws: WebSocket) {
       ws.on('message', (nextRaw) => connection && handleSocketEnvelope(connection, nextRaw));
     }).catch(() => ws.close(1011, 'Authentication failed'));
   });
-  ws.on('close', () => {
+  ws.on('error', () => {
+    void audit({ event: 'device_socket_error', deviceId: connection?.deviceId || null });
+  });
+  ws.on('close', (code) => {
     clearTimeout(authTimer);
+    if (connection) void audit({ event: 'device_disconnected', deviceId: connection.deviceId,
+      closeCode: code, replaced: deviceConnections.get(connection.deviceId)?.ws !== ws,
+      heartbeatAgeMs: Math.max(0, Date.now() - Date.parse(connection.lastHeartbeatAt)) });
     if (connection && deviceConnections.get(connection.deviceId)?.ws === ws) {
       deviceConnections.delete(connection.deviceId);
       const device = state.devices.find((entry) => entry.id === connection?.deviceId);
@@ -670,6 +725,8 @@ export function attachPersonalChromeBridge(server: HttpServer): void {
   heartbeatTimer = setInterval(() => {
     for (const connection of deviceConnections.values()) {
       if (Date.now() - Date.parse(connection.lastHeartbeatAt) > 90_000) {
+        void audit({ event: 'device_heartbeat_timeout', deviceId: connection.deviceId,
+          heartbeatAgeMs: Date.now() - Date.parse(connection.lastHeartbeatAt) });
         connection.ws.terminate();
         continue;
       }
@@ -883,6 +940,30 @@ export function createPersonalChromeBridgeRouter(requireAccess: AccessMiddleware
     await ensureLoaded();
     const ownerId = ownerIdFromRequest(req);
     res.json({ devices: state.devices.filter((device) => device.ownerId === ownerId && !device.revokedAt).map(publicDevice) });
+  });
+
+  router.post('/devices/:deviceId/profile', requireAccess, async (req, res) => {
+    await ensureLoaded();
+    const ownerId = ownerIdFromRequest(req);
+    const extensionDeviceId = readHeader(req, DEVICE_HEADER);
+    if (extensionDeviceId && extensionDeviceId !== req.params.deviceId) {
+      res.status(403).json({ error: 'התוסף יכול לערוך רק את הפרופיל שלו.' }); return;
+    }
+    const device = state.devices.find((entry) => entry.id === req.params.deviceId && entry.ownerId === ownerId && !entry.revokedAt);
+    if (!device) { res.status(404).json({ error: 'הדפדפן לא נמצא.' }); return; }
+    try {
+      await saveDeviceProfile(device, req.body);
+      await audit({ event: 'device_profile_saved', deviceId: device.id, profileRevision: device.profileRevision });
+      res.json({ device: publicDevice(device), saved: true });
+    } catch (error: any) {
+      const conflict = error.code === 'PROFILE_CONFLICT';
+      const validation = conflict || error.code === 'PROFILE_REVISION_REQUIRED' || error.code === 'INVALID_PROFILE';
+      res.status(conflict ? 409 : validation ? 400 : 500).json({
+        error: validation ? error.message : 'שמירת הפרופיל בשרת נכשלה. הפרטים שערכת לא נמחקו.',
+        code: validation ? error.code : 'PROFILE_STORAGE_FAILED',
+        ...(conflict ? { device: publicDevice(device) } : {}),
+      });
+    }
   });
 
   router.delete('/devices/:deviceId', requireAccess, async (req, res) => {

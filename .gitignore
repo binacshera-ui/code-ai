@@ -24,3 +24,19 @@ __pycache__/
 *.tsbuildinfo
 .cache/
 .vite/
+
+# Do not publish runtime symlinks, temporary bundles or operator receipts.
+/dist
+/.question-image-test-build/
+/ops/**
+!/ops/**/
+!/ops/**/*.mjs
+!/ops/**/*.ts
+!/ops/**/*.py
+!/ops/**/*.ps1
+!/ops/**/*.sh
+!/ops/**/*.vbs
+*.pem
+*.key
+*.p12
+*.pfx

@@ -1,5 +1,8 @@
-import { Check, Chrome, Copy, Link2, Loader2, MonitorSmartphone, RefreshCw, ShieldCheck, Unplug, X } from 'lucide-react';
+import { useState } from 'react';
+import { Check, Chrome, Copy, Link2, Loader2, MonitorSmartphone, Pencil, RefreshCw, ShieldCheck, Unplug, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { ChromeProfileIdentity } from '../../../../chrome-extension/profileIdentity.js';
+import { PersonalChromeProfileEditor } from './PersonalChromeProfileEditor';
 
 export type PersonalChromeApprovalPolicy = 'risky' | 'always' | 'never';
 
@@ -33,6 +36,9 @@ export interface PersonalChromeDeviceValue {
   online: boolean;
   connectedAt: string | null;
   capabilities: string[];
+  profileIdentity?: { name: string; avatarDataUrl: string | null; source: 'custom' | 'chrome-local' } | null;
+  profileRevision?: number;
+  connectionType?: 'chrome-extension';
 }
 
 export interface PersonalChromePairingValue {
@@ -57,6 +63,7 @@ interface Props {
   onRevokeDevice: (deviceId: string) => void;
   onSave: () => void;
   onDisable: () => void;
+  onSaveProfile: (deviceId: string, identity: ChromeProfileIdentity, baseRevision: number) => Promise<PersonalChromeDeviceValue>;
 }
 
 function Toggle({ checked, onChange, disabled = false }: { checked: boolean; onChange: (next: boolean) => void; disabled?: boolean }) {
@@ -80,8 +87,9 @@ function Toggle({ checked, onChange, disabled = false }: { checked: boolean; onC
 
 export function PersonalChromeModeDialog({
   isOpen, provider, value, devices, pairing, isLoading, isSaving, error,
-  onClose, onChange, onRefresh, onCreatePairing, onRevokeDevice, onSave, onDisable,
+  onClose, onChange, onRefresh, onCreatePairing, onRevokeDevice, onSave, onDisable, onSaveProfile,
 }: Props) {
+  const [editingDeviceId,setEditingDeviceId] = useState<string|null>(null);
   if (!isOpen) return null;
   const providerSupported = provider === 'codex';
   const selectedDevice = devices.find((device) => device.id === value.deviceId) || null;
@@ -125,7 +133,7 @@ export function PersonalChromeModeDialog({
           <div className="flex items-center justify-between gap-4 rounded-[1.4rem] border border-indigo-100 bg-indigo-50/60 p-4">
             <div>
               <div className="text-sm font-semibold text-slate-900">הפעל לסשן הזה</div>
-              <div className="mt-1 text-xs leading-5 text-slate-500">החיבור קשור למכשיר ולסשן, וניתן לבטל אותו בכל רגע.</div>
+              <div className="mt-1 text-xs leading-5 text-slate-500">כל השיחות משתמשות באותו חיבור ברקע. ההרשאות וקבוצת הטאבים נפרדות לכל שיחה, גם כשהחלונית סגורה.</div>
             </div>
             <Toggle checked={value.enabled} disabled={!providerSupported} onChange={(enabled) => onChange({ ...value, enabled })} />
           </div>
@@ -144,12 +152,14 @@ export function PersonalChromeModeDialog({
             {devices.map((device) => {
               const selected = value.deviceId === device.id;
               return (
+                <div key={device.id}>
                 <div
                   role="button"
                   tabIndex={0}
                   key={device.id}
                   onClick={() => onChange({ ...value, deviceId: device.id, deviceName: device.name, tabId: null })}
                   onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return;
                     if (event.key !== 'Enter' && event.key !== ' ') return;
                     event.preventDefault();
                     onChange({ ...value, deviceId: device.id, deviceName: device.name, tabId: null });
@@ -160,16 +170,22 @@ export function PersonalChromeModeDialog({
                   )}
                 >
                   <div className="flex min-w-0 items-center gap-3">
-                    <span className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-xl', device.online ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400')}><MonitorSmartphone className="h-5 w-5" /></span>
+                    <span className={cn('flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl', device.online ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400')}>
+                      {device.profileIdentity?.avatarDataUrl
+                        ? <img src={device.profileIdentity.avatarDataUrl} alt="" className="h-full w-full object-cover" />
+                        : <MonitorSmartphone className="h-5 w-5" />}
+                    </span>
                     <span className="min-w-0">
                       <span className="flex items-center gap-2 text-sm font-semibold text-slate-800">
                         <span className="truncate">{device.name}</span>
                         <span className={cn('h-2 w-2 shrink-0 rounded-full', device.online ? 'bg-emerald-400' : 'bg-slate-300')} />
                       </span>
                       <span className="mt-1 block truncate text-xs text-slate-400">{device.online ? 'מחובר עכשיו' : device.lastSeenAt ? `נראה לאחרונה ${new Date(device.lastSeenAt).toLocaleString('he-IL')}` : 'טרם התחבר'}</span>
+                      <span className="mt-1 block text-[11px] text-slate-500">תוסף Chrome · מחשב אישי · חיבור משותף לכל השיחות</span>
                     </span>
                   </div>
                   <span className="flex items-center gap-2">
+                    <button type="button" aria-label={`ערוך פרופיל ${device.name}`} title="ערוך שם ותמונה" onClick={event=>{event.stopPropagation();setEditingDeviceId(editingDeviceId===device.id?null:device.id);}} className="rounded-full p-2 text-slate-500 transition hover:bg-indigo-50 hover:text-indigo-600"><Pencil className="h-4 w-4" /></button>
                     <button
                       type="button"
                       aria-label={`בטל חיבור ${device.name}`}
@@ -178,6 +194,8 @@ export function PersonalChromeModeDialog({
                     ><Unplug className="h-4 w-4" /></button>
                     {selected && <span className="flex h-7 w-7 items-center justify-center rounded-full bg-indigo-500 text-white"><Check className="h-4 w-4" /></span>}
                   </span>
+                </div>
+                {editingDeviceId===device.id && <PersonalChromeProfileEditor device={device} onSave={onSaveProfile} onClose={()=>setEditingDeviceId(null)} />}
                 </div>
               );
             })}

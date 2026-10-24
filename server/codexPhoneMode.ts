@@ -499,6 +499,27 @@ export async function prepareCodexPhoneModeForRun(
   return { envCodeXHome: record.overlayCodexHome, mode: clientMode(record) };
 }
 
+/** Private native-owner entry; no credentials leave the existing mode backend. */
+export async function dispatchPhoneNativeModeTool(profileId: string, sessionKey: string, name: string, args: Record<string, unknown>): Promise<unknown> {
+  await ensureLoaded();
+  const current = state.modes[stateKey(profileId, sessionKey)];
+  const registration = [...bridgeRegistrations.values()].find(value => value.profileId === profileId && value.sessionKey === sessionKey
+    && current?.enabled && value.record.updatedAt === current.updatedAt);
+  if (!registration) throw Object.assign(new Error('Phone mode is unavailable'), { code: current?.enabled ? 'MODE_UNAVAILABLE' : 'MODE_DISABLED' });
+  const correlationId = randomUUID(), startedAt = Date.now();
+  try {
+    const result = await dispatchPhoneTool(registration, name, args);
+    await appendAuditLog({ correlationId, profileId, sessionKey, tool: name,
+      command: typeof args.command === 'string' ? args.command : null,
+      targetTool: typeof args.tool === 'string' ? args.tool : null,
+      accessPolicy: registration.record.accessPolicy, success: true, durationMs: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    await appendAuditLog({ correlationId, success: false, durationMs: Date.now() - startedAt }).catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function probePhoneModeConnection(): Promise<Record<string, unknown>> {
   return collectPhoneStatus('careful');
 }

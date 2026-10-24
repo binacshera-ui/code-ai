@@ -78,7 +78,7 @@ const LOCAL_SERVER_ID = 'local';
 const HOST_ID_PATTERN = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 const SSH_TARGET_PATTERN = /^[a-zA-Z0-9_.:@-]+$/;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
-const DEFAULT_HEALTH_TIMEOUT_MS = 8_000;
+const DEFAULT_HEALTH_TIMEOUT_MS = 20_000;
 const runtimeByHostId = new Map<string, HostRuntimeState>();
 
 let cachedRegistry: {

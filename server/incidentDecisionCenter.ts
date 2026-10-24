@@ -1,8 +1,15 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { CODEX_APP_CONFIG } from './config.js';
-import { enqueueCodexQueueItem } from './codexQueue.js';
+import type { CodexQueueItem } from './codexQueue.js';
+import {
+  wakeRemoteIncidentSession,
+  type IncidentWakeTaskInput,
+  type IncidentWakeResult,
+} from './incidentRemoteWake.js';
+
+type EnqueueCodexQueueInput = Parameters<typeof import('./codexQueue.js').enqueueCodexQueueItem>[0];
 
 export type IncidentCaseStatus =
   | 'open'
@@ -58,7 +65,7 @@ const INCIDENT_CONTEXT_ROOT = path.join(INCIDENT_CENTER_ROOT, 'context');
 const FAILURE_HANDLING_BASE_URL = String(
   process.env.CODEX_INCIDENT_FAILURE_URL ||
   process.env.BC2_FAILURE_URL ||
-  `http://127.0.0.1:${process.env.BC2_FAILURE_PORT || 8210}`
+  `http://127.0.0.1:${process.env.BC2_FAILURE_PORT || 18210}`
 ).replace(/\/+$/g, '');
 const FAILURE_HANDLING_AUTH_TOKEN = String(
   process.env.CODEX_INCIDENT_FAILURE_AUTH_TOKEN ||
@@ -85,7 +92,7 @@ function cleanText(value: unknown): string {
   return String(value || '').trim();
 }
 
-function failureHeaders() {
+function failureHeaders(): Record<string, string> {
   const authToken = FAILURE_HANDLING_AUTH_TOKEN
     ? (FAILURE_HANDLING_AUTH_TOKEN.startsWith('Bearer ')
       ? FAILURE_HANDLING_AUTH_TOKEN
@@ -96,7 +103,7 @@ function failureHeaders() {
     : {};
 }
 
-async function requestJson(pathname: string, options: RequestInit = {}) {
+export async function requestIncidentJson(pathname: string, options: RequestInit = {}) {
   const response = await fetch(`${FAILURE_HANDLING_BASE_URL}${pathname}`, {
     ...options,
     headers: {
@@ -110,9 +117,80 @@ async function requestJson(pathname: string, options: RequestInit = {}) {
     ? await response.json()
     : { error: await response.text() };
   if (!response.ok) {
-    throw new Error(String(body?.error || body?.message || response.statusText || 'incident_request_failed'));
+    throw Object.assign(new Error(String(body?.error || body?.message || response.statusText || 'incident_request_failed')), {
+      statusCode: response.status,
+    });
   }
   return body;
+}
+
+function incidentInputError(message: string, statusCode = 400): Error & { statusCode: number } {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+function boundedText(value: unknown, name: string, max: number): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > max) {
+    throw incidentInputError(`incident_${name}_invalid`);
+  }
+  return value.trim();
+}
+
+function safeIdentifier(value: unknown, name: string): string {
+  const identifier = boundedText(value, name, 200);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(identifier)) {
+    throw incidentInputError(`incident_${name}_invalid`);
+  }
+  return identifier;
+}
+
+function requestIdentifier(value: unknown): string {
+  const identifier = boundedText(value, 'request_id', 200);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/.test(identifier)) {
+    throw incidentInputError('incident_request_id_invalid');
+  }
+  return identifier;
+}
+
+function requestDigest(...parts: string[]): string {
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+}
+
+export interface ParkIncidentCaseInput {
+  requestId: string;
+  caseId?: string;
+  title: string;
+  summary: string;
+  operatorQuestion?: string;
+  failureTicketId?: string | null;
+  investigatorSessionId: string;
+  investigatorProfileId: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface OperatorIncidentVerdictInput {
+  requestId: string;
+  summary: string;
+  executionScope?: string[];
+  testPlan?: string[];
+}
+
+export interface IncidentDecisionCenterDependencies {
+  requestJson?: (pathname: string, options?: RequestInit) => Promise<any>;
+  enqueue?: (input: EnqueueCodexQueueInput) => Promise<CodexQueueItem>;
+  contextRoot?: string;
+  serverId?: string;
+  delegateWake?: (serverId: string, payload: IncidentWakeTaskInput) => Promise<IncidentWakeResult>;
+}
+
+function incidentServerId(value: unknown): string {
+  if (value !== undefined && value !== null && typeof value !== 'string') {
+    throw incidentInputError('incident_origin_server_id_invalid');
+  }
+  const serverId = cleanText(value).toLowerCase() || 'local';
+  if (!/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(serverId)) {
+    throw incidentInputError('incident_origin_server_id_invalid');
+  }
+  return serverId;
 }
 
 function mapStatus(value: unknown): IncidentCaseStatus {
@@ -242,16 +320,38 @@ function buildCaseRecordFromListEntry(entry: any): IncidentCaseRecord {
   };
 }
 
-async function writeIncidentContextFile(caseRecord: IncidentCaseRecord, taskType: string) {
-  const packagePayload = caseRecord.metadata?.package || {};
-  const contextDir = path.join(INCIDENT_CONTEXT_ROOT, caseRecord.caseId);
-  await fs.mkdir(contextDir, { recursive: true });
-  const filePath = path.join(contextDir, `${Date.now()}-${taskType}.json`);
-  await fs.writeFile(filePath, JSON.stringify(packagePayload, null, 2), 'utf-8');
+async function writeIncidentContextFile(
+  caseRecord: IncidentCaseRecord,
+  taskType: string,
+  requestKey: string,
+  contextRoot: string,
+  decisionId: string | null,
+) {
+  const packagePayload = {
+    ...(caseRecord.metadata?.package as Record<string, unknown> || {}),
+    wake_request: { task_type: taskType, incident_decision_id: decisionId },
+  };
+  const contextDir = path.join(contextRoot, safeIdentifier(caseRecord.caseId, 'case_id'));
+  await fs.mkdir(contextDir, { recursive: true, mode: 0o700 });
+  // A retry gets the same immutable snapshot, including its original verdict.
+  const filePath = path.join(contextDir, `${requestDigest(requestKey)}-${taskType}.json`);
+  const temporaryPath = path.join(contextDir, `.${requestDigest(requestKey)}-${randomUUID()}.tmp`);
+  try {
+    await fs.writeFile(temporaryPath, JSON.stringify(packagePayload, null, 2), { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+    await fs.link(temporaryPath, filePath);
+  } catch (error: any) {
+    if (error?.code !== 'EEXIST') throw error;
+  } finally {
+    await fs.unlink(temporaryPath).catch(() => {});
+  }
   return filePath;
 }
 
-async function recordIncidentCaseEvent(caseId: string, payload: Record<string, unknown>) {
+async function recordIncidentCaseEvent(
+  requestJson: NonNullable<IncidentDecisionCenterDependencies['requestJson']>,
+  caseId: string,
+  payload: Record<string, unknown>,
+) {
   try {
     await requestJson(`/v1/incident-cases/${encodeURIComponent(cleanText(caseId))}/messages`, {
       method: 'POST',
@@ -262,7 +362,7 @@ async function recordIncidentCaseEvent(caseId: string, payload: Record<string, u
   }
 }
 
-function buildWakePrompt(caseRecord: IncidentCaseRecord, taskType: string, contextFilePath: string) {
+function buildWakePrompt(caseRecord: IncidentCaseRecord, taskType: string, contextFilePath: string, decisionId: string | null) {
   const taskLabels: Record<string, string> = {
     initial_investigation: 'חקירה ראשונה',
     operator_response: 'מענה לתגובת מפעיל',
@@ -274,6 +374,7 @@ function buildWakePrompt(caseRecord: IncidentCaseRecord, taskType: string, conte
   return [
     `טפל עכשיו בתיק ההכרעה ${caseRecord.caseId}.`,
     `סוג המשימה: ${taskLabel}.`,
+    decisionId ? `הכרעת המפעיל הרלוונטית למשימה זו: ${decisionId}. אל תחליף אותה בהכרעה אחרת מתוך ההיסטוריה.` : '',
     caseRecord.failureTicketId ? `מזהה טיקט כשל: ${caseRecord.failureTicketId}.` : '',
     caseRecord.threadId ? `מזהה שרשור: ${caseRecord.threadId}.` : '',
     caseRecord.messageId ? `מזהה הודעה: ${caseRecord.messageId}.` : '',
@@ -293,6 +394,10 @@ function buildWakePrompt(caseRecord: IncidentCaseRecord, taskType: string, conte
       : '3. חקור לעומק, הפרד בין עובדה להשערה, והגש דוח ברור עם המלצה אחת.',
     '4. עדכן את תיק ההכרעה באמצעות הסקריפט:',
     'node /root/projects/code-ai/scripts/incident-case-update.mjs ...',
+    '5. המשך באותו תיק ובאותו טיקט עד תיקון ואימות בפועל. דוח ביצוע אינו סגירת טיקט; אל תדווח הושלם ללא ראיות.',
+    '6. אם דרושה הכרעה נוספת, שמור שאלה ממוקדת בתיק והמשך בעבודה אחרת; אל תפתח לולאת תיאומים או שיחה חלופית.',
+    '7. במשימת ביצוע, בצע גם אימות ממוקד בתוך אותה הרצה. בדוח הצלחה השתמש ב-status: completed וב-case_status: waiting_completion_confirmation; צרף test_results ו-verification_results. כישלון נשאר execution_failed; צורך בהכרעה נוספת נשאר needs_additional_decision.',
+    '8. אל תסגור את התיק במקום המפעיל ואל תניח שטיקט הכשל נסגר: מצב הטיקט עצמו דורש אימות מול בעליו הקנוני.',
     '',
     'אם זו חקירה או מענה למפעיל:',
     `node /root/projects/code-ai/scripts/incident-case-update.mjs report --case ${caseRecord.caseId} --context ${contextFilePath} --summary-file <path-to-your-json>`,
@@ -305,7 +410,15 @@ function buildWakePrompt(caseRecord: IncidentCaseRecord, taskType: string, conte
   ].filter(Boolean).join('\n');
 }
 
-export function createIncidentDecisionCenterService() {
+export function createIncidentDecisionCenterService(dependencies: IncidentDecisionCenterDependencies = {}) {
+  const requestJson = dependencies.requestJson || requestIncidentJson;
+  const enqueue = dependencies.enqueue || (async (input: EnqueueCodexQueueInput) => {
+    const { enqueueCodexQueueItem } = await import('./codexQueue.js');
+    return enqueueCodexQueueItem(input);
+  });
+  const contextRoot = dependencies.contextRoot || INCIDENT_CONTEXT_ROOT;
+  const serverId = incidentServerId(dependencies.serverId ?? process.env.CODEX_REMOTE_INCIDENT_SERVER_ID);
+  const delegateWake = dependencies.delegateWake || wakeRemoteIncidentSession;
   return {
     async listCases(filter: { status?: string | null } = {}) {
       const query = new URLSearchParams();
@@ -323,7 +436,7 @@ export function createIncidentDecisionCenterService() {
     },
 
     async getCase(caseId: string) {
-      const response = await requestJson(`/v1/incident-cases/${encodeURIComponent(cleanText(caseId))}/package`, {
+      const response = await requestJson(`/v1/incident-cases/${encodeURIComponent(safeIdentifier(caseId, 'case_id'))}/package`, {
         method: 'GET',
       });
       const pkg = response?.package || null;
@@ -343,11 +456,12 @@ export function createIncidentDecisionCenterService() {
       metadata?: Record<string, unknown>;
       investigatorPrompt?: string | null;
       autoWake?: boolean;
+      requestId?: string;
     }) {
       const response = await requestJson('/v1/incident-cases', {
         method: 'POST',
         body: JSON.stringify({
-          incident_case_id: payload.caseId || null,
+          incident_case_id: payload.caseId ? safeIdentifier(payload.caseId, 'case_id') : null,
           title: payload.title,
           summary: payload.summary,
           failure_ticket_id: payload.failureTicketId || null,
@@ -356,8 +470,8 @@ export function createIncidentDecisionCenterService() {
           run_id: payload.runId || null,
           investigator_session_id: payload.investigatorSessionId || DEFAULT_INCIDENT_SESSION_ID || null,
           investigator_profile_id: payload.investigatorProfileId || DEFAULT_INCIDENT_PROFILE_ID || null,
-          metadata: payload.metadata || {},
-          event_id: `manual_case:${randomUUID()}`,
+          metadata: { ...(payload.metadata || {}), codeAiServerId: serverId },
+          event_id: `manual_case:${payload.requestId ? requestIdentifier(payload.requestId) : randomUUID()}`,
         }),
       });
       const incidentCase = buildCaseRecordFromListEntry(response?.incident_case || {});
@@ -365,6 +479,139 @@ export function createIncidentDecisionCenterService() {
         caseRecord: incidentCase,
         wakeResult: null,
       };
+    },
+
+    async parkCase(payload: ParkIncidentCaseInput) {
+      const requestId = requestIdentifier(payload.requestId);
+      const profileId = safeIdentifier(payload.investigatorProfileId, 'profile_id');
+      const sessionId = safeIdentifier(payload.investigatorSessionId, 'session_id');
+      const title = boundedText(payload.title, 'title', 240);
+      const summary = boundedText(payload.summary, 'summary', 20_000);
+      const operatorQuestion = payload.operatorQuestion
+        ? boundedText(payload.operatorQuestion, 'operator_question', 5_000)
+        : 'מה ההכרעה שלך להמשך טיפול במקרה הזה?';
+      const failureTicketId = payload.failureTicketId
+        ? safeIdentifier(payload.failureTicketId, 'failure_ticket_id')
+        : null;
+      if (payload.metadata && (typeof payload.metadata !== 'object' || Array.isArray(payload.metadata))) {
+        throw incidentInputError('incident_metadata_invalid');
+      }
+      if (JSON.stringify(payload.metadata || {}).length > 65_536) {
+        throw incidentInputError('incident_metadata_too_large');
+      }
+      let caseRecord = payload.caseId
+        ? await this.getCase(payload.caseId)
+        : failureTicketId
+          ? (await this.listCases()).find((entry) => entry.failureTicketId === failureTicketId) || null
+          : null;
+      if (payload.caseId && !caseRecord) throw incidentInputError('incident_case_not_found', 404);
+      if (caseRecord && (
+        (caseRecord.investigatorSessionId && caseRecord.investigatorSessionId !== sessionId)
+        || (caseRecord.investigatorProfileId && caseRecord.investigatorProfileId !== profileId)
+        || (failureTicketId && caseRecord.failureTicketId && caseRecord.failureTicketId !== failureTicketId)
+      )) {
+        throw incidentInputError('incident_case_owner_mismatch', 409);
+      }
+      if (caseRecord?.status === 'completed') throw incidentInputError('incident_case_already_completed', 409);
+      if (!caseRecord || !caseRecord.investigatorSessionId || !caseRecord.investigatorProfileId) {
+        const result = await this.createCase({
+          caseId: caseRecord?.caseId || `icase_codeai_${requestDigest(profileId, sessionId, requestId).slice(0, 32)}`,
+          requestId,
+          title,
+          summary,
+          failureTicketId: caseRecord?.failureTicketId || failureTicketId,
+          investigatorProfileId: caseRecord?.investigatorProfileId || profileId,
+          investigatorSessionId: caseRecord?.investigatorSessionId || sessionId,
+          metadata: { ...(payload.metadata || {}), decision_mode: true },
+          autoWake: false,
+        });
+        caseRecord = result.caseRecord;
+      }
+      const caseId = safeIdentifier(caseRecord.caseId, 'case_id');
+      // The existing owner stores this report and moves only this case to
+      // waiting_operator. No queue pause, writer, polling job, or new case DB.
+      const raw = await requestJson(`/v1/incident-cases/${encodeURIComponent(caseId)}/reports`, {
+        method: 'POST',
+        body: JSON.stringify({
+          actor_type: 'investigator',
+          summary,
+          recommendation: 'ממתין להכרעת המפעיל לגבי דרך התיקון; עבודה אחרת יכולה להמשיך.',
+          operator_question: operatorQuestion,
+          confidence_level: 'requires_operator_decision',
+          status: 'waiting_operator',
+          report_sections: { decision_mode: true, operator_question: operatorQuestion },
+          idempotency_key: `codeai-park:${requestId}`,
+        }),
+      });
+      return { caseRecord: await this.getCase(caseId), raw, wakeResult: null };
+    },
+
+    async recordOperatorVerdict(caseId: string, payload: OperatorIncidentVerdictInput) {
+      const normalizedCaseId = safeIdentifier(caseId, 'case_id');
+      const requestId = requestIdentifier(payload.requestId);
+      const summary = boundedText(payload.summary, 'verdict', 20_000);
+      const caseRecord = await this.getCase(normalizedCaseId);
+      if (!caseRecord) throw incidentInputError('incident_case_not_found', 404);
+      if (caseRecord.status === 'completed') throw incidentInputError('incident_case_already_completed', 409);
+      if (!caseRecord.investigatorSessionId || !caseRecord.investigatorProfileId) {
+        throw incidentInputError('incident_investigator_target_missing', 409);
+      }
+      if ((payload.executionScope && !Array.isArray(payload.executionScope)) || (payload.testPlan && !Array.isArray(payload.testPlan))) {
+        throw incidentInputError('incident_verdict_items_invalid');
+      }
+      if ((payload.executionScope || []).length > 32 || (payload.testPlan || []).length > 64) {
+        throw incidentInputError('incident_verdict_items_too_large');
+      }
+      const executionScope = (payload.executionScope || []).map((entry) => boundedText(entry, 'execution_scope', 240));
+      const testPlan = (payload.testPlan || []).map((entry) => boundedText(entry, 'test_plan', 2_000));
+      const priorDecision = (caseRecord.metadata?.decisions as any[] || []).find((entry) => (
+        entry.idempotency_key === `decision:${requestId}`
+      ));
+      if (priorDecision && (
+        priorDecision.summary !== summary
+        || JSON.stringify(priorDecision.execution_scope || []) !== JSON.stringify(executionScope)
+        || JSON.stringify(priorDecision.test_plan || []) !== JSON.stringify(testPlan)
+      )) {
+        throw incidentInputError('incident_request_id_payload_mismatch', 409);
+      }
+      const result = await this.recordDecision(normalizedCaseId, {
+        author: 'operator',
+        decisionKind: 'approved_for_execution',
+        status: 'approved_for_execution',
+        summary,
+        contract: { operator_verdict: summary, request_id: requestId },
+        executionScope,
+        testPlan,
+        requestId,
+        signalType: 'incident_event',
+      });
+      // This new CodeAI verdict path owns dispatch through the existing session
+      // queue. It does not depend on the legacy global support workflow. Both
+      // paths use the exact canonical decision ID if a legacy callback arrives.
+      const savedDecision = result.raw?.incident_decision || (result.caseRecord?.metadata?.decisions as any[] || []).find((entry) => (
+        entry.idempotency_key === `decision:${requestId}`
+      ));
+      const decisionId = cleanText(savedDecision?.incident_decision_id);
+      if (!decisionId) {
+        return {
+          ...result,
+          wakeResult: { owner: 'code_ai' as const, status: 'dispatch_pending' as const, incident_decision_id: null, error: 'incident_verdict_decision_id_missing' },
+        };
+      }
+      try {
+        const wake = await this.wakeSessionTask({ caseId: normalizedCaseId, taskType: 'execute_decision', decisionId });
+        return {
+          ...result,
+          wakeResult: { owner: 'code_ai' as const, status: wake.queue_status, incident_decision_id: decisionId, ...wake },
+        };
+      } catch {
+        // Persistence succeeded, but admission may or may not have succeeded.
+        // A manual retry uses the same decision and queue clientRequestId.
+        return {
+          ...result,
+          wakeResult: { owner: 'code_ai' as const, status: 'dispatch_pending' as const, incident_decision_id: decisionId, error: 'incident_verdict_dispatch_pending' },
+        };
+      }
     },
 
     async appendMessage(caseId: string, payload: {
@@ -379,13 +626,13 @@ export function createIncidentDecisionCenterService() {
       wakeReason?: string | null;
       wakePrompt?: string | null;
     }) {
-      const normalizedCaseId = cleanText(caseId);
+      const normalizedCaseId = safeIdentifier(caseId, 'case_id');
       const kind = cleanText(payload.kind) || 'note';
       const author = mapAuthor(payload.author);
       const text = cleanText(payload.text) || 'נשמר עדכון בתיק.';
       let response;
 
-      if (kind === 'operator_completion' || payload.status === 'completed') {
+      if (author === 'operator' && (kind === 'operator_completion' || payload.status === 'completed')) {
         response = await requestJson(`/v1/incident-cases/${encodeURIComponent(normalizedCaseId)}/complete`, {
           method: 'POST',
           body: JSON.stringify({
@@ -416,12 +663,14 @@ export function createIncidentDecisionCenterService() {
           }),
         });
       } else if (author === 'investigator' && kind.includes('execution')) {
+        const successful = ['completed', 'success', 'succeeded', 'completed_successfully'].includes(payload.status || '');
         response = await requestJson(`/v1/incident-cases/${encodeURIComponent(normalizedCaseId)}/executions`, {
           method: 'POST',
           body: JSON.stringify({
             actor_type: author,
             summary: text,
             status: payload.status || 'execution_in_progress',
+            case_status: successful ? 'waiting_completion_confirmation' : payload.status || 'execution_in_progress',
             execution_report: payload.messagePayload || {},
             idempotency_key: `execution:${randomUUID()}`,
           }),
@@ -452,7 +701,9 @@ export function createIncidentDecisionCenterService() {
             kind,
             text,
             payload: payload.messagePayload || {},
-            status_after: payload.status || null,
+            status_after: payload.status === 'completed' && author !== 'operator'
+              ? 'waiting_completion_confirmation'
+              : payload.status || null,
             idempotency_key: `message:${randomUUID()}`,
           }),
         });
@@ -475,8 +726,10 @@ export function createIncidentDecisionCenterService() {
       contract?: Record<string, unknown> | null;
       executionScope?: unknown[];
       testPlan?: unknown[];
+      requestId?: string;
+      signalType?: 'incident_event';
     }) {
-      const normalizedCaseId = cleanText(caseId);
+      const normalizedCaseId = safeIdentifier(caseId, 'case_id');
       const summary = cleanText(payload.summary) || 'נשמרה הכרעת מפעיל.';
       const response = await requestJson(`/v1/incident-cases/${encodeURIComponent(normalizedCaseId)}/decisions`, {
         method: 'POST',
@@ -488,7 +741,8 @@ export function createIncidentDecisionCenterService() {
           contract: payload.contract || {},
           execution_scope: Array.isArray(payload.executionScope) ? payload.executionScope : [],
           test_plan: Array.isArray(payload.testPlan) ? payload.testPlan : [],
-          idempotency_key: `decision:${randomUUID()}`,
+          ...(payload.signalType ? { signal_type: payload.signalType } : {}),
+          idempotency_key: `decision:${payload.requestId ? requestIdentifier(payload.requestId) : randomUUID()}`,
         }),
       });
       return {
@@ -504,8 +758,11 @@ export function createIncidentDecisionCenterService() {
       completionReason?: string | null;
       details?: Record<string, unknown> | null;
     }) {
-      const normalizedCaseId = cleanText(caseId);
+      const normalizedCaseId = safeIdentifier(caseId, 'case_id');
       const summary = cleanText(payload.summary) || 'התיק הושלם.';
+      if (payload.author && payload.author !== 'operator') {
+        throw incidentInputError('incident_completion_requires_operator', 403);
+      }
       const response = await requestJson(`/v1/incident-cases/${encodeURIComponent(normalizedCaseId)}/complete`, {
         method: 'POST',
         body: JSON.stringify({
@@ -517,8 +774,12 @@ export function createIncidentDecisionCenterService() {
           idempotency_key: `complete:${randomUUID()}`,
         }),
       });
+      const caseRecord = await this.getCase(normalizedCaseId);
       return {
-        caseRecord: await this.getCase(normalizedCaseId),
+        caseRecord,
+        linkedTicketCompletion: caseRecord?.failureTicketId
+          ? { failureTicketId: caseRecord.failureTicketId, status: 'not_verified' as const }
+          : null,
         raw: response,
       };
     },
@@ -529,7 +790,7 @@ export function createIncidentDecisionCenterService() {
       reason?: string | null;
       details?: Record<string, unknown> | null;
     }) {
-      const normalizedCaseId = cleanText(caseId);
+      const normalizedCaseId = safeIdentifier(caseId, 'case_id');
       const summary = cleanText(payload.summary) || 'התיק נפתח מחדש.';
       const response = await requestJson(`/v1/incident-cases/${encodeURIComponent(normalizedCaseId)}/reopen`, {
         method: 'POST',
@@ -547,10 +808,9 @@ export function createIncidentDecisionCenterService() {
       };
     },
 
-    async wakeSessionTask(payload: {
-      taskType: string;
-      caseId: string;
-    }) {
+    async wakeSessionTask(payload: IncidentWakeTaskInput): Promise<IncidentWakeResult> {
+      const taskTypes = ['initial_investigation', 'operator_response', 'operator_decision', 'execute_decision', 'reopened_case'];
+      if (!taskTypes.includes(payload.taskType)) throw incidentInputError('incident_task_type_invalid');
       const caseRecord = await this.getCase(payload.caseId);
       if (!caseRecord) {
         throw new Error('incident_case_not_found');
@@ -560,22 +820,50 @@ export function createIncidentDecisionCenterService() {
       if (!profileId || !sessionId) {
         throw new Error('incident_investigator_target_missing');
       }
-      const contextFilePath = await writeIncidentContextFile(caseRecord, payload.taskType);
+      const pkg = caseRecord.metadata?.package as any;
+      const caseState = pkg?.incident_case || {};
+      const decisionId = payload.decisionId
+        ? safeIdentifier(payload.decisionId, 'decision_id')
+        : ['execute_decision', 'operator_decision'].includes(payload.taskType) && caseState.last_decision_id
+          ? safeIdentifier(caseState.last_decision_id, 'decision_id')
+          : null;
+      if (decisionId && !(pkg?.decisions || []).some((decision: any) => decision.incident_decision_id === decisionId)) {
+        throw incidentInputError('incident_wake_decision_not_found', 409);
+      }
+      const canonicalEventId = caseState.last_decision_id || caseState.last_message_id || caseState.last_report_id || caseRecord.createdAt;
+      const idempotencyKey = payload.idempotencyKey
+        ? boundedText(payload.idempotencyKey, 'wake_idempotency_key', 1_000)
+        : `${payload.taskType}:${caseRecord.caseId}:${canonicalEventId}`;
+      const originServerId = incidentServerId(caseRecord.metadata?.codeAiServerId);
+      if (originServerId !== 'local' && originServerId !== serverId) {
+        // Only the owning host may write its context or admit work to its queue.
+        // A failed remote mutation must never fall back to this host's session.
+        return delegateWake(originServerId, {
+          caseId: caseRecord.caseId,
+          taskType: payload.taskType,
+          idempotencyKey,
+          ...(decisionId ? { decisionId } : {}),
+        });
+      }
+      const clientRequestId = `incident-wake:${requestDigest(caseRecord.caseId, payload.taskType, decisionId || idempotencyKey)}`;
+      const contextFilePath = await writeIncidentContextFile(caseRecord, payload.taskType, clientRequestId, contextRoot, decisionId);
       try {
-        const item = await enqueueCodexQueueItem({
+        const item = await enqueue({
           profileId,
           queueKey: sessionId,
           sessionId,
-          prompt: buildWakePrompt(caseRecord, payload.taskType, contextFilePath),
+          clientRequestId,
+          prompt: buildWakePrompt(caseRecord, payload.taskType, contextFilePath, decisionId),
           promptPreview: `הכרעה · ${caseRecord.caseId} · ${payload.taskType}`,
         });
         const wakeRecordedAt = nowIso();
-        await recordIncidentCaseEvent(caseRecord.caseId, {
+        await recordIncidentCaseEvent(requestJson, caseRecord.caseId, {
           actor_type: 'system',
           kind: 'wake_requested',
           text: 'הסשן החוקר הוקפץ למשימה חדשה.',
           payload: {
             task_type: payload.taskType,
+            incident_decision_id: decisionId,
             queue_item_id: item.id,
             queue_status: item.status,
             session_id: item.sessionId || sessionId,
@@ -599,7 +887,7 @@ export function createIncidentDecisionCenterService() {
           context_file_path: contextFilePath,
         };
       } catch (error: any) {
-        await recordIncidentCaseEvent(caseRecord.caseId, {
+        await recordIncidentCaseEvent(requestJson, caseRecord.caseId, {
           actor_type: 'system',
           kind: 'wake_failed',
           text: 'הקפצת הסשן החוקר נכשלה.',
@@ -1009,6 +1297,7 @@ export function buildIncidentDecisionCenterHtml() {
       case_reopened: 'פתיחה מחדש',
     };
     const actionHints = {
+      operator_verdict: 'כתבו את ההכרעה שלכם במילים חופשיות. היא תישמר בתיק הקיים ותחזיר את אותו סשן לטיפול דרך תור השיחות של CODE-AI. התיק לא נסגר עד אימות והשלמה.',
       send_to_investigator: 'שלחו שאלה, תיקון או תגובה חופשית לחוקר. הסשן יתעורר שוב באותו תיק.',
       request_more_research: 'בקשו מהחוקר לאסוף עוד ראיות, לבדוק חלופה או להעמיק במשהו מסוים.',
       approve_execution: 'אשרו את ההמלצה לביצוע בפועל. חובה לבחור לפחות תחום ביצוע אחד.',
@@ -1020,6 +1309,7 @@ export function buildIncidentDecisionCenterHtml() {
       reopen_case: 'פתחו מחדש תיק שהושלם או הוקפא, עם הסבר מה השתנה.',
     };
     const actionLabels = {
+      operator_verdict: 'שמור הכרעה והמשך טיפול',
       send_to_investigator: 'שלח לחוקר',
       request_more_research: 'בקש חקירה נוספת',
       approve_execution: 'אשר ובצע',
@@ -1037,11 +1327,39 @@ export function buildIncidentDecisionCenterHtml() {
       { value: 'deployment', label: 'פריסה' },
       { value: 'replay', label: 'הרצה חוזרת' },
     ];
-    const state = { filter: '', cases: [], selectedId: null, drafts: loadDrafts() };
+    const state = { filter: '', cases: [], selectedId: null, serverId: initialServerId(), drafts: loadDrafts(), submitting: false };
     const caseListEl = document.getElementById('case-list');
     const detailEl = document.getElementById('detail');
     const emptyEl = document.getElementById('empty');
     const filterButtons = [...document.querySelectorAll('[data-filter]')];
+
+    function normalizeServerId(value) {
+      const serverId = String(value || '').trim().toLowerCase();
+      return /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(serverId) ? serverId : '';
+    }
+
+    function initialServerId() {
+      const query = new URLSearchParams(window.location.search);
+      if (query.has('server')) return normalizeServerId(query.get('server')) || 'local';
+      try {
+        return normalizeServerId(window.localStorage.getItem('code-ai.serverId')) || 'local';
+      } catch {
+        return 'local';
+      }
+    }
+
+    function caseServerId(caseRecord) {
+      const listedCase = state.cases.find((entry) => entry.caseId === caseRecord?.caseId);
+      const origin = caseRecord?.metadata?.codeAiServerId ?? listedCase?.metadata?.codeAiServerId;
+      if (origin === undefined || origin === null || origin === '') return state.serverId;
+      const serverId = normalizeServerId(origin);
+      if (!serverId) throw new Error('incident_origin_server_id_invalid');
+      return serverId;
+    }
+
+    function serverHeaders(serverId, extra = {}) {
+      return { ...extra, 'x-code-ai-server-id': serverId };
+    }
 
     function fmt(value) {
       if (!value) return '—';
@@ -1052,7 +1370,9 @@ export function buildIncidentDecisionCenterHtml() {
       return String(value || '')
         .replaceAll('&', '&amp;')
         .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;');
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
     }
 
     function statusLabel(value) {
@@ -1079,9 +1399,11 @@ export function buildIncidentDecisionCenterHtml() {
     function emptyDraft() {
       return {
         note: '',
-        action: 'send_to_investigator',
+        action: 'operator_verdict',
         duplicateOf: '',
         executionScope: [],
+        requestId: '',
+        requestSignature: '',
       };
     }
 
@@ -1108,9 +1430,11 @@ export function buildIncidentDecisionCenterHtml() {
       }
       return {
         note: String(existing.note || ''),
-        action: String(existing.action || 'send_to_investigator'),
+        action: String(existing.action || 'operator_verdict'),
         duplicateOf: String(existing.duplicateOf || ''),
         executionScope: normalizeArray(existing.executionScope).map((entry) => String(entry || '')).filter(Boolean),
+        requestId: String(existing.requestId || ''),
+        requestSignature: String(existing.requestSignature || ''),
       };
     }
 
@@ -1123,9 +1447,10 @@ export function buildIncidentDecisionCenterHtml() {
       };
       const keep =
         nextDraft.note.trim() ||
-        nextDraft.action !== 'send_to_investigator' ||
+        nextDraft.action !== 'operator_verdict' ||
         nextDraft.duplicateOf.trim() ||
-        normalizeArray(nextDraft.executionScope).length > 0;
+        normalizeArray(nextDraft.executionScope).length > 0 ||
+        nextDraft.requestId;
       if (!keep) {
         delete state.drafts[caseId];
       } else {
@@ -1141,19 +1466,21 @@ export function buildIncidentDecisionCenterHtml() {
       const executionScope = [...document.querySelectorAll('[data-scope-item]:checked')].map((entry) => entry.value);
       return {
         note: noteInput ? noteInput.value : '',
-        action: actionSelect ? actionSelect.value : 'send_to_investigator',
+        action: actionSelect ? actionSelect.value : 'operator_verdict',
         duplicateOf: duplicateInput ? duplicateInput.value : '',
         executionScope,
       };
     }
 
-    async function loadCases() {
-      if (state.selectedId) {
+    async function loadCases(preserveDraft = true) {
+      if (state.submitting) return;
+      if (preserveDraft && state.selectedId) {
         rememberDraft(state.selectedId, readCurrentDraftState());
       }
       const query = state.filter ? '?status=' + encodeURIComponent(state.filter) : '';
-      const res = await fetch('./incident-cases' + query, { credentials: 'same-origin' });
+      const res = await fetch('./incident-cases' + query, { credentials: 'same-origin', headers: serverHeaders(state.serverId) });
       const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'טעינת תיקי ההכרעה נכשלה.');
       state.cases = Array.isArray(data.cases) ? data.cases : [];
       if (!state.selectedId && state.cases[0]) state.selectedId = state.cases[0].caseId;
       if (state.selectedId && !state.cases.some((entry) => entry.caseId === state.selectedId)) {
@@ -1164,8 +1491,10 @@ export function buildIncidentDecisionCenterHtml() {
     }
 
     async function loadCase(caseId) {
-      const res = await fetch('./incident-cases/' + encodeURIComponent(caseId), { credentials: 'same-origin' });
+      const serverId = caseServerId(state.cases.find((entry) => entry.caseId === caseId) || { caseId });
+      const res = await fetch('./incident-cases/' + encodeURIComponent(caseId), { credentials: 'same-origin', headers: serverHeaders(serverId) });
       const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'טעינת תיק ההכרעה נכשלה.');
       renderDetail(data.caseRecord || null);
     }
 
@@ -1185,6 +1514,7 @@ export function buildIncidentDecisionCenterHtml() {
       }).join('');
       [...caseListEl.querySelectorAll('[data-case-id]')].forEach((card) => {
         card.addEventListener('click', async () => {
+          if (state.selectedId) rememberDraft(state.selectedId, readCurrentDraftState());
           state.selectedId = card.getAttribute('data-case-id');
           renderList();
           await loadCase(state.selectedId);
@@ -1304,7 +1634,7 @@ export function buildIncidentDecisionCenterHtml() {
       const scopeWrap = document.getElementById('execution-scope-wrap');
       const duplicateWrap = document.getElementById('duplicate-wrap');
       const submitButton = document.getElementById('submit-primary');
-      const currentAction = actionSelect ? actionSelect.value : 'send_to_investigator';
+      const currentAction = actionSelect ? actionSelect.value : 'operator_verdict';
       if (actionHint) {
         actionHint.textContent = actionHints[currentAction] || '';
       }
@@ -1321,25 +1651,57 @@ export function buildIncidentDecisionCenterHtml() {
     }
 
     async function submitAction(caseRecord, action) {
+      if (state.submitting) return;
       const draft = readCurrentDraftState();
+      if (action === 'operator_verdict' && !draft.note.trim()) {
+        throw new Error('יש לכתוב את ההכרעה לפני שליחתה.');
+      }
+      const signature = JSON.stringify({ action, ...draft });
+      const saved = readDraft(caseRecord.caseId);
+      const requestId = saved.requestSignature === signature && saved.requestId
+        ? saved.requestId
+        : crypto.randomUUID();
+      rememberDraft(caseRecord.caseId, { ...draft, requestId, requestSignature: signature });
       const body = {
         action,
         text: draft.note,
+        summary: draft.note,
+        requestId,
         duplicateOf: draft.duplicateOf,
         executionScope: draft.executionScope,
       };
-      const response = await fetch('./incident-cases/' + encodeURIComponent(caseRecord.caseId) + '/actions', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const result = await response.json();
+      state.submitting = true;
+      detailEl.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+      let response;
+      let result;
+      try {
+        response = await fetch('./incident-cases/' + encodeURIComponent(caseRecord.caseId) + (action === 'operator_verdict' ? '/verdict' : '/actions'), {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: serverHeaders(caseServerId(caseRecord), { 'Content-Type': 'application/json' }),
+          body: JSON.stringify(body),
+        });
+        result = await response.json();
+      } finally {
+        state.submitting = false;
+        detailEl.querySelectorAll('button').forEach((button) => { button.disabled = false; });
+      }
       if (!response.ok) {
         throw new Error(result?.error || 'ביצוע פעולת ההכרעה נכשל.');
       }
+      if (action === 'operator_verdict' && result?.wakeResult?.status === 'dispatch_pending') {
+        const feedback = document.getElementById('decision-feedback');
+        if (feedback) feedback.textContent = 'ההכרעה נשמרה, אך קבלת משימת ההמשך לא אומתה. אפשר לנסות שוב עם אותה בקשה בלי לשלוח משימה כפולה.';
+        const retryButton = document.getElementById('submit-primary');
+        if (retryButton) retryButton.textContent = 'נסה שוב להמשיך את הטיפול';
+        return;
+      }
       rememberDraft(caseRecord.caseId, emptyDraft());
-      await loadCases();
+      await loadCases(false);
+      const feedback = document.getElementById('decision-feedback');
+      if (feedback && action === 'operator_verdict') {
+        feedback.textContent = 'ההכרעה נשמרה ומשימת ההמשך התקבלה באותו סשן. ההשלמה עדיין ממתינה לביצוע ולאימות.';
+      }
     }
 
     function renderDetail(caseRecord) {
@@ -1361,6 +1723,7 @@ export function buildIncidentDecisionCenterHtml() {
       detailEl.innerHTML = [
         '<div class="detail-head">',
         '<div class="row"><div><h2>📌 ' + esc(caseRecord.title) + '</h2><p class="sub">' + esc(caseRecord.summary || '') + '</p></div><span class="badge">' + esc(statusLabel(caseRecord.status)) + '</span></div>',
+        caseRecord.status === 'completed' && caseRecord.failureTicketId ? '<p class="hint">תיק ההכרעה נסגר. סגירת טיקט הכשל המקושר לא אומתה כאן; אלה שתי רשומות נפרדות.</p>' : '',
         '<div class="meta-grid">',
         meta('מזהה מקרה', caseRecord.caseId),
         meta('טיקט כשל', caseRecord.failureTicketId),
@@ -1385,6 +1748,7 @@ export function buildIncidentDecisionCenterHtml() {
         '<div class="input-row"><label for="operator-note">הודעת מפעיל</label><textarea id="operator-note" placeholder="כתבו כאן שאלה לחוקר, הכרעה, דחייה, נימוק להשלמה או בקשת חקירה נוספת.">' + esc(draft.note) + '</textarea></div>',
         '<div class="input-row"><label for="operator-action">פעולת מפעיל</label><select id="operator-action">' + renderActionOptions(draft.action) + '</select></div>',
         '<div id="action-hint" class="hint"></div>',
+        '<div id="decision-feedback" class="sub" role="status" aria-live="polite"></div>',
         '<div id="execution-scope-wrap" class="input-row" hidden><label>היקף הביצוע המאושר</label><div class="scope-grid">' + renderExecutionScope(draft.executionScope) + '</div></div>',
         '<div id="duplicate-wrap" class="input-row" hidden><label for="duplicate-of">מזהה תיק היעד במקרה כפילות</label><input id="duplicate-of" type="text" value="' + esc(draft.duplicateOf) + '" placeholder="למשל icase_123456" /></div>',
         '<div class="actions">',

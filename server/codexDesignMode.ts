@@ -5,6 +5,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { promisify } from 'util';
 import { CODEX_APP_CONFIG } from './config.js';
+import { GEMINI_PRIMARY_MODEL } from './geminiModelPolicy.js';
 import {
   getGeminiModelCatalog,
   runGeminiEphemeralDesignPrompt,
@@ -963,15 +964,14 @@ function extractDesignSpec(raw: string, expectedToolName: string): Record<string
   };
 }
 
-function selectDesignModel(catalog: Awaited<ReturnType<typeof getGeminiModelCatalog>>, quality: CodexDesignQuality): string | null {
-  const models = catalog.models.map((model) => model.slug);
-  if (quality === 'deep') {
-    return models.find((model) => /3(?:\.|-).*pro/i.test(model))
-      || models.find((model) => /2\.5.*pro/i.test(model))
-      || models.find((model) => /pro/i.test(model))
-      || catalog.selectedModel;
-  }
-  return models.find((model) => /flash/i.test(model)) || catalog.selectedModel;
+function selectDesignModel(catalog: Awaited<ReturnType<typeof getGeminiModelCatalog>>, _quality: CodexDesignQuality): string {
+  if (catalog.models.some((model) => model.slug === GEMINI_PRIMARY_MODEL)) return GEMINI_PRIMARY_MODEL;
+  throw makeDesignToolError(
+    'DESIGN_REQUIRED_MODEL_UNAVAILABLE',
+    `Design Mode requires ${GEMINI_PRIMARY_MODEL}, but it is not available for the selected Gemini profile.`,
+    false,
+    'Choose a Gemini profile with Gemini 4 Argon access, then retry.',
+  );
 }
 
 function buildGeminiPrompt(input: {
@@ -1255,6 +1255,16 @@ export async function prepareCodexDesignModeForRun(
   state.designModeByKey[buildKey(stateProfileId, sessionKey)] = record;
   await persistState();
   return { envCodeXHome: record.overlayCodexHome, mode: { ...record } };
+}
+
+/** Private native-owner entry, sharing the same registration and consultation limits. */
+export async function dispatchDesignNativeModeTool(profileId: string, sessionKey: string, name: string, args: Record<string, unknown>): Promise<unknown> {
+  await ensureStateLoaded();
+  const current = state.designModeByKey[buildKey(profileId, sessionKey)];
+  const registration = [...bridgeRegistrations.values()].find(value => value.profileId === profileId && value.sessionKey === sessionKey
+    && current?.enabled && value.record.bridgeInfoFile === current.bridgeInfoFile && value.record.updatedAt === current.updatedAt);
+  if (!registration) throw Object.assign(new Error('Design mode is unavailable'), { code: current?.enabled ? 'MODE_UNAVAILABLE' : 'MODE_DISABLED' });
+  return dispatchDesignConsultation(registration, name, args);
 }
 
 export async function shutdownCodexDesignModeBridge(): Promise<void> {

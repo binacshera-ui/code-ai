@@ -10,8 +10,12 @@ import codexWordExportRoutes from './codexWordExportRoutes.js';
 import codexFinalNotificationRoutes from './codexFinalNotificationRoutes.js';
 import { recordCodexServerCrash } from './codexCrashLogs.js';
 import { CODEX_APP_CONFIG } from './config.js';
-import { shutdownCodexQueueWorker, startCodexQueueWorker } from './codexQueue.js';
-import { invalidateCodexModelCatalogCache } from './codexService.js';
+import { createIncidentRemoteGateway } from './incidentRemoteGateway.js';
+import { requestIncidentJson } from './incidentDecisionCenter.js';
+import { createWorkModeControlHandler } from './codexWorkModeRoutes.js';
+import { shutdownCodexQueueWorker, startCodexQueueWorker, ownsCodexQueueNativeFailure } from './codexQueue.js';
+import { readCodexNativeFailures } from './codexNativeFailureObserver.js';
+import { invalidateCodexModelCatalogCache, observeCodexNativeFailure } from './codexService.js';
 import {
   startCodexCliAutoUpdateWorker,
   stopCodexCliAutoUpdateWorker,
@@ -29,6 +33,7 @@ import { shutdownRemoteHostTunnels } from './remoteHostRegistry.js';
 import { shutdownCodexTerminals } from './codexTerminal.js';
 import { shutdownCodexDesignModeBridge } from './codexDesignMode.js';
 import { shutdownCodexUxModeBridge } from './codexUxMode.js';
+import { closeCodexSharedModeBridges } from './codexSharedModes.js';
 import {
   attachPersonalChromeBridge,
   createPersonalChromeBridgeRouter,
@@ -38,6 +43,13 @@ import {
   shutdownPersonalPortForwardBroker,
   startPersonalPortForwardBroker,
 } from './personalPortForwardBroker.js';
+import {
+  configureCodexDeploymentDrain,
+  createCodexDeploymentHttpTracker,
+  createCodexDeploymentPassiveHttpAdmission,
+  startCodexDeploymentDrainController,
+  stopCodexDeploymentDrainController,
+} from './codexDeploymentDrain.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,6 +62,28 @@ const HOST = process.env.HOST?.trim() || '0.0.0.0';
 // during a zero-interruption rollout. It must never lease queue work, emit
 // notifications, repair provider homes, or own browser/port-forward sockets.
 const PASSIVE_HTTP_NODE = process.env.CODE_AI_PASSIVE_HTTP_NODE === '1';
+// Configure before accepting any HTTP request. A passive upload node cannot
+// admit provider work outside the singleton queue owner's admission fence.
+const deploymentDrain = configureCodexDeploymentDrain({
+  queueRoot: CODEX_APP_CONFIG.queueRoot,
+  executionEnabled: !PASSIVE_HTTP_NODE,
+  // Source-runtime write ingress must register with the actual queue owner.
+  // Singleton mode is explicit verified-topology/qualification metadata only.
+  requiredHttpPeers: PASSIVE_HTTP_NODE || process.env.CODE_AI_HTTP_SINGLE_INGRESS === '1' ? [] : ['uploads'],
+  requiredParticipants: ['queue', 'agent', 'terminal', 'native-codex', 'http-writes', 'http-peers', 'app-http-lifecycle'],
+});
+// Route completion is not a full application-lifecycle proof. Top-level proxy
+// preparation, session-store callbacks and external writes can outlive socket
+// abort/peer death. Until those contracts are closed, no production seal may be
+// minted, even in singleton topology. Normal request/provider admission remains
+// open; the coordinator checks coverage before asking for a lease.
+deploymentDrain.registerParticipant('app-http-lifecycle', () => ({
+  ready: false,
+  active: 0,
+  reason: 'http_lifecycle_unqualified',
+}));
+const deploymentPassiveHttp = PASSIVE_HTTP_NODE ? createCodexDeploymentPassiveHttpAdmission(deploymentDrain) : null;
+const deploymentHttp = createCodexDeploymentHttpTracker(deploymentPassiveHttp || deploymentDrain);
 const STARTUP_CONFIGURATION_EXIT_CODE = 78;
 const configuredCorsOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
   .split(',')
@@ -98,6 +132,11 @@ app.use(cors({
   },
   credentials: true,
 }));
+
+// Before parsers/session middleware: a sealed boundary rejects a new request
+// before any handler can mutate persistent state or start provider work.
+// Stateless CORS runs first so cross-origin clients can read retryable 503s.
+app.use(deploymentHttp.middleware);
 
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: false }));
@@ -185,6 +224,12 @@ app.get('/api/auth/check-session', async (req, res) => {
 });
 
 app.use('/api/codex/browser-extension', createPersonalChromeBridgeRouter(requireCodexAccess));
+// Each registered sidecar authenticates with its own existing host token;
+// canonical support credentials remain on the control plane only.
+app.use('/api/codex/remote-incidents/:serverId', createIncidentRemoteGateway({ requestCanonical: requestIncidentJson }));
+// This local-only endpoint owns its own per-run capability. Do not require the
+// sidecar's host token or proxy it to a selected remote server.
+app.post('/api/codex/work-mode-control', createWorkModeControlHandler());
 app.use('/api/codex', requireRemoteAgentToken);
 app.use('/api/codex', createRemoteHostProxyMiddleware(requireCodexAccess));
 app.use('/api/codex/message-exports', requireCodexAccess, codexWordExportRoutes);
@@ -234,6 +279,9 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(publicPath, 'index.html'));
 });
 
+// Express does not await async handlers itself. Track their real promises,
+// including an aborted client's still-running handler, before seal acceptance.
+deploymentHttp.wrapHandlers(app);
 const server = createServer(app);
 if (!PASSIVE_HTTP_NODE) {
   attachPersonalChromeBridge(server);
@@ -257,9 +305,22 @@ server.once('error', (error: NodeJS.ErrnoException) => {
 server.once('listening', () => {
   console.log(`🚀 code-ai server running on ${HOST}:${PORT}`);
   if (PASSIVE_HTTP_NODE) {
+    void deploymentPassiveHttp?.start().catch(() => {
+      console.error('❌ Passive HTTP admission is unavailable; protected requests remain fail-closed');
+    });
     console.log('📦 Passive HTTP node ready; background workers are disabled');
     return;
   }
+
+  void startCodexDeploymentDrainController()
+    .then(() => console.log('📦 Private deployment-drain controller ready'))
+    .catch((error) => {
+      // Keep control failures sanitized and fail closed: a coordinator cannot
+      // obtain an acknowledged fenced boundary without this private socket.
+      console.error('❌ Deployment-drain controller unavailable', {
+        reason: error?.reason || 'controller_start_failed',
+      });
+    });
 
   repairAllProviderHomesOwnership(CODEX_APP_CONFIG.profiles);
 
@@ -267,7 +328,15 @@ server.once('listening', () => {
     startCodexCliAutoUpdateWorker(() => invalidateCodexModelCatalogCache());
   }
 
-  void startCodexFinalNotificationWorker()
+  void startCodexFinalNotificationWorker({
+    readNativeFailures: async cursor => {
+      const batch = await readCodexNativeFailures(
+        CODEX_APP_CONFIG.profiles.filter(profile => profile.provider === 'codex' && profile.mode === 'standard'), cursor);
+      for (const profileId of new Set(batch.failures.map(failure => failure.profileId))) observeCodexNativeFailure(profileId);
+      return batch;
+    },
+    ownsNativeFailure: ownsCodexQueueNativeFailure,
+  })
     .then(() => {
       console.log('🔔 Final-response notification worker started');
     })
@@ -298,6 +367,7 @@ function shutdownServer(signal: NodeJS.Signals): void {
     return;
   }
   shutdownStarted = true;
+  deploymentPassiveHttp?.stop();
   console.log(`🛑 ${signal} received; closing code-ai cleanly`);
   shutdownCodexTerminals();
   shutdownRemoteHostTunnels();
@@ -325,8 +395,11 @@ function shutdownServer(signal: NodeJS.Signals): void {
   void Promise.all([
     closeServer,
     PASSIVE_HTTP_NODE ? Promise.resolve() : shutdownCodexQueueWorker(),
-    shutdownCodexDesignModeBridge(),
-    shutdownCodexUxModeBridge(),
+    closeCodexSharedModeBridges().then(() => Promise.all([
+      shutdownCodexDesignModeBridge(),
+      shutdownCodexUxModeBridge(),
+    ])),
+    stopCodexDeploymentDrainController(),
   ])
     .then(() => {
       clearTimeout(forceExitTimer);

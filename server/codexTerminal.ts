@@ -6,6 +6,11 @@ import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
 import type { CodexProfileConfig } from './config.js';
 import { getProfileSpawnIdentity } from './providerRuntimeOwnership.js';
+import { resolveTerminalCodexLaunch } from './codexTerminalLaunch.js';
+import {
+  acquireCodexDeploymentAdmission,
+  registerCodexDeploymentDrainParticipant,
+} from './codexDeploymentDrain.mjs';
 
 const MAX_TERMINALS_PER_OWNER = 4;
 const MAX_TERMINALS_TOTAL = 16;
@@ -72,6 +77,8 @@ interface TerminalRecord {
   nextCursor: number;
   outputBytes: number;
   output: TerminalOutputChunk[];
+  codexCliVersion: string | null;
+  codexLaunchCommand: string | null;
 }
 
 export interface CodexTerminalSession {
@@ -83,6 +90,8 @@ export interface CodexTerminalSession {
   exited: boolean;
   exitCode: number | null;
   exitSignal: number | null;
+  codexCliVersion: string | null;
+  codexLaunchCommand: string | null;
 }
 
 export interface CodexTerminalOutput {
@@ -103,6 +112,10 @@ export interface CreateCodexTerminalOptions {
 }
 
 const terminals = new Map<string, TerminalRecord>();
+registerCodexDeploymentDrainParticipant('terminal', () => ({
+  ready: true,
+  active: getActiveCodexTerminalCount(),
+}));
 
 function clampInteger(
   value: number | undefined,
@@ -214,6 +227,15 @@ function buildTerminalEnvironment(
   environment.PWD = cwd;
   environment.CODEX_HOME = profile.codexHome;
   environment.SHELL = shellExecutable;
+  // Codex dispatchers need these public routing fields, not application credentials.
+  for (const key of ['CODE_AI_CODEX_NATIVE_BIN', 'CODE_AI_CODEX_SHARED_SOCKET', 'CODE_AI_CODEX_SHARED_STDIO']) {
+    if (process.env[key]) environment[key] = process.env[key]!;
+  }
+  if (process.platform !== 'win32' && !/utf-?8/i.test(environment.LC_ALL || environment.LC_CTYPE || environment.LANG || '')) {
+    environment.LANG = 'C.UTF-8';
+    environment.LC_CTYPE = 'C.UTF-8';
+    if (environment.LC_ALL) environment.LC_ALL = 'C.UTF-8';
+  }
 
   if (identity.home) {
     environment.HOME = identity.home;
@@ -239,6 +261,8 @@ function summarizeTerminal(record: TerminalRecord): CodexTerminalSession {
     exited: record.exitedAt !== null,
     exitCode: record.exitCode,
     exitSignal: record.exitSignal,
+    codexCliVersion: record.codexCliVersion,
+    codexLaunchCommand: record.codexLaunchCommand,
   };
 }
 
@@ -302,6 +326,19 @@ cleanupTimer.unref();
 export function createCodexTerminalSession(
   options: CreateCodexTerminalOptions
 ): CodexTerminalSession {
+  const admission = acquireCodexDeploymentAdmission('terminal');
+  try {
+    return createAdmittedCodexTerminalSession(options, admission);
+  } catch (error) {
+    admission.release();
+    throw error;
+  }
+}
+
+function createAdmittedCodexTerminalSession(
+  options: CreateCodexTerminalOptions,
+  admission: { release(): void },
+): CodexTerminalSession {
   removeExpiredTerminals();
 
   const ownerTerminals = [...terminals.values()]
@@ -318,6 +355,10 @@ export function createCodexTerminalSession(
   const shell = resolveTerminalShell(systemIdentity);
   const columns = clampInteger(options.columns, 100, MIN_COLUMNS, MAX_COLUMNS);
   const rows = clampInteger(options.rows, 30, MIN_ROWS, MAX_ROWS);
+  const sharedProfiles = new Set((process.env.CODE_AI_CODEX_SHARED_OWNER_PROFILES || '').split(',').map(value => value.trim()));
+  const sharedSocket = process.platform !== 'win32' && sharedProfiles.has(options.profile.id)
+    ? path.join(options.profile.codexHome, 'code-ai-shared-owner', 'owner.sock') : undefined;
+  const codex = resolveTerminalCodexLaunch(shell.executable, process.env, sharedSocket);
   const terminalProcess = pty.spawn(shell.executable, shell.args, {
     name: 'xterm-256color',
     cols: columns,
@@ -347,6 +388,8 @@ export function createCodexTerminalSession(
     nextCursor: 0,
     outputBytes: 0,
     output: [],
+    codexCliVersion: codex.version,
+    codexLaunchCommand: codex.command,
   };
   terminals.set(record.id, record);
 
@@ -356,6 +399,9 @@ export function createCodexTerminalSession(
     record.exitSignal = Number.isInteger(signal) ? Number(signal) : null;
     record.exitedAt = Date.now();
     record.lastActivityAt = record.exitedAt;
+    // Requesting PTY termination is not proof that its process has exited.
+    // Keep the deployment ticket until the actual native exit callback.
+    admission.release();
   });
 
   return summarizeTerminal(record);

@@ -1,16 +1,19 @@
+import {queueExecutionStatus} from '../../../../shared/queueExecutionStatus';
+
 export interface ActiveTaskItem {
   id: string;
   profileId: string;
   sessionId: string | null;
   queueKey: string;
   status: string;
+  nativeSubmission?: {deliveryPhase?:string;turnId?:string|null}|null;
   startedAt: string | null;
   promptPreview: string;
 }
 
 /** Scheduled/queued work is not executing yet; cancelled work must disappear. */
 export function selectRunningTasks<T extends ActiveTaskItem>(items: readonly T[], profileId: string): T[] {
-  return items.filter(item => item.profileId === profileId && ['running', 'cancelling'].includes(item.status))
+  return items.filter(item => item.profileId === profileId && ['running', 'cancelling'].includes(queueExecutionStatus(item)))
     .sort((a, b) => (a.startedAt || '').localeCompare(b.startedAt || '') || a.id.localeCompare(b.id));
 }
 

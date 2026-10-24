@@ -81,12 +81,13 @@ export interface PersonalChromeAuthEnvelope {
   token: string;
   extensionId?: string;
   userAgent?: string;
+  profileIdentity?: unknown;
 }
 
 export interface PersonalChromeEventEnvelope {
   type: 'event';
   version: typeof PERSONAL_CHROME_PROTOCOL_VERSION;
-  name: 'heartbeat' | 'selection' | 'tab_changed' | 'capabilities';
+  name: 'heartbeat' | 'selection' | 'tab_changed' | 'capabilities' | 'profile_identity';
   payload?: unknown;
 }
 
@@ -104,6 +105,15 @@ export type PersonalChromeServerEnvelope =
     version: typeof PERSONAL_CHROME_PROTOCOL_VERSION;
     deviceId: string;
     connectedAt: string;
+    profileIdentity?: unknown;
+    profileRevision?: number;
+    profileSyncSupported?: boolean;
+  }
+  | {
+    type: 'profile_updated';
+    version: typeof PERSONAL_CHROME_PROTOCOL_VERSION;
+    profileIdentity: unknown;
+    profileRevision: number;
   }
   | {
     type: 'error';

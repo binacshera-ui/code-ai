@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  clearCodexAccountUsageCache,
   consumeCodexRateLimitResetCredit,
   loadCodexAccountUsage,
   parseCodexResetCreditsPayload,
@@ -224,4 +225,16 @@ test('an available credit with zero applicable summary count reaches the provide
     assert.equal(consumeCalls, 1);
     assert.deepEqual(result, { outcome, windowsReset: outcome === 'reset' ? 1 : 0 });
   }
+});
+
+test('a quota response begun before logout cannot repopulate the new account cache', async t => {
+ const codexHome=await fs.mkdtemp(path.join(os.tmpdir(),'code-ai-auth-epoch-'));t.after(()=>fs.rm(codexHome,{recursive:true,force:true}));
+ const profile={id:'epoch-profile',codexHome};const auth=path.join(codexHome,'auth.json');
+ await fs.writeFile(auth,JSON.stringify({tokens:{access_token:'synthetic-old-token',account_id:'synthetic-old-account'}}));
+ let release!:()=>void;const held=new Promise<void>(r=>{release=r});let begun!:()=>void;const started=new Promise<void>(r=>{begun=r});
+ const old=loadCodexAccountUsage(profile,{forceRefresh:true,fetchImpl:async url=>{begun();await held;return{ok:true,status:200,json:async()=>url.endsWith('/usage')?{...usageFixture,email:'old@example.test'}:resetCreditsFixture}}});
+ await started;clearCodexAccountUsageCache(profile);await fs.writeFile(auth,JSON.stringify({tokens:{access_token:'synthetic-new-token',account_id:'synthetic-new-account'}}));
+ const fresh=await loadCodexAccountUsage(profile,{forceRefresh:true,fetchImpl:async url=>({ok:true,status:200,json:async()=>url.endsWith('/usage')?{...usageFixture,email:'new@example.test'}:resetCreditsFixture})});
+ assert.equal(fresh.account.email,'new@example.test');release();await old;
+ const cached=await loadCodexAccountUsage(profile,{fetchImpl:async()=>{throw Error('Unexpected fetch')}});assert.equal(cached.account.email,'new@example.test');
 });

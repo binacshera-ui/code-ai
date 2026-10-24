@@ -1,0 +1,1 @@
+import {createRequire}from'node:module';const {build}=createRequire('/root/projects/code-ai/package.json')('esbuild');await build({entryPoints:['/root/projects/code-ai/ops/fleet-update-20261014/diagnostic-codexAppServer.ts'],outfile:'/root/projects/code-ai/ops/fleet-update-20261014/diagnostic-codexAppServer.mjs',bundle:true,platform:'node',format:'esm',logLevel:'warning'});

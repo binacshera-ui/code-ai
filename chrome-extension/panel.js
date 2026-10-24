@@ -1,3 +1,6 @@
+import { normalizeProfileIdentity } from './profileIdentity.js';
+import { pairPanelInstallation } from './panelPairing.js';
+
 const configuredOrigin = new URL(
   document.querySelector('meta[name="code-ai-control-origin"]')?.content || 'http://127.0.0.1:4000',
 ).origin;
@@ -16,6 +19,7 @@ let lastContextKey = '';
 let frameReady = false;
 let pendingAppMessages = [];
 let currentWorkspaceState = { workspace: null, tabs: [], anchorTabId: null, profileIsolation: null };
+let editedProfile = normalizeProfileIdentity(null);
 
 function renderWorkspace(state = currentWorkspaceState) {
   currentWorkspaceState = { ...currentWorkspaceState, ...(state || {}) };
@@ -164,16 +168,109 @@ function postToApp(message) {
 
 function setStatus(status) {
   bridgeStatus = { ...bridgeStatus, ...status };
+  document.querySelector('#pairing-drawer').hidden = bridgeStatus.paired === true;
   settings = { ...settings, ...(status.settings || {}), controlOrigin: status.controlOrigin || status.settings?.controlOrigin || settings.controlOrigin || configuredOrigin };
   connectionDot.className = `dot ${status.connected ? 'online' : status.paired ? 'offline' : ''}`;
   connectionLabel.textContent = status.connected
-    ? `כלי דפדפן מחוברים · ${status.deviceName || settings.deviceName || 'Chrome אישי'}`
+    ? `תוסף Chrome מחובר · ${status.deviceName || settings.deviceName || 'Chrome אישי'}`
     : status.paired
       ? 'CODE-AI פתוח · כלי הדפדפן מתחברים…'
       : 'CODE-AI פתוח · נדרש אישור מכשיר חד־פעמי';
+  const avatar = document.querySelector('#profile-avatar');
+  const identity = normalizeProfileIdentity(bridgeStatus.profileIdentity);
+  avatar.hidden = !identity.avatarDataUrl;
+  if (!avatar.hidden) avatar.src = identity.avatarDataUrl;
+  document.querySelector('#profile-sync-status').textContent = bridgeStatus.profileSyncStatus === 'synced'
+    ? 'שם ותמונה מסונכרנים במכשיר ובשרת'
+    : bridgeStatus.profileSyncStatus === 'conflict'
+      ? 'הפרופיל השתנה במקום אחר. העריכה המקומית נשמרה; בדוק ושמור שוב.'
+      : bridgeStatus.profileSyncStatus === 'unavailable'
+        ? 'שם ותמונה נשמרים במכשיר בלבד; השרת הפעיל עדיין אינו תומך בסנכרון.'
+        : bridgeStatus.profileSyncStatus === 'pending' ? 'הפרטים נשמרו במכשיר וממתינים לסנכרון לשרת.' : '';
   postToApp({ type: 'code-ai:extension-status', ...status });
   if (status.connected) postToApp({ type: 'code-ai:extension-request-context' });
 }
+
+document.querySelector('#profile-settings').addEventListener('click', () => {
+  editedProfile = normalizeProfileIdentity(bridgeStatus.profileIdentity);
+  document.querySelector('#profile-name').value = editedProfile.name || settings.deviceName || '';
+  document.querySelector('#profile-drawer').hidden = false;
+});
+
+document.querySelector('#pairing-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (enrollmentInFlight) return;
+  enrollmentInFlight = true;
+  const button = document.querySelector('#pairing-submit');
+  button.disabled = true;
+  try {
+    const response = await pairPanelInstallation({
+      controlOrigin: configuredOrigin,
+      code: document.querySelector('#pairing-code').value,
+      deviceName: settings.deviceName || 'Chrome במחשב האישי',
+    }, sendRuntimeMessage);
+    document.querySelector('#pairing-code').value = '';
+    settings = response.settings;
+    setStatus({ ...response, paired: true });
+    showNotice('ההתקנה החדשה אושרה. מחבר את כלי הדפדפן…', 'success');
+    frameReady = false;
+    frame.src = appUrl();
+  } catch (error) {
+    showNotice(error.message || 'צימוד התוסף נכשל. צור קוד חדש ונסה שוב.', 'error');
+  } finally {
+    button.disabled = false;
+    enrollmentInFlight = false;
+  }
+});
+document.querySelector('#profile-close').addEventListener('click', () => {
+  document.querySelector('#profile-drawer').hidden = true;
+});
+document.querySelector('#profile-import').addEventListener('change', async event => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    if (file.size > 100_000) throw new Error('קובץ זיהוי הפרופיל גדול מדי. אין לייבא קובצי Preferences או Local State.');
+    const imported = JSON.parse(await file.text());
+    if (imported.format !== 'code-ai-chrome-profile' || imported.version !== 1) throw new Error('נדרש קובץ זיהוי שנוצר בכלי המקומי של CODE-AI, לא קובץ הגדרות Chrome.');
+    editedProfile = normalizeProfileIdentity({ ...imported.profileIdentity, source: 'chrome-local' });
+    if (!editedProfile.name) throw new Error('לא נמצא שם פרופיל בקובץ.');
+    document.querySelector('#profile-name').value = editedProfile.name;
+    showNotice('פרטי Chrome נטענו. לחץ שמור להחלתם.');
+  } catch (error) { showNotice(error.message || 'ייבוא הפרופיל נכשל.', 'error'); }
+  finally { event.target.value = ''; }
+});
+document.querySelector('#profile-picture').addEventListener('change', async event => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 5_000_000) throw new Error('בחר תמונת PNG, JPEG או WebP עד 5 MB.');
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 96;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, 96, 96);
+    bitmap.close();
+    editedProfile = normalizeProfileIdentity({ ...editedProfile, avatarDataUrl: canvas.toDataURL('image/png'), source: 'custom' });
+    showNotice('התמונה הוכנה. לחץ שמור להחלתה.');
+  } catch (error) { showNotice(error.message || 'טעינת התמונה נכשלה.', 'error'); }
+  finally { event.target.value = ''; }
+});
+document.querySelector('#profile-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const name = document.querySelector('#profile-name').value.trim();
+  if (!name) { showNotice('יש להזין שם לפרופיל.', 'error'); return; }
+  const button = event.target.querySelector('button[type=submit]');
+  button.disabled = true;
+  try {
+    const response = await sendRuntimeMessage({ type: 'PANEL_SAVE_PROFILE', profileIdentity: {
+      ...editedProfile, name, source: name === editedProfile.name ? editedProfile.source : 'custom',
+    } });
+    setStatus(response);
+    if (!response.ok) throw new Error(response.error || 'שמירת הפרופיל נכשלה.');
+    document.querySelector('#profile-drawer').hidden = true;
+    showNotice(response.saveMessage || 'פרטי הפרופיל נשמרו בתוסף.', response.profileSyncStatus === 'synced' ? 'success' : 'info');
+  } catch (error) { showNotice(error.message || 'שמירת הפרופיל נכשלה.', 'error'); }
+  finally { button.disabled = false; }
+});
 
 function publishExtensionBootstrap() {
   if (!bridgeStatus.extensionId || !bridgeStatus.installationId) return;
@@ -244,6 +341,7 @@ async function syncContext(context) {
   try {
     const response = await sendRuntimeMessage({ type: 'SYNC_ACTIVE_SESSION', context });
     if (!response.ok) throw new Error(response.error || 'חיבור כלי הדפדפן לסשן נכשל.');
+    if (lastContextKey !== contextKey || response.superseded) return;
     if (response.personalChromeMode) {
       postToApp({
         type: 'code-ai:extension-mode-synced',

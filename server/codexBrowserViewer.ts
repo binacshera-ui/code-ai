@@ -889,6 +889,15 @@ class BrowserViewerBridge {
     }
   }
 
+  async callNativeModeTool(name: string, args: Record<string, unknown>, assertEnabled: () => Promise<void>): Promise<unknown> {
+    return this.enqueue(async () => {
+      await assertEnabled();
+      await this.ensureReady();
+      await assertEnabled();
+      return this.callTool(name, args);
+    });
+  }
+
   private async callTool<T>(name: string, argumentsValue: Record<string, unknown>): Promise<T> {
     if (this.httpBridgeUrl) {
       const response = await fetch(`${this.httpBridgeUrl}/call`, {
@@ -1119,6 +1128,18 @@ async function resolveViewerBridge(
       viewerCreationBySessionDirectory.delete(sessionDirectoryKey);
     }
   }
+}
+
+/** Private native-owner entry: reuses the session browser and its action queue. */
+export async function dispatchBrowserNativeModeTool(profile: CodexProfileConfig, sessionKey: string, name: string, args: Record<string, unknown>, stateProfileId = profile.id): Promise<unknown> {
+  const assertEnabled = async () => {
+    if (!(await getSessionBrowserModeRecord(stateProfileId, sessionKey))?.enabled) {
+      throw Object.assign(new Error('Browser mode is disabled'), { code: 'MODE_DISABLED' });
+    }
+  };
+  await assertEnabled();
+  const bridge = await resolveViewerBridge(profile, sessionKey, stateProfileId);
+  return bridge.callNativeModeTool(name, args, assertEnabled);
 }
 
 export async function acquireSessionBrowserRuntime(

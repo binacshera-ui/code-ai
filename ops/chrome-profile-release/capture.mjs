@@ -1,0 +1,18 @@
+import { cp,mkdir,mkdtemp,readFile,writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import assert from 'node:assert/strict';
+import path from 'node:path';
+const root='/root/projects/code-ai';
+const baseline='/mnt/hdd/code-ai-builds/drafts-panel-corrected-YkVl4c/payload';
+const stage=await mkdtemp('/mnt/hdd/code-ai-builds/chrome-profile-source-');
+for(const name of ['package.json','pnpm-lock.yaml','test.mjs','build.mjs']) await cp(path.join(root,'ops/chrome-profile-release',name),path.join(stage,name));
+await mkdir(stage+'/payload');
+for(const name of ['client','server','shared','scripts','skills','chrome-extension','package.json','package-lock.json','tsconfig.json','vite.config.ts']) await cp(path.join(baseline,name),path.join(stage,'payload',name),{recursive:true,verbatimSymlinks:true});
+const files=['chrome-extension/README.md','chrome-extension/background.js','chrome-extension/manifest.json','chrome-extension/panel.css','chrome-extension/panel.html','chrome-extension/panel.js','chrome-extension/bridgeTransport.js','chrome-extension/profileIdentity.js','chrome-extension/profileIdentity.d.ts','chrome-extension/panelOpen.js','chrome-extension/selectionAccess.js','server/personalChromeBridge.ts','server/personalChromeProtocol.ts','client/src/components/codex/PersonalChromeModeDialog.tsx','scripts/personal-chrome-extension.test.mjs','scripts/personal-chrome-background-startup.test.mjs','scripts/personal-chrome-device-contract.test.mjs','scripts/personal-chrome-panel-profile.test.mjs','scripts/personal-chrome-transport.test.mjs'];
+for(const name of files)await cp(path.join(root,name),path.join(stage,'payload',name));
+const hash=async file=>createHash('sha256').update(await readFile(file)).digest('hex');
+const liveHash=await hash(root+'/dist/server.js');
+assert.equal(liveHash,'240e9f7e6a5b14a8e0754134cb1b448e051e6580bab0ddafb751bf9a381b07c7','Accepted runtime moved; integrate onto its successor first');
+const metadata={baselineBuildId:'74ee3eaf-de92-4f53-be0b-c0a1e46fa1be',baselineServerSha256:liveHash,changedPaths:files,sourceHashes:Object.fromEntries(await Promise.all(files.map(async file=>[file,await hash(path.join(stage,'payload',file))])))};
+await writeFile(stage+'/source-identity.json',JSON.stringify(metadata,null,2)+'\n');
+console.log(JSON.stringify({stage,baselineBuildId:metadata.baselineBuildId,changedPathCount:files.length}));

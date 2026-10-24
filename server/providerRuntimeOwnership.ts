@@ -45,6 +45,14 @@ function findNearestExistingPath(targetPath: string): string | null {
 }
 
 function resolveOwnerIdentity(profile: ProviderRuntimeProfile): ProfileOwnerIdentity | null {
+  // Explicit deployment policy: profile directory ownership is not a runtime identity.
+  if (process.env.CODE_AI_PROFILE_RUNTIME_USER === 'root') {
+    if (typeof process.getuid !== 'function' || process.getuid() !== 0) {
+      throw new Error('CODE_AI_PROFILE_RUNTIME_USER=root requires code-ai to run as root');
+    }
+    return { uid: 0, gid: 0, sourcePath: 'CODE_AI_PROFILE_RUNTIME_USER=root' };
+  }
+
   const candidates = listOwnershipSeeds(profile)
     .map((seedPath) => findNearestExistingPath(seedPath))
     .filter((value): value is string => Boolean(value))
@@ -156,7 +164,7 @@ export function getProfileSpawnIdentity(profile: ProviderRuntimeProfile): {
   }
 
   if (identity.uid === 0 && identity.gid === 0) {
-    return {};
+    return process.env.CODE_AI_PROFILE_RUNTIME_USER === 'root' ? { uid: 0, gid: 0 } : {};
   }
 
   return {

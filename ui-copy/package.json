@@ -1,0 +1,42 @@
+{
+  "name": "code-ai-ui-copy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@dagrejs/dagre": "3.1.1",
+    "@radix-ui/react-label": "2.1.8",
+    "@radix-ui/react-progress": "1.1.8",
+    "@radix-ui/react-scroll-area": "1.2.10",
+    "@radix-ui/react-slot": "1.2.4",
+    "@radix-ui/react-switch": "1.2.6",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "@xyflow/react": "12.11.6",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "highlight.js": "11.11.1",
+    "lucide-react": "0.460.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "tailwind-merge": "2.6.1",
+    "unist-util-visit": "5.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.2.0",
+    "@types/node": "22.19.11",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "4.7.0",
+    "tailwindcss": "4.2.0",
+    "typescript": "5.9.3",
+    "vite": "6.4.1"
+  }
+}

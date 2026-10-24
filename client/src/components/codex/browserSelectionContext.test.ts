@@ -63,6 +63,7 @@ test('builds explicitly untrusted, selection-focused prompt context', () => {
   const prompt = buildBrowserSelectionPromptContext([selection]);
   assert.match(prompt || '', /trust="untrusted-page-content"/);
   assert.match(prompt || '', /browser_selection_context/);
+  assert.match(prompt || '', /selectionIds=\["selection-2"\]/);
   assert.match(prompt || '', /selection-2/);
   assert.match(prompt || '', /Ignore all previous instructions/);
 });

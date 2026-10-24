@@ -1,3 +1,5 @@
+import { resolveCodexExecutionSelection } from './codexExecutionSelection.js';
+import { isCodexInlineImage } from './codexAttachmentInputs.js';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'child_process';
 import { randomUUID } from 'crypto';
 import { createReadStream, promises as fs, watch as watchFileSystem, type FSWatcher } from 'fs';
@@ -54,10 +56,19 @@ import {
   type ProviderSessionStartedHandler,
 } from './providerProcessLifecycle.js';
 import { getCodexCliAutoUpdateSnapshot } from './codexCliAutoUpdate.js';
-import { normalizeCodexSessionRow } from './codexSessionMessages.js';
+import { normalizeCodexSessionRow,createCodexMessageProjection } from './codexSessionMessages.js';
+import { createSessionReadBudget, detachSessionText } from './codexSessionReadBudget.mjs';
+import {resolveCodexRuntimeProgram} from './codexRuntimePrograms.mjs';
 import { walkJsonlFiles } from './codexSessionFiles.js';
+import { listStoredCodexHistories, readStoredCodexHistory, storedHistoryRevision } from './codexStoredHistory.mjs';
 import { isolateProviderProcessEnv } from './providerProcessEnv.js';
 import { isUserSelectableCodexModel } from './codexModelVisibility.js';
+import { runCodexAppServerTurn, CodexAppServerCancelledError, CodexAppServerDetachedError, type CodexSharedSubmission } from './codexAppServer.js';
+import { nativeClientMessageId, normalizeNativeSubmission } from './codexSharedSubmission.mjs';
+import { resolveCodexSharedSocket } from './codexSharedSocket.mjs';
+import { recoverManagedQueuedSubmission } from './codexQueuedRecovery.mjs';
+import { ensureCodexSharedModeBridge, bindCodexSharedModeContext } from './codexSharedModes.js';
+import { registerCodexDeploymentDrainParticipant } from './codexDeploymentDrain.mjs';
 
 export interface CodexProfile {
   id: string;
@@ -65,6 +76,7 @@ export interface CodexProfile {
   provider: AppProvider;
   mode?: 'standard' | 'support' | 'agent';
   codexHome: string;
+  sessionArchiveRoots?: string[];
   workspaceCwd: string;
   sourceProfileId?: string;
   sandboxCwd?: string;
@@ -82,6 +94,9 @@ export interface CodexUploadedAttachment {
 }
 
 export interface CodexSessionMessage {
+  nativeItemId?: string;
+  clientUserMessageId?: string;
+  messageProjectionSource?: string;
   id: string;
   role: 'user' | 'assistant';
   kind: 'prompt' | 'commentary' | 'final' | 'transfer';
@@ -90,6 +105,9 @@ export interface CodexSessionMessage {
 }
 
 export interface CodexTimelineEntry {
+  nativeItemId?: string;
+  clientUserMessageId?: string;
+  messageProjectionSource?: string;
   id: string;
   entryType: 'message' | 'tool' | 'status';
   timestamp: string;
@@ -201,9 +219,11 @@ export interface CodexSessionSummary {
   agentSession?: CodexAgentSessionMeta | null;
   nativeSubagents?: CodexNativeSubagentGroup | null;
   lastCompletedAt?: string | null;
+  nativeRunStatus?: CodexNativeSubagentStatus;
 }
 
 export interface CodexSessionDetail extends CodexSessionSummary {
+  timelineProjectionVersion?: number;
   cwd: string | null;
   modelProvider: string | null;
   messages: CodexSessionMessage[];
@@ -216,6 +236,7 @@ export interface CodexSessionDetail extends CodexSessionSummary {
 }
 
 interface SessionScanRecord {
+  storedHistory?: Awaited<ReturnType<typeof listStoredCodexHistories>>[number];
   id: string;
   path: string;
   updatedAt: string;
@@ -232,6 +253,7 @@ interface SessionScanRecord {
     role: string | null;
   } | null;
   sourceSignature?: string;
+  fileBytes?: number;
 }
 
 interface SessionScanCacheEntry {
@@ -347,6 +369,7 @@ interface ParsedSession {
 }
 
 interface ParseSessionFileOptions {
+  endByte?: number;
   startByte?: number;
   maxRetainedMessages?: number;
   maxRetainedTimelineEntries?: number;
@@ -579,6 +602,7 @@ interface CodexConfigDefaults {
 interface ActiveCodexRun {
   child: ReturnType<typeof spawn>;
   cancelRequested: boolean;
+  interrupt?: () => void;
 }
 
 const CODEX_BIN = process.env.CODEX_BIN || 'codex';
@@ -598,7 +622,7 @@ const SESSION_CATALOG_CACHE_TTL_MS = Math.max(
 );
 // Summary status/preview parsing is persisted separately from session detail.
 // Keep its version in step with parser changes that affect the conversation list.
-const SESSION_CATALOG_CACHE_VERSION = 'v3';
+const SESSION_CATALOG_CACHE_VERSION = 'v5';
 const SESSION_CATALOG_CACHE_ROOT = path.join(
   CODEX_APP_CONFIG.storageRoot,
   'session-catalog-cache',
@@ -619,7 +643,7 @@ const SESSION_DETAIL_CACHE_MAX_BYTES = Math.max(
 const SESSION_DETAIL_CACHE_OBJECT_OVERHEAD_MULTIPLIER = 3;
 // Bump when rollout parsing semantics change so persisted details cannot hide
 // newly recognized terminal states or error messages after a deployment.
-const SESSION_DETAIL_CACHE_VERSION = 'v4';
+const SESSION_DETAIL_CACHE_VERSION = 'v7';
 const SESSION_DETAIL_CACHE_ROOT = path.join(
   CODEX_APP_CONFIG.storageRoot,
   'session-read-cache',
@@ -639,8 +663,14 @@ const sessionIndexCache = new Map<string, SessionIndexCacheEntry>();
 const sessionDetailCache = new Map<string, SessionDetailCacheRecord>();
 let sessionDetailCacheEstimatedBytes = 0;
 const sessionDetailLoads = new Map<string, Promise<CodexSessionDetail>>();
+const sessionReadBudget = createSessionReadBudget({ concurrency: 2 });
 const activeCodexRuns = new Map<string, ActiveCodexRun>();
+registerCodexDeploymentDrainParticipant('native-codex', () => ({
+  ready: true,
+  active: activeCodexRuns.size,
+}));
 const MODEL_CATALOG_CACHE_TTL_MS = 60_000;
+let modelCatalogCacheEpoch = 0;
 const modelCatalogCache = new Map<string, {
   expiresAt: number;
   models: CodexAvailableModel[];
@@ -738,10 +768,10 @@ function extractCodexEventErrorMessage(payload: any): string | null {
 function clipLongText(text: string, limit = MAX_TOOL_TEXT): string {
   const normalized = text.trim();
   if (normalized.length <= limit) {
-    return normalized;
+    return normalized === text ? normalized : detachSessionText(normalized);
   }
 
-  return `${normalized.slice(0, limit - 1).trimEnd()}\n…`;
+  return `${detachSessionText(normalized.slice(0, limit - 1).trimEnd())}\n…`;
 }
 
 function safeJsonParse<T>(value: string): T | null {
@@ -1250,6 +1280,8 @@ function sanitizeRecoveredQueueItem(value: unknown): RecoveredQueueItem | null {
   }
 
   const candidate = value as Record<string, unknown>;
+  // Unsent questions belong to the draft cards, never to provider transcripts.
+  if (candidate.status === 'draft') return null;
   const profileId = typeof candidate.profileId === 'string' ? candidate.profileId.trim() : '';
   const sessionId = typeof candidate.sessionId === 'string' ? candidate.sessionId.trim() : '';
   const prompt = typeof candidate.prompt === 'string' ? candidate.prompt.trim() : '';
@@ -1469,9 +1501,11 @@ async function buildSessionScanRows(profile: CodexProfile): Promise<SessionScanR
   const roots = [
     path.join(profile.codexHome, 'sessions'),
     path.join(profile.codexHome, 'archived_sessions'),
+    ...(profile.sessionArchiveRoots || []),
   ];
 
   const seen = new Set<string>();
+  const rowIndexById = new Map<string, number>();
   const rows: SessionScanRecord[] = [];
 
   for (const rootDir of roots) {
@@ -1541,6 +1575,7 @@ async function buildSessionScanRows(profile: CodexProfile): Promise<SessionScanR
             forkedFromId: metaRow?.payload?.forked_from_id || null,
             nativeSubagent,
             sourceSignature: `${stats.dev}:${stats.ino}:${stats.size}:${Math.trunc(stats.mtimeMs * 1_000)}`,
+            fileBytes: stats.size,
           };
         } catch (error: any) {
           // Files may disappear while Codex rotates or deletes a session.
@@ -1550,13 +1585,46 @@ async function buildSessionScanRows(profile: CodexProfile): Promise<SessionScanR
       }));
 
       for (const record of records) {
-        if (!record || seen.has(record.id)) continue;
-        seen.add(record.id);
-        rows.push(record);
+        if (!record) continue;
+        const existingIndex = rowIndexById.get(record.id);
+        if (existingIndex === undefined) {
+          seen.add(record.id);
+          rowIndexById.set(record.id, rows.length);
+          rows.push(record);
+          continue;
+        }
+
+        // Codex can leave an aborted stub and later write the same logical
+        // session into a second rollout. Prefer the latest revision instead
+        // of binding the UI to the first filename seen.
+        const existing = rows[existingIndex]!;
+        if (
+          record.updatedAt > existing.updatedAt
+          || (record.updatedAt === existing.updatedAt && (record.fileBytes || 0) > (existing.fileBytes || 0))
+        ) {
+          rows[existingIndex] = record;
+        }
       }
     }
   }
 
+  // A projected history can outlive its source rollout. It is display-only;
+  // never replace a real JSONL, resume it, or feed it back into model context.
+  const storedHistories = await listStoredCodexHistories(profile.codexHome).catch((error) => {
+    console.warn(`[codex-history] Optional database projection unavailable for ${profile.id}: ${error.code || error.name}`);
+    return [];
+  });
+  for (const record of storedHistories) {
+    if (seen.has(record.id)) continue;
+    seen.add(record.id);
+    rows.push({
+      id: record.id, path: `${record.historyPath}#${record.id}`, storedHistory: record,
+      createdAt: record.createdAt || null, updatedAt: record.updatedAt,
+      cwd: record.cwd, modelProvider: record.modelProvider, source: 'history-db',
+      forkedFromId: null, nativeSubagent: record.nativeSubagent,
+      sourceSignature: storedHistoryRevision(record).revision,
+    });
+  }
   rows.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   return rows;
 }
@@ -1707,6 +1775,7 @@ async function readRateLimitSnapshotFromSessionRecord(
   profile: CodexProfile,
   sessionRecord: SessionScanRecord
 ): Promise<CodexRateLimitSnapshot | null> {
+  if (sessionRecord.storedHistory) return null;
   const tailLines = await readFileTail(sessionRecord.path, 96 * 1024);
 
   for (const line of [...tailLines].reverse()) {
@@ -2215,6 +2284,7 @@ async function parseSessionFile(
 
   const stream = createReadStream(sessionPath, {
     encoding: 'utf-8',
+    ...(typeof options?.endByte === 'number' ? { end: Math.max(0, options.endByte - 1) } : {}),
     ...(typeof options?.startByte === 'number' && options.startByte > 0
       ? { start: options.startByte }
       : {}),
@@ -2224,9 +2294,11 @@ async function parseSessionFile(
     crlfDelay: Infinity,
   });
 
+  const projectMessage=createCodexMessageProjection(timeline);
+
   try {
     for await (const line of lineReader) {
-      const row = normalizeCodexSessionRow(safeJsonParse<any>(line));
+      const row = projectMessage(safeJsonParse<any>(line));
       if (!row) {
         continue;
       }
@@ -2271,11 +2343,13 @@ async function parseSessionFile(
         }
 
         if (eventType === 'user_message' && typeof payload.message === 'string') {
+          const identity={...(payload.nativeItemId?{nativeItemId:payload.nativeItemId}:{}),...(payload.clientUserMessageId?{clientUserMessageId:payload.clientUserMessageId}:{}),messageProjectionSource:payload.messageProjectionSource};
           const text = payload.message.trim();
           const entryId = `${sessionId}-user-${messageCount}`;
           const compactClone = parseCompactClonePrompt(text);
 
           pushMessage({
+            ...identity,
             id: entryId,
             role: 'user',
             kind: 'prompt',
@@ -2284,6 +2358,7 @@ async function parseSessionFile(
           });
 
           pushTimeline({
+            ...identity,
             id: entryId,
             entryType: 'message',
             role: 'user',
@@ -2315,11 +2390,13 @@ async function parseSessionFile(
         }
 
         if (eventType === 'agent_message' && typeof payload.message === 'string') {
+          const identity={...(payload.nativeItemId?{nativeItemId:payload.nativeItemId}:{}),messageProjectionSource:payload.messageProjectionSource};
           const text = payload.message.trim();
           const kind = payload.phase === 'commentary' ? 'commentary' : 'final';
           const entryId = `${sessionId}-assistant-${messageCount}`;
 
           pushMessage({
+            ...identity,
             id: entryId,
             role: 'assistant',
             kind,
@@ -2328,6 +2405,7 @@ async function parseSessionFile(
           });
 
           pushTimeline({
+            ...identity,
             id: entryId,
             entryType: 'message',
             role: 'assistant',
@@ -2775,6 +2853,11 @@ function isPathInsideDirectory(rootPath: string, targetPath: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+function isProfileSessionPath(profile: CodexProfile, targetPath: string): boolean {
+  return [profile.codexHome, ...(profile.sessionArchiveRoots || [])]
+    .some((root) => isPathInsideDirectory(root, targetPath));
+}
+
 function buildSessionDetailVariant(options?: {
   tail?: number;
   before?: number;
@@ -2967,7 +3050,7 @@ async function resolveSessionRecordFromPersistedDetail(
       || detail.id !== sessionId
       || detail.profileId !== profile.id
       || !path.isAbsolute(detail.path)
-      || !isPathInsideDirectory(profile.codexHome, detail.path)
+      || !isProfileSessionPath(profile, detail.path)
     ) {
       return null;
     }
@@ -3154,6 +3237,7 @@ async function buildIncrementalSessionDetail(
     indexEntry,
     {
       startByte: staleRecord.sourceSize,
+      endByte: stats.size,
       initial: {
         title: staleRecord.detail.title,
         preview: staleRecord.detail.preview,
@@ -3218,6 +3302,21 @@ export async function subscribeCodexSessionChanges(
   const sessionRecord = await resolveSessionRecord(profile, sessionId);
   if (!sessionRecord) {
     throw new Error(`Session ${sessionId} was not found`);
+  }
+
+  if (sessionRecord.storedHistory) {
+    const record = sessionRecord.storedHistory;
+    const revision = (): CodexSessionRevision => ({ sessionId, profileId: profile.id, ...storedHistoryRevision(record) });
+    let current = revision();
+    const initialRevision = current;
+    const interval = setInterval(() => {
+      try {
+        const next = revision();
+        if (next.revision !== current.revision) { current = next; onChange(next); }
+      } catch (error) { console.error(`Failed to inspect stored history ${sessionId}:`, error); }
+    }, 1000);
+    interval.unref?.();
+    return { initialRevision, close() { clearInterval(interval); } };
   }
 
   const initialStats = await fs.stat(sessionRecord.path);
@@ -3363,9 +3462,11 @@ async function sliceSessionLinesForFork(
   let forkedAt = '';
   let lastAssistantMessage: { kind: 'commentary' | 'final'; text: string } | null = null;
 
+  const projectMessage=createCodexMessageProjection();
+
   for (let index = 0; index < rawLines.length; index += 1) {
     const line = rawLines[index];
-    const row = normalizeCodexSessionRow(safeJsonParse<any>(line));
+    const row = projectMessage(safeJsonParse<any>(line));
     if (!row) {
       continue;
     }
@@ -3481,6 +3582,12 @@ async function sliceSessionLinesForFork(
   };
 }
 
+function requireOriginalSessionRecord(record: SessionScanRecord): void {
+  if (record.storedHistory) {
+    throw new Error('זו היסטוריה משוחזרת לתצוגה בלבד. קובץ השיחה המקורי חסר; לא ניתן להמשיך, לפצל, להעביר או למחוק אותה לפני שחזור המקור.');
+  }
+}
+
 export async function createCodexForkSession(
   sourceSessionId: string,
   forkEntryId: string,
@@ -3495,6 +3602,7 @@ export async function createCodexForkSession(
   if (!sessionRecord) {
     throw new Error(`Session ${sourceSessionId} was not found`);
   }
+  requireOriginalSessionRecord(sessionRecord);
 
   const { sourceMeta, rawLines, forkedAt } = await sliceSessionLinesForFork(
     sessionRecord.path,
@@ -3579,7 +3687,14 @@ async function buildCodexSessionCatalog(profile: CodexProfile): Promise<CodexSes
   };
 
   for (const sessionFile of sessionFiles) {
-    const hints = await extractSessionSummaryHints(
+    const hints: SessionSummaryHints = sessionFile.storedHistory ? {
+      title: indexMap.get(sessionFile.id)?.thread_name?.trim() || sessionFile.storedHistory.title,
+      preview: trimPreview(sessionFile.storedHistory.preview),
+      startPreview: trimPreview(sessionFile.storedHistory.preview),
+      endPreview: trimPreview(sessionFile.storedHistory.preview),
+      cwdOverride: null, isCompactClone: false, compactSourceSessionId: null,
+      terminalStatus: 'stopped', lastCompletedAt: null,
+    } : await extractSessionSummaryHints(
       sessionFile.path,
       sessionFile.id,
       indexMap.get(sessionFile.id),
@@ -3643,6 +3758,7 @@ async function buildCodexSessionCatalog(profile: CodexProfile): Promise<CodexSes
       compactSourceSessionId: hints.compactSourceSessionId,
       nativeSubagents: null,
       lastCompletedAt: hints.lastCompletedAt,
+      nativeRunStatus: hints.terminalStatus,
     });
   }
 
@@ -3837,7 +3953,7 @@ async function readPersistedSessionCatalog(
       && typeof row.id === 'string'
       && typeof row.path === 'string'
       && path.isAbsolute(row.path)
-      && isPathInsideDirectory(profile.codexHome, row.path)
+      && isProfileSessionPath(profile, row.path)
     ));
     if (scanRows.length) {
       sessionScanCache.set(profile.id, {
@@ -3976,6 +4092,14 @@ async function invalidateSessionCatalog(
   }
 }
 
+/** Native GUI turns bypass runCodexPrompt's cache invalidation. Refresh their
+ * read model without making notification delivery depend on presentation IO. */
+export function observeCodexNativeFailure(profileId: string): void {
+  void invalidateSessionCatalog(profileId, { deletePersisted: false })
+    .then(() => refreshSessionCatalog(resolveProfile(profileId)))
+    .catch(() => console.warn('Native failure catalog refresh will retry on the next read.'));
+}
+
 export async function listCodexSessions(
   profileId?: string,
   query = '',
@@ -4003,6 +4127,7 @@ export async function deleteCodexSession(
   if (!sessionRecord) {
     throw new Error(`Session ${sessionId} was not found`);
   }
+  requireOriginalSessionRecord(sessionRecord);
 
   await fs.rm(sessionRecord.path, { force: true });
   await invalidateSessionCatalog(profile.id, { removeSessionId: sessionId });
@@ -4052,6 +4177,7 @@ export async function copyCodexSessionToProfile(
   if (!sourceSessionRecord) {
     throw new Error(`Session ${sessionId} was not found`);
   }
+  requireOriginalSessionRecord(sourceSessionRecord);
 
   let targetSessionId = options?.targetSessionId?.trim() || randomUUID();
   let existingTargetRecord = await resolveSessionRecord(targetProfile, targetSessionId);
@@ -4124,9 +4250,10 @@ function collectRawCodexTurnRanges(rawLines: string[], sessionId: string): RawCo
   let currentTurn: RawCodexTurnRange | null = null;
   let messageCount = 0;
   let lastAssistantMessage: { kind: 'commentary' | 'final'; text: string } | null = null;
+  const projectMessage=createCodexMessageProjection();
 
   for (let index = 0; index < rawLines.length; index += 1) {
-    const row = normalizeCodexSessionRow(safeJsonParse<any>(rawLines[index]));
+    const row = projectMessage(safeJsonParse<any>(rawLines[index]));
     if (!row || row.type !== 'event_msg') {
       continue;
     }
@@ -4201,6 +4328,7 @@ export async function deleteCodexTurn(
   if (!sessionRecord) {
     throw new Error(`Session ${sessionId} was not found`);
   }
+  requireOriginalSessionRecord(sessionRecord);
 
   const content = await fs.readFile(sessionRecord.path, 'utf-8');
   const rawLines = content.split('\n').filter((line, index, lines) => line.trim() || index < lines.length - 1);
@@ -4219,7 +4347,17 @@ export async function deleteCodexTurn(
   await deletePersistedSessionDetailCache(profile.id, sessionId);
 }
 
-export async function getCodexSessionDetail(
+export function getCodexSessionDetail(
+  sessionId: string,
+  profileId?: string,
+  options?: { tail?: number; before?: number; full?: boolean }
+): Promise<CodexSessionDetail> {
+  const profile = resolveProfile(profileId);
+  const key = JSON.stringify([profile.id, sessionId, buildSessionDetailVariant(options) || 'full']);
+  return sessionReadBudget.read(key, () => readCodexSessionDetail(sessionId, profile.id, options));
+}
+
+async function readCodexSessionDetail(
   sessionId: string,
   profileId?: string,
   options?: {
@@ -4344,6 +4482,35 @@ export async function getCodexSessionDetail(
     };
   }
 
+  if (sessionFile.storedHistory) {
+    const record = sessionFile.storedHistory;
+    const revision = storedHistoryRevision(record);
+    const identity = `history-db:${record.historyPath}:${sessionId}`;
+    if (variant) {
+      const cached = await getCachedSessionDetail(profile.id, sessionId, variant, revision.revision, identity, revision.size);
+      if (cached) return cached;
+    }
+    const parsed = await readStoredCodexHistory(record);
+    if (!parsed) throw new Error(`Stored history ${sessionId} is unavailable`);
+    const total = parsed.timeline.length;
+    const end = typeof options?.before === 'number' ? Math.max(0, Math.min(total, options.before)) : total;
+    const tail = options?.full ? total : Math.max(1, Math.min(400, options?.tail || 400));
+    const start = Math.max(0, end - tail);
+    const detail: CodexSessionDetail = {
+      id: sessionId, profileId: profile.id, title: indexMap.get(sessionId)?.thread_name?.trim() || parsed.title,
+      createdAt: record.createdAt || null, updatedAt: record.updatedAt,
+      cwd: record.cwd, path: sessionFile.path, source: 'history-db', modelProvider: record.modelProvider,
+      preview: trimPreview(parsed.preview), startPreview: trimPreview(parsed.firstMessage?.text || record.preview),
+      endPreview: trimPreview(parsed.lastMessage?.text || record.preview),
+      messageCount: parsed.messageCount, lastCompletedAt: parsed.lastCompletedAt,
+      timeline: parsed.timeline.slice(start, end), messages: start === 0 && end === total ? parsed.messages : [],
+      totalTimelineEntries: total, timelineWindowStart: start, timelineWindowEnd: end, hasEarlierTimeline: start > 0,
+      forkSourceSessionId: null, forkEntryId: null, isCompactClone: false, compactSourceSessionId: null, forkDraftContext: null,
+    };
+    if (variant) await putCachedSessionDetail(profile.id, sessionId, variant, revision.revision, identity, revision.size, detail);
+    return detail;
+  }
+
   const forkMetadata = await getForkSessionMetadata(sessionId);
   const stats = await fs.stat(sessionFile.path);
   const sourceSignature = buildSessionSourceSignature(stats, forkMetadata);
@@ -4411,6 +4578,7 @@ export async function getCodexSessionDetail(
         : 400
       : undefined;
     const parsedBase = await parseSessionFile(sessionFile.path, sessionId, indexMap.get(sessionId), {
+      endByte: stats.size,
       maxRetainedMessages: requestedTailLimit,
       maxRetainedTimelineEntries: requestedTailLimit,
     });
@@ -4547,9 +4715,9 @@ function buildPromptWithAttachments(
     };
   }
 
-  const imagePaths = attachments.filter((attachment) => attachment.isImage).map((attachment) => attachment.path);
+  const imagePaths = attachments.filter(isCodexInlineImage).map((attachment) => attachment.path);
   const attachmentLines = attachments.map((attachment) => {
-    const typeLabel = attachment.isImage ? 'image' : 'file';
+    const typeLabel = isCodexInlineImage(attachment) ? 'image' : 'file';
     return `- ${attachment.name} (${typeLabel}, ${attachment.mimeType || 'unknown'}) => ${attachment.path}`;
   });
 
@@ -4643,6 +4811,7 @@ export async function updateCodexMultiAgentMode(
 }
 
 async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAvailableModel[]> {
+  const epoch = modelCatalogCacheEpoch;
   const cached = modelCatalogCache.get(profile.id);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.models.map((model) => ({
@@ -4731,7 +4900,7 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
     })
     .filter((entry): entry is CodexAvailableModel => Boolean(entry));
 
-  modelCatalogCache.set(profile.id, {
+  if (epoch === modelCatalogCacheEpoch) modelCatalogCache.set(profile.id, {
     expiresAt: Date.now() + MODEL_CATALOG_CACHE_TTL_MS,
     models,
   });
@@ -4744,6 +4913,7 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
 }
 
 export function invalidateCodexModelCatalogCache(profileId?: string): void {
+  modelCatalogCacheEpoch += 1;
   if (profileId) {
     modelCatalogCache.delete(profileId);
     return;
@@ -4911,17 +5081,11 @@ export async function getCodexRateLimitSnapshot(
       return null;
     }
     sessionSnapshot = await readRateLimitSnapshotFromSessionRecord(profile, sessionRecord);
-  } else {
-    const sessionFiles = await scanSessionFiles(profile);
-    for (const sessionRecord of sessionFiles) {
-      const snapshot = await readRateLimitSnapshotFromSessionRecord(profile, sessionRecord);
-      if (snapshot) {
-        sessionSnapshot = snapshot;
-        break;
-      }
-    }
   }
 
+  // Account login/logout and the account panel must not wait for a complete
+  // history scan, or borrow quota/context from a different, older account.
+  // Session context is read only when the caller selected that exact thread.
   const accountUsage = await loadCodexAccountUsage(profile, { forceRefresh: forceAccountRefresh });
   const standardQuota = accountUsage.quotaGroups[0] || null;
   return {
@@ -4955,44 +5119,10 @@ async function resolveCodexExecutionConfig(
   profile: CodexProfile,
   executionConfig?: CodexExecutionConfig | null
 ): Promise<CodexExecutionConfig> {
-  const requestedModel = normalizeExecutionSettingValue(executionConfig?.model);
-  const requestedReasoningEffort = normalizeExecutionSettingValue(executionConfig?.reasoningEffort);
-  const requestedPermissionModeId = normalizeExecutionSettingValue(executionConfig?.permissionModeId);
-
-  if (!requestedModel && !requestedReasoningEffort) {
-    return {
-      model: null,
-      reasoningEffort: null,
-      permissionModeId: requestedPermissionModeId,
-    };
-  }
-
-  const catalog = await getCodexModelCatalog(profile.id);
-  const fallbackModel = requestedModel
-    || catalog.selectedModel
-    || catalog.models[0]?.slug
-    || null;
-  const selectedModelOption = fallbackModel
-    ? catalog.models.find((model) => model.slug === fallbackModel) || null
-    : null;
-
-  if (requestedModel && !selectedModelOption) {
-    throw new Error(`Codex model "${requestedModel}" is not available for this profile`);
-  }
-
-  if (
-    requestedReasoningEffort
-    && selectedModelOption
-    && !selectedModelOption.supportedReasoningLevels.some((level) => level.effort === requestedReasoningEffort)
-  ) {
-    throw new Error(`Reasoning effort "${requestedReasoningEffort}" is not supported by ${selectedModelOption.displayName}`);
-  }
-
-  return {
-    model: selectedModelOption?.slug || requestedModel || null,
-    reasoningEffort: requestedReasoningEffort,
-    permissionModeId: requestedPermissionModeId,
-  };
+  const sharedProfiles = new Set((process.env.CODE_AI_CODEX_SHARED_OWNER_PROFILES || '')
+    .split(',').map(value => value.trim()).filter(Boolean));
+  return resolveCodexExecutionSelection(executionConfig,
+    () => getCodexModelCatalog(profile.id), sharedProfiles.has(profile.id));
 }
 
 export function buildCodexInvocationArgs(
@@ -5060,7 +5190,10 @@ export function cancelCodexRun(runId: string): boolean {
   }
 
   activeRun.cancelRequested = true;
-
+  if (activeRun.interrupt) {
+    activeRun.interrupt();
+    return true;
+  }
   return terminateProviderProcessTree(activeRun.child);
 }
 
@@ -5070,6 +5203,12 @@ export async function runCodexPrompt(
   profileId?: string,
   attachments: CodexUploadedAttachment[] = [],
   options: {
+    nativeSubmission?: CodexSharedSubmission | null;
+    nativeRunId?: string;
+    onNativeSubmissionChanged?: (submission: CodexSharedSubmission) => Promise<void>;
+    progressGuardEnabled?: boolean;
+    onProgressGuardClaim?: import('./codexAppServer.js').CodexAppServerRunOptions['onProgressGuardClaim'];
+    onProgressGuardWarning?: import('./codexAppServer.js').CodexAppServerRunOptions['onProgressGuardWarning'];
     runId?: string;
     cwd?: string;
     injectDirectoryContext?: boolean;
@@ -5114,8 +5253,14 @@ export async function runCodexPrompt(
 
   return queueBySessionKey(queueKey, async () => {
     const previousSession = sessionId ? await resolveSessionRecord(profile, sessionId) : null;
-    const permissionArgs = await resolveCodexPermissionArgs(profile, executionConfig.permissionModeId);
-    const args = buildCodexInvocationArgs(permissionArgs, sessionId, imagePaths, executionConfig);
+    if (previousSession) requireOriginalSessionRecord(previousSession);
+    const selectedPermissionMode = executionConfig.permissionModeId
+      ? resolvePermissionMode(profile, executionConfig.permissionModeId)
+      : await getSelectedPermissionMode(profile);
+    const sandbox = selectedPermissionMode.id === 'restricted' ? 'read-only'
+      : selectedPermissionMode.id === 'balanced' ? 'workspace-write' : 'danger-full-access';
+    const args = ['app-server', '--stdio', '--config', 'mcp_oauth_credentials_store="file"',
+      '--enable', 'remote_compaction_v2', '--enable', 'default_mode_request_user_input'];
     const browserModeSessionKey = options.browserModeSessionKey?.trim()
       || sessionId?.trim()
       || null;
@@ -5225,168 +5370,105 @@ export async function runCodexPrompt(
       throw phoneModeError;
     }
 
-    return new Promise<CodexRunResult>((resolve, reject) => {
-      let child: ChildProcessWithoutNullStreams;
-      try {
-        child = spawn(CODEX_BIN, args, {
-          cwd: runCwd,
-          env: buildCodexProcessEnv(
-            profile,
-            preparedPhoneMode?.envCodeXHome || preparedPersonalChromeMode?.envCodeXHome || preparedBrowserMode?.envCodeXHome || preparedUxMode?.envCodeXHome || preparedDesignMode?.envCodeXHome || null,
-          ),
-          stdio: ['pipe', 'pipe', 'pipe'],
-          windowsHide: true,
-          ...getProviderProcessSpawnOptions(),
-          ...getProfileSpawnIdentity(profile),
+    const activeRunId = options.runId || randomUUID();
+    const nativeRunId = options.nativeRunId || activeRunId;
+    const abortController = new AbortController();
+    try {
+      const sharedProfiles = new Set((process.env.CODE_AI_CODEX_SHARED_OWNER_PROFILES || '').split(',').map(value => value.trim()).filter(Boolean));
+      const resumedSubmission = normalizeNativeSubmission(options.nativeSubmission, nativeRunId) as CodexSharedSubmission | null;
+      if (resumedSubmission?.deliveryPhase === 'cancelled') throw new CodexRunCancelledError();
+      if (resumedSubmission && !sharedProfiles.has(profile.id)) {
+        throw new CodexAppServerDetachedError(resumedSubmission);
+      }
+      const useSharedOwner = sharedProfiles.has(profile.id);
+      if (useSharedOwner && !resumedSubmission && (sandbox !== 'danger-full-access' || !executionConfig.model)) {
+        throw new Error('Shared Codex owner does not support this request configuration; no input was submitted');
+      }
+      const sharedSocket = path.join(profile.codexHome, 'code-ai-shared-owner', 'owner.sock');
+      if (useSharedOwner) {
+        const identity = getProfileSpawnIdentity(profile);
+        try {
+          await resolveCodexSharedSocket(profile.codexHome, identity.uid ?? process.getuid?.(), true);
+        } catch {
+          if (resumedSubmission) throw new CodexAppServerDetachedError(resumedSubmission);
+          throw new Error('The canonical shared Codex owner is unavailable; no input was submitted');
+        }
+        if (!options.onNativeSubmissionChanged) throw new Error('Shared Codex submission requires durable queue custody');
+        await ensureCodexSharedModeBridge(profile, {
+          uid: identity.uid ?? process.getuid!(), gid: identity.gid ?? process.getgid!(),
         });
-      } catch (spawnError) {
-        releaseSharedBrowserRuntime();
-        reject(spawnError);
-        return;
       }
-      const activeRunId = options.runId;
-
-      if (activeRunId) {
-        activeCodexRuns.set(activeRunId, {
-          child,
-          cancelRequested: false,
-        });
-      }
-
-      let stdoutBuffer = '';
-      let stderrBuffer = '';
-      let stdoutLineTruncated = false;
-      let finalMessage = '';
-      let createdSessionId = sessionId || '';
-      let announcedSessionId = sessionId || '';
-      const stdoutLines: string[] = [];
-      const structuredErrors: string[] = [];
-
-      function wasCancellationRequested(): boolean {
-        return activeRunId ? activeCodexRuns.get(activeRunId)?.cancelRequested === true : false;
-      }
-
-      function clearActiveRun() {
-        if (activeRunId && activeCodexRuns.get(activeRunId)?.child === child) {
-          activeCodexRuns.delete(activeRunId);
-        }
-      }
-
-      child.stdout.setEncoding('utf-8');
-      child.stderr.setEncoding('utf-8');
-      child.stdin.end(effectivePromptText);
-
-      child.stdout.on('data', (chunk: string) => {
-        stdoutBuffer += chunk;
-
-        while (stdoutBuffer.includes('\n')) {
-          const newlineIndex = stdoutBuffer.indexOf('\n');
-          const line = stdoutBuffer.slice(0, newlineIndex).trim();
-          stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-
-          if (stdoutLineTruncated) {
-            stdoutLineTruncated = false;
-            continue;
+      const result = await runCodexAppServerTurn({
+        progressGuardEnabled: options.progressGuardEnabled,
+        onProgressGuardClaim: options.onProgressGuardClaim,
+        onProgressGuardWarning: options.onProgressGuardWarning,
+        bin: CODEX_BIN, args, cwd: runCwd,
+        env: buildCodexProcessEnv(profile, useSharedOwner ? null :
+          preparedPhoneMode?.envCodeXHome || preparedPersonalChromeMode?.envCodeXHome || preparedBrowserMode?.envCodeXHome || preparedUxMode?.envCodeXHome || preparedDesignMode?.envCodeXHome || null),
+        spawnOptions: { ...getProviderProcessSpawnOptions(), ...getProfileSpawnIdentity(profile) },
+        profileId: profile.id, runId: activeRunId, sessionId, prompt: effectivePromptText, imagePaths,
+        threadOptions: {
+          model: executionConfig.model,
+          approvalPolicy: sandbox === 'danger-full-access' ? 'never' : 'on-request',
+          sandbox,
+        },
+        turnOptions: {
+          ...(executionConfig.model ? { model: executionConfig.model } : {}),
+          ...(executionConfig.reasoningEffort ? { effort: executionConfig.reasoningEffort } : {}),
+        },
+        onSessionStarted: async (createdSessionId) => {
+          await options.onSessionStarted?.(createdSessionId);
+          if (useSharedOwner) {
+            // Preserve each existing run's exact provisional registration and
+            // browser workspace. Native metadata supplies the actual thread ID;
+            // model arguments can never select a different mode state owner.
+            await bindCodexSharedModeContext(profile.id, createdSessionId, {
+              design_mode: designModeSessionKey ? { profileId: designModeStateProfileId, sessionKey: designModeSessionKey } : null,
+              ux_mode: uxModeSessionKey ? { profileId: uxModeStateProfileId, sessionKey: uxModeSessionKey } : null,
+              browser_mode: browserModeSessionKey ? { profileId: browserModeStateProfileId, sessionKey: browserModeSessionKey } : null,
+              personal_chrome: personalChromeSessionKey ? { profileId: personalChromeStateProfileId, sessionKey: personalChromeSessionKey } : null,
+              phone_mode: phoneModeSessionKey ? { profileId: phoneModeStateProfileId, sessionKey: phoneModeSessionKey } : null,
+            });
           }
-          if (!line) continue;
-          stdoutLines.push(clipLongText(line, MAX_CODEX_DIAGNOSTIC_LINE));
-          if (stdoutLines.length > 120) {
-            stdoutLines.splice(0, stdoutLines.length - 120);
-          }
-          const row = safeJsonParse<any>(line);
-          if (!row) continue;
-
-          const structuredError = extractCodexStructuredError(row);
-          if (structuredError) {
-            structuredErrors.push(structuredError);
-            if (structuredErrors.length > 40) {
-              structuredErrors.splice(0, structuredErrors.length - 40);
-            }
-          }
-
-          if (row.type === 'thread.started' && typeof row.thread_id === 'string') {
-            createdSessionId = row.thread_id.trim();
-            if (createdSessionId && createdSessionId !== announcedSessionId) {
-              announcedSessionId = createdSessionId;
-              notifyProviderSessionStarted(options.onSessionStarted, createdSessionId, 'Codex');
-            }
-          }
-
-          if (
-            row.type === 'item.completed'
-            && row.item?.type === 'agent_message'
-            && typeof row.item?.text === 'string'
-          ) {
-            finalMessage = row.item.text.trim();
-          }
-        }
-
-        if (stdoutBuffer.length > MAX_CODEX_STDOUT_LINE) {
-          // Tool payloads can contain multi-megabyte single-line JSON. They
-          // are persisted in the Codex JSONL transcript, so the control plane
-          // must not retain an unbounded duplicate while waiting for "\n".
-          stdoutBuffer = '';
-          stdoutLineTruncated = true;
-        }
-      });
-
-      child.stderr.on('data', (chunk: string) => {
-        stderrBuffer += chunk;
-        if (stderrBuffer.length > MAX_CODEX_STDERR_TEXT) {
-          stderrBuffer = stderrBuffer.slice(-MAX_CODEX_STDERR_TEXT);
-        }
-      });
-
-      child.on('error', (error) => {
-        const cancelled = wasCancellationRequested();
-        clearActiveRun();
-        releaseSharedBrowserRuntime();
-        if (cancelled) {
-          reject(new CodexRunCancelledError());
-          return;
-        }
-        reject(error);
-      });
-
-      child.on('close', async (code) => {
-        const cancelled = wasCancellationRequested();
-        clearActiveRun();
-        releaseSharedBrowserRuntime();
-
-        if (cancelled) {
-          reject(new CodexRunCancelledError());
-          return;
-        }
-
-        if (code !== 0) {
-          const failureDetails = buildCodexFailureDetails(
-            `Codex exited with code ${code}`,
-            stderrBuffer,
-            stdoutLines,
-            structuredErrors
-          );
-          reject(new Error(sanitizeCodexCliFailure(profile, failureDetails, `Codex exited with code ${code}`)));
-          return;
-        }
-
-        if (!createdSessionId) {
-          reject(new Error('Codex completed without returning a session id'));
-          return;
-        }
-
-        await waitForSessionReady(profile, createdSessionId, previousSession?.updatedAt || null);
-
-        void invalidateSessionCatalog(profile.id, { deletePersisted: false })
-          .then(() => refreshSessionCatalog(profile))
-          .catch((error) => {
-            console.error(`Failed to refresh session catalog after ${createdSessionId}:`, error);
+        },
+        onSpawn: child => {
+          activeCodexRuns.set(activeRunId, {
+            child, cancelRequested: false, interrupt: () => abortController.abort(),
           });
-
-        resolve({
-          sessionId: createdSessionId,
-          finalMessage: finalMessage || 'Codex completed without a final assistant message.',
-        });
+        },
+        signal: abortController.signal,
+        ...(useSharedOwner ? { sharedTransport: {
+          socketPath: sharedSocket,
+          bridgePath: resolveCodexRuntimeProgram('sharedStdio',{sourceRoot:CODEX_APP_CONFIG.appRoot}),
+          clientUserMessageId: nativeClientMessageId(nativeRunId),
+          ...(resumedSubmission ? { resumeSubmission: resumedSubmission } : {}),
+          inheritOwnerSettings: true,
+          managedOwner: true,
+          expectedOwnerSettings: {
+            model: executionConfig.model!, cwd: runCwd, approvalPolicy: 'never' as const,
+            sandbox: { type: 'dangerFullAccess' }, reasoningEffort: executionConfig.reasoningEffort || null,
+          },
+          onSubmissionChanged: options.onNativeSubmissionChanged,
+          recoverQueuedInput: async (threadId, queuedSubmissionId, clientUserMessageId) => recoverManagedQueuedSubmission({
+            codexHome: profile.codexHome, threadId, queuedSubmissionId, clientUserMessageId,
+            brokerModule: resolveCodexRuntimeProgram('sharedBroker',{sourceRoot:CODEX_APP_CONFIG.appRoot}),
+          }),
+        } } : {}),
       });
-    });
+      if (activeCodexRuns.get(activeRunId)?.cancelRequested) throw new CodexRunCancelledError();
+      await waitForSessionReady(profile, result.sessionId, previousSession?.updatedAt || null);
+      void invalidateSessionCatalog(profile.id, { deletePersisted: false })
+        .then(() => refreshSessionCatalog(profile))
+        .catch(() => console.error('Failed to refresh Codex session catalog after completion'));
+      return { sessionId: result.sessionId, finalMessage: result.lastMessage || 'Codex completed without a final assistant message.' };
+    } catch (error) {
+      if (error instanceof CodexAppServerCancelledError || activeCodexRuns.get(activeRunId)?.cancelRequested) {
+        throw new CodexRunCancelledError();
+      }
+      throw error;
+    } finally {
+      activeCodexRuns.delete(activeRunId);
+      releaseSharedBrowserRuntime();
+    }
   });
 }

@@ -1,7 +1,12 @@
 import fs from 'node:fs/promises';
-import { loadEnvFile } from '../../../bina-cshera-2.0/platform/shared-runtime/src/env-file.js';
+import { loadEnvFile } from 'node:process';
 
-await loadEnvFile('/root/.bina-cshera-secrets/env/bc2-failure.env');
+// Prefer explicitly supplied runtime credentials. A restricted investigator can
+// use codex-work-mode.mjs instead; it never needs access to the root secret file.
+if (!process.env.CODEX_INCIDENT_FAILURE_AUTH_TOKEN && !process.env.BC2_FAILURE_AUTH_TOKEN) {
+  try { loadEnvFile('/root/.bina-cshera-secrets/env/bc2-failure.env'); }
+  catch (error) { if (!['ENOENT', 'EACCES'].includes(error.code)) throw error; }
+}
 
 function readFlag(args, name) {
   const index = args.indexOf(name);
@@ -140,6 +145,8 @@ switch (command) {
       actor_type: 'investigator',
       summary,
       status: payload.status || 'execution_in_progress',
+      case_status: ['completed', 'success', 'succeeded'].includes(payload.status)
+        ? 'waiting_completion_confirmation' : payload.status || 'execution_in_progress',
       execution_report: payload,
       changed_files: Array.isArray(payload.changed_files) ? payload.changed_files : [],
       changed_configs: Array.isArray(payload.changed_configs) ? payload.changed_configs : [],

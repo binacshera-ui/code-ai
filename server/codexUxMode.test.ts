@@ -31,8 +31,8 @@ const requestedModels: Array<string | null | undefined> = [];
 
 function fakeCatalog() {
   return {
-    models: [{ slug: 'gemini-3.1-pro-preview', displayName: 'Gemini 3.1 Pro Preview', description: 'UX test', defaultReasoningLevel: 'medium', supportedReasoningLevels: [], isConfiguredDefault: true }],
-    selectedModel: 'gemini-3.1-pro-preview',
+    models: [{ slug: 'gemini-4-argon', displayName: 'Gemini 4 Argon', description: 'UX test', defaultReasoningLevel: 'medium', supportedReasoningLevels: [], isConfiguredDefault: true }],
+    selectedModel: 'gemini-4-argon',
   } as any;
 }
 
@@ -245,5 +245,5 @@ test('keeps Codex private thesis out of Gemini’s first prompt, then supports a
     (error: any) => error.uxToolError?.error_code === 'UX_CONTEXT_SENSITIVE_FILE',
   );
   assert.ok(requestedModels.length > 0);
-  assert.deepEqual([...new Set(requestedModels)], ['gemini-3.1-pro-preview']);
+  assert.deepEqual([...new Set(requestedModels)], ['gemini-4-argon']);
 });

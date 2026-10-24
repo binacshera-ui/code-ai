@@ -25,3 +25,9 @@ test('stable order and titles work for existing sessions, filtered lists and new
   assert.equal(activeTaskLabel(draft, titles), 'בקשה חדשה');
   assert.equal(activeTaskLabel({ ...draft, promptPreview: '   ' }, titles), 'שיחה חדשה');
 });
+
+test('accepted native input without a started turn is not shown as executing',()=>{
+  const waiting={...task('waiting','running'),nativeSubmission:{deliveryPhase:'queued',turnId:null}};
+  assert.equal(selectRunningTasks([waiting],'one').length,0);
+  assert.equal(waiting.status,'running');
+});

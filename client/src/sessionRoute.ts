@@ -61,7 +61,9 @@ export function readSessionRoute(input?: string | SessionRouteLocation): Session
     );
     if (profileId && sessionKey) {
       return {
-        serverId,
+        // Older notification links omitted the local server. A session URL
+        // without an explicit server is local, not the last server in storage.
+        serverId: serverId || 'local',
         profileId,
         sessionKey,
         sessionId: draftRoute ? null : sessionKey,
@@ -78,7 +80,7 @@ export function readSessionRoute(input?: string | SessionRouteLocation): Session
   if (!profileId && !sessionId && !draftKey) return null;
   const sessionKey = sessionId || draftKey;
   return {
-    serverId,
+    serverId: serverId || (sessionId || draftKey ? 'local' : null),
     profileId,
     sessionKey,
     sessionId,

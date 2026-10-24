@@ -36,6 +36,7 @@ import {
   type ProviderSessionStartedHandler,
 } from './providerProcessLifecycle.js';
 import { buildIsolatedGeminiProcessEnv } from './geminiProcessEnv.js';
+import { GEMINI_PRIMARY_MODEL, GEMINI_ARGON_REASONING_LEVELS, resolveGeminiRunModel, geminiThinkingConfig } from './geminiModelPolicy.js';
 
 interface GeminiSessionScanRecord {
   id: string;
@@ -139,14 +140,8 @@ const SUPPORTED_REASONING_LEVELS: CodexReasoningLevelOption[] = [
   { effort: 'high', description: 'תקציב חשיבה מוגבר' },
   { effort: 'max', description: 'תקציב חשיבה מירבי' },
 ];
-const THINKING_BUDGET_BY_EFFORT: Record<string, number> = {
-  none: 0,
-  low: 512,
-  medium: 2048,
-  high: 8192,
-  max: 16384,
-};
 const PREFERRED_MODEL_ORDER = [
+  GEMINI_PRIMARY_MODEL,
   'gemini-2.5-pro',
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
@@ -1188,7 +1183,7 @@ function buildPromptWithAttachments(
 }
 
 function normalizeGeminiExecutionConfig(executionConfig?: CodexExecutionConfig | null): CodexExecutionConfig {
-  const model = normalizeString(executionConfig?.model);
+  const model = resolveGeminiRunModel(normalizeString(executionConfig?.model));
   const reasoningEffort = normalizeGeminiReasoningEffort(executionConfig?.reasoningEffort);
   return {
     model,
@@ -1200,7 +1195,6 @@ function buildGeminiAliasModelSettings(
   actualModel: string,
   reasoningEffort: string
 ): { alias: string; settingsJson: string } {
-  const budget = THINKING_BUDGET_BY_EFFORT[reasoningEffort] ?? THINKING_BUDGET_BY_EFFORT.medium;
   const alias = `code-ai-${actualModel.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${reasoningEffort}`;
 
   return {
@@ -1212,9 +1206,7 @@ function buildGeminiAliasModelSettings(
             modelConfig: {
               model: actualModel,
               generateContentConfig: {
-                thinkingConfig: {
-                  thinkingBudget: budget,
-                },
+                thinkingConfig: geminiThinkingConfig(actualModel, reasoningEffort),
               },
             },
           },
@@ -1236,7 +1228,9 @@ function collectGeminiArgs(
     'stream-json',
     '--skip-trust',
     '--approval-mode',
-    approvalMode,
+    // Support's internal policy label is not a Gemini CLI enum value.
+    // Its balanced approval behavior and support prompt remain in effect.
+    approvalMode === 'support-sandbox' ? 'default' : approvalMode,
     '--model',
     resolvedModel,
     '--prompt',
@@ -1377,7 +1371,8 @@ export async function getGeminiModelCatalog(profileId?: string): Promise<CodexMo
   }
 
   await ensureRuntimeStateLoaded();
-  const apiModels = await fetchGeminiApiModels(profile);
+  const apiModels = (await fetchGeminiApiModels(profile))
+    .filter((model) => resolveGeminiRunModel(model.slug) === model.slug);
   const observedSessions = await scanGeminiSessionFiles(profile);
   const observedModels = new Set(
     observedSessions
@@ -1386,6 +1381,7 @@ export async function getGeminiModelCatalog(profileId?: string): Promise<CodexMo
   );
 
   for (const observedModel of observedModels) {
+    if (resolveGeminiRunModel(observedModel) !== observedModel) continue;
     if (!apiModels.some((model) => model.slug === observedModel)) {
       apiModels.push({
         slug: observedModel,
@@ -1399,10 +1395,13 @@ export async function getGeminiModelCatalog(profileId?: string): Promise<CodexMo
 
   apiModels.sort(compareGeminiModels);
 
-  const selectedModel = runtimeState.profiles[profile.id]?.model
+  const selectedModel = apiModels.some((model) => model.slug === GEMINI_PRIMARY_MODEL) ? GEMINI_PRIMARY_MODEL
+    : runtimeState.profiles[profile.id]?.model
     || resolvePreferredGeminiModel(apiModels);
-  const selectedReasoningEffort = runtimeState.profiles[profile.id]?.selectedReasoningEffort
+  const priorReasoningEffort = runtimeState.profiles[profile.id]?.selectedReasoningEffort
     || (selectedModel && apiModels.find((model) => model.slug === selectedModel)?.thinking ? 'medium' : null);
+  const selectedReasoningEffort = selectedModel === GEMINI_PRIMARY_MODEL && priorReasoningEffort
+    ? geminiThinkingConfig(selectedModel, priorReasoningEffort).thinkingLevel || 'medium' : priorReasoningEffort;
 
   const catalog: CodexModelCatalog = {
     models: apiModels.map((model): CodexAvailableModel => ({
@@ -1411,7 +1410,7 @@ export async function getGeminiModelCatalog(profileId?: string): Promise<CodexMo
       description: model.description,
       defaultReasoningLevel: model.thinking ? 'medium' : null,
       supportedReasoningLevels: model.thinking
-        ? SUPPORTED_REASONING_LEVELS.map((level) => ({ ...level }))
+        ? (model.slug === GEMINI_PRIMARY_MODEL ? GEMINI_ARGON_REASONING_LEVELS : SUPPORTED_REASONING_LEVELS).map((level) => ({ ...level }))
         : [],
       isConfiguredDefault: model.slug === selectedModel,
     })),
@@ -1840,17 +1839,8 @@ export async function runGeminiEphemeralDesignPrompt(
   }
 
   const envValues = await readProfileEnv(profile);
-  const modelCatalog = await getGeminiModelCatalog(profile.id);
-  const requestedModel = normalizeString(input.model)
-    || modelCatalog.selectedModel
-    || resolvePreferredGeminiModel(modelCatalog.models.map((model) => ({
-      slug: model.slug,
-      displayName: model.displayName,
-      description: model.description,
-      inputTokenLimit: runtimeState.modelContextWindows[model.slug] || null,
-      thinking: model.supportedReasoningLevels.length > 0,
-    })))
-    || 'gemini-2.5-pro';
+  await getGeminiModelCatalog(profile.id);
+  const requestedModel = resolveGeminiRunModel(input.model);
   const env = buildGeminiProcessEnv(profile, envValues, null);
   const timeoutMs = Math.min(10 * 60_000, Math.max(30_000, input.timeoutMs || 4 * 60_000));
   const args = [
@@ -2014,16 +2004,8 @@ export async function runGeminiPrompt(
     injectDirectoryContext: options.injectDirectoryContext,
   });
   const promptText = [options.contextPrefix?.trim() || '', basePrompt].filter(Boolean).join('\n\n').trim();
-  const modelCatalog = await getGeminiModelCatalog(profile.id);
-  const requestedModel = executionConfig.model || modelCatalog.selectedModel || resolvePreferredGeminiModel(
-    modelCatalog.models.map((model) => ({
-      slug: model.slug,
-      displayName: model.displayName,
-      description: model.description,
-      inputTokenLimit: runtimeState.modelContextWindows[model.slug] || null,
-      thinking: model.supportedReasoningLevels.length > 0,
-    }))
-  ) || 'gemini-2.5-flash';
+  await getGeminiModelCatalog(profile.id);
+  const requestedModel = resolveGeminiRunModel(executionConfig.model);
 
   return queueBySessionKey(sessionKey, async () => {
     let temporarySettingsPath: string | null = null;

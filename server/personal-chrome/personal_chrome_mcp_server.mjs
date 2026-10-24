@@ -1,15 +1,6 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
 
-const controlUrl = String(process.env.CODE_AI_PERSONAL_CHROME_CONTROL_URL || '').replace(/\/+$/, '');
-const bindingToken = String(process.env.CODE_AI_PERSONAL_CHROME_BINDING_TOKEN || '');
-const deviceId = String(process.env.CODE_AI_PERSONAL_CHROME_DEVICE_ID || '');
-
-if (!controlUrl || !bindingToken) {
-  process.stderr.write('personal_chrome MCP is missing its control URL or binding token.\n');
-  process.exit(2);
-}
-
 const tabId = { type: 'integer', minimum: 0, description: 'Chrome tab id; omit for the bound/active tab.' };
 const target = {
   type: 'object', additionalProperties: false,
@@ -46,6 +37,19 @@ const tools = [
   name, description,
   inputSchema: { type: 'object', properties, required, additionalProperties: false },
 }));
+
+if (process.argv.includes('--describe-tools')) {
+  process.stdout.write(JSON.stringify({ tools }) + '\n');
+  process.exit(0);
+}
+
+const controlUrl = String(process.env.CODE_AI_PERSONAL_CHROME_CONTROL_URL || '').replace(/\/+$/, '');
+const bindingToken = String(process.env.CODE_AI_PERSONAL_CHROME_BINDING_TOKEN || '');
+const deviceId = String(process.env.CODE_AI_PERSONAL_CHROME_DEVICE_ID || '');
+if (!controlUrl || !bindingToken) {
+  process.stderr.write('personal_chrome MCP is missing its control URL or binding token.\n');
+  process.exit(2);
+}
 
 function write(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);

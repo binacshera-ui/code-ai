@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import test from 'node:test';
+import { readCodexNativeFailures } from './codexNativeFailureObserver.js';
+
+test('native failures are tailed without a queue or UI, with private restartable byte cursors and no historical replay', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'code-ai-native-failures-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'sessions'); await fs.mkdir(directory);
+  const file = path.join(directory, 'rollout-fixture.jsonl');
+  const capacity = 'Selected model is at capacity. Please try a different model.';
+  const meta = { type: 'session_meta', payload: { id: 'native-thread', source: 'cli' } };
+  const failed = (turn: string) => ({ type: 'event_msg', timestamp: new Date().toISOString(), payload: { type: 'task_complete', turn_id: turn, error: { message: capacity } } });
+  const line = (row: unknown) => JSON.stringify(row) + '\n';
+  await fs.writeFile(file, line(meta) + line(failed('historical')));
+  const profiles = [{ id: 'test', codexHome: root }];
+  const baseline = await readCodexNativeFailures(profiles, null);
+  assert.deepEqual(baseline.failures, []);
+  await fs.appendFile(file, line(failed('actual-failure')));
+  const batch = await readCodexNativeFailures(profiles, baseline.cursor);
+  assert.equal(batch.failures.length, 1);
+  assert.equal(batch.failures[0].turnId, 'actual-failure');
+  assert.match(batch.failures[0].reason, /עמוס/);
+  assert.equal(JSON.stringify(batch.cursor).includes(capacity), false);
+  const reloaded = JSON.parse(JSON.stringify(batch.cursor));
+  assert.deepEqual((await readCodexNativeFailures(profiles, reloaded)).failures, []);
+  await fs.appendFile(file, line({ type: 'event_msg', timestamp: new Date().toISOString(), payload: { type: 'agent_message', message: capacity } }));
+  await fs.appendFile(file, line({ type: 'event_msg', timestamp: new Date().toISOString(), payload: { type: 'task_complete', turn_id: 'successful', last_agent_message: capacity } }));
+  const quoted = await readCodexNativeFailures(profiles, reloaded);
+  assert.deepEqual(quoted.failures, []);
+  // Partial terminal rows wait for the newline instead of losing/guessing it.
+  const next = line(failed('partial-failure'));
+  await fs.appendFile(file, next.slice(0, -1));
+  const partial = await readCodexNativeFailures(profiles, quoted.cursor);
+  assert.deepEqual(partial.failures, []);
+  await fs.appendFile(file, '\n');
+  const completed = await readCodexNativeFailures(profiles, partial.cursor);
+  assert.equal(completed.failures[0].turnId, 'partial-failure');
+  // A large tool row must not strand subsequent small terminal metadata.
+  await fs.appendFile(file, line({ type: 'response_item', payload: { type: 'function_call_output', output: 'PRIVATE'.repeat(70_000) } }) + line(failed('after-large-tool')));
+  const huge = await readCodexNativeFailures(profiles, completed.cursor);
+  const after = await readCodexNativeFailures(profiles, huge.cursor);
+  assert.equal(after.failures[0].turnId, 'after-large-tool');
+  assert.equal(JSON.stringify(after.cursor).includes('PRIVATE'), false);
+  const child = path.join(directory, 'rollout-child.jsonl');
+  await fs.writeFile(child, line({ type: 'session_meta', payload: { id: 'child', source: { subagent: { thread_spawn: {} } } } }) + line(failed('child-failure')));
+  assert.deepEqual((await readCodexNativeFailures(profiles, after.cursor)).failures, []);
+});

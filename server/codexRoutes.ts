@@ -1,3 +1,4 @@
+import { getCodeAiRuntimeHealth } from './codexRuntimeHealth.mjs';
 import { createHmac, timingSafeEqual, randomUUID } from 'crypto';
 import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
@@ -6,6 +7,7 @@ import path from 'path';
 import { promisify } from 'util';
 import { Router, Request, Response, NextFunction } from 'express';
 import { createCodexUploadMiddleware } from './codexUploads.js';
+import { GEMINI_PRIMARY_MODEL } from './geminiModelPolicy.js';
 import { SessionReadReceiptStore } from './codexSessionReadState.js';
 import type { AppMode, AppProvider } from './config.js';
 import {
@@ -58,6 +60,8 @@ import {
 import { CODEX_APP_CONFIG } from './config.js';
 import { appendCodexFileLog, readRecentCodexFileLogs } from './codexFileLogs.js';
 import { MAX_PREVIEW_FILE_BYTES, resolveCodexFileTarget } from './codexFileResolver.js';
+import { resolveCodexPreviewAsset } from './codexFileAssets.js';
+import { codexUserInputRegistry, CodexUserInputError } from './codexUserInput.js';
 import { browseCodexFileTree } from './codexFileTree.js';
 import { browseCodexFolders, resolveCodexFolderPath } from './codexFolderBrowser.js';
 import {
@@ -214,6 +218,8 @@ import {
   setSessionConversationSearchMode,
   validateSessionConversationSearchMode,
 } from './codexConversationSearchMode.js';
+import { getSessionFocusMode, getSessionFocusModeRecord, setSessionFocusMode, rebindSessionFocusMode,
+  deleteSessionFocusMode, validateSessionFocusMode } from './codexFocusMode.js';
 import {
   deleteSessionFlowMode,
   getSessionFlowMode,
@@ -310,8 +316,20 @@ import {
   issuePersonalChromeEnrollmentToken,
   readPersonalChromeUiCredentials,
 } from './personalChromeBridge.js';
+import { createWorkModeRouter } from './codexWorkModeRoutes.js';
+import { createServerStatusRouter } from './serverStatusRoutes.js';
 
 const router = Router();
+router.use(createServerStatusRouter(requireCodexAccess));
+router.use(createWorkModeRouter(requireCodexAccess, resolveCodexQueueSessionId));
+router.use((req, res, next) => {
+  if (['/auth/status','/device-unlock','/logout','/account-auth','/models','/rate-limits','/remote-agent/health']
+      .some(prefix => req.path === prefix || req.path.startsWith(prefix + '/'))) {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+  }
+  next();
+});
 // standalone-strip:start private-incident-center
 const incidentDecisionCenter = createIncidentDecisionCenterService();
 // standalone-strip:end private-incident-center
@@ -464,9 +482,9 @@ function resolveSupportExecutionConfig(
       deep: { model: 'claude-opus-4-6', reasoningEffort: 'max' },
     },
     gemini: {
-      fast: { model: 'gemini-2.5-flash-lite', reasoningEffort: 'low' },
-      balanced: { model: 'gemini-2.5-flash', reasoningEffort: 'medium' },
-      deep: { model: 'gemini-2.5-pro', reasoningEffort: 'high' },
+      fast: { model: GEMINI_PRIMARY_MODEL, reasoningEffort: 'low' },
+      balanced: { model: GEMINI_PRIMARY_MODEL, reasoningEffort: 'medium' },
+      deep: { model: GEMINI_PRIMARY_MODEL, reasoningEffort: 'high' },
     },
   };
 
@@ -1243,6 +1261,7 @@ async function deleteSessionMetadata(profileId: string, sessionId: string) {
     deleteSessionUxMode(profileId, sessionId),
     deleteSessionProjectMode(profileId, sessionId),
     deleteSessionConversationSearchMode(profileId, sessionId),
+    deleteSessionFocusMode(profileId, sessionId),
     deleteSessionFlowMode(profileId, sessionId),
     deleteSessionPersonalChromeMode(profileId, sessionId),
     deleteSessionPhoneMode(profileId, sessionId),
@@ -1770,46 +1789,10 @@ router.post('/uploads', requireCodexAccess, upload, async (req, res) => {
 router.get('/remote-agent/health', requireCodexAccess, async (_req, res) => {
   try {
     const profiles = await getAvailableProfiles();
-    let codexVersion: string | null = null;
-    try {
-      const result = await execFileAsync(process.env.CODEX_BIN?.trim() || 'codex', ['--version'], {
-        timeout: 3_000,
-        maxBuffer: 256 * 1024,
-        windowsHide: true,
-      });
-      codexVersion = String(result.stdout || result.stderr || '').trim() || null;
-    } catch {
-      codexVersion = null;
-    }
-
-    const decoratedProfiles = await Promise.all(profiles.map(async (profile) => {
-      let authenticated = false;
-      if (profile.provider === 'codex') {
-        authenticated = await fs.access(path.join(profile.codexHome, 'auth.json'))
-          .then(() => true)
-          .catch(() => false);
-      } else {
-        authenticated = true;
-      }
-      return {
-        id: profile.id,
-        label: profile.label,
-        provider: profile.provider,
-        mode: profile.mode,
-        authenticated,
-      };
-    }));
-
-    res.json({
-      ok: true,
-      hostname: hostname(),
-      version: '1.0.0',
-      codexVersion,
-      checkedAt: new Date().toISOString(),
-      profiles: decoratedProfiles,
-    });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to read remote agent health' });
+    const health = await getCodeAiRuntimeHealth(profiles);
+    res.json({...health, hostname: hostname()});
+  } catch {
+    res.status(503).json({ok: false, ready: false, error: 'Runtime health unavailable'});
   }
 });
 
@@ -2173,6 +2156,28 @@ router.get('/files/download', requireCodexAccess, async (req, res) => {
       message: error.message || 'Failed to download file',
     });
     res.status(404).json({ error: error.message || 'Failed to download file' });
+  }
+});
+
+router.get('/files/asset/:sourceServer/:baseToken/*', requireCodexAccess, async (req, res) => {
+  try {
+    const file = await resolveCodexPreviewAsset(
+      String(req.params.baseToken || ''), String(req.params[0] || ''), resolveCodexFileTarget,
+    );
+    if (Number(file.stats.size) > MAX_PREVIEW_FILE_BYTES) {
+      res.status(413).json({ error: 'Preview asset is too large' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (/\.html?$/i.test(file.resolvedPath)) {
+      // Even a direct navigation cannot execute a demo with Code AI's origin.
+      res.setHeader('Content-Security-Policy', "sandbox allow-scripts; base-uri 'none'; form-action 'none'; connect-src 'none'; frame-ancestors 'self'");
+    }
+    if (file.mimeType) res.type(file.mimeType);
+    res.sendFile(file.resolvedPath);
+  } catch {
+    res.status(404).json({ error: 'Preview asset was not found or is not allowed' });
   }
 });
 
@@ -3020,6 +3025,48 @@ router.get('/sessions/:sessionId/events', requireCodexAccess, async (req, res) =
     if (!res.writableEnded) {
       res.end();
     }
+  }
+});
+
+router.get('/sessions/:sessionId/user-input', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = await resolveEffectiveSessionId(readRouteParam(req.params.sessionId));
+    const profileId = await resolveEffectiveProfileIdForSession(
+      typeof req.query.profile === 'string' ? req.query.profile : undefined, sessionId,
+    );
+    if (!profileId || getProviderForProfile(profileId) !== 'codex') {
+      res.status(400).json({ error: 'A Codex profile is required' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json(codexUserInputRegistry.list(profileId, sessionId));
+  } catch {
+    res.status(400).json({ error: 'Questions for this conversation are not available' });
+  }
+});
+
+router.post('/sessions/:sessionId/user-input/:requestId/answer', requireCodexAccess, async (req, res) => {
+  try {
+    const sessionId = await resolveEffectiveSessionId(readRouteParam(req.params.sessionId));
+    const profileId = await resolveEffectiveProfileIdForSession(
+      typeof req.body?.profileId === 'string' ? req.body.profileId : undefined, sessionId,
+    );
+    if (!profileId || getProviderForProfile(profileId) !== 'codex') {
+      res.status(400).json({ error: 'A Codex profile is required' });
+      return;
+    }
+    const result = await codexUserInputRegistry.answer({
+      profileId, sessionId, requestId: readRouteParam(req.params.requestId), answers: req.body?.answers,
+    });
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json(result);
+  } catch (error) {
+    // Never include submitted answers or transport payloads in errors or logs.
+    const known = error instanceof CodexUserInputError;
+    res.status(known ? error.httpStatus : 500).json({
+      error: known ? error.message : 'The answer could not be delivered',
+      code: known ? error.code : 'answer_delivery_failed',
+    });
   }
 });
 
@@ -3874,6 +3921,49 @@ router.post('/session-ux-mode', requireCodexAccess, async (req, res) => {
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Failed to update session UX mode' });
   }
+});
+
+router.get('/session-focus-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profileId === 'string' ? req.query.profileId.trim() : '';
+    const key = typeof req.query.sessionKey === 'string' ? req.query.sessionKey.trim() : '';
+    if (!profileId || !key) { res.status(400).json({ error: 'Profile id and session key are required' }); return; }
+    if (!findConfiguredProfile(profileId)) { res.status(404).json({ error: 'Profile not found' }); return; }
+    const sessionKey = await resolveCodexQueueSessionId(key) || key;
+    await rebindSessionFocusMode(profileId, key, sessionKey);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ focusMode: await getSessionFocusMode(profileId, sessionKey) });
+  } catch (error: any) { res.status(500).json({ error: error.message || 'Failed to load focus mode' }); }
+});
+
+router.post('/session-focus-mode', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId.trim() : '';
+    const key = typeof req.body?.sessionKey === 'string' ? req.body.sessionKey.trim() : '';
+    const raw = req.body?.focusMode;
+    if (!profileId || !key || !raw || typeof raw.enabled !== 'boolean'
+        || typeof raw.goal !== 'string' || raw.goal.length > 2_000) {
+      res.status(400).json({ error: 'Profile, session, enabled and goal (up to 2000 characters) are required' }); return;
+    }
+    const profile = findConfiguredProfile(profileId);
+    if (!profile) { res.status(404).json({ error: 'Profile not found' }); return; }
+    const sessionKey = await resolveCodexQueueSessionId(key) || key;
+    await rebindSessionFocusMode(profileId, key, sessionKey);
+    const current = await getSessionFocusModeRecord(profileId, sessionKey);
+    for (const name of ['rationalEnabled', 'decisionEnabled']) {
+      if (raw[name] !== undefined && typeof raw[name] !== 'boolean') throw new Error(`${name} must be boolean`);
+    }
+    for (const [name, max] of [['planningMinutes', 30], ['taskMinutes', 240]] as const) {
+      if (raw[name] !== undefined && (!Number.isInteger(raw[name]) || raw[name] < 1 || raw[name] > max)) {
+        throw new Error(`${name} must be an integer between 1 and ${max}`);
+      }
+    }
+    const mode = await validateSessionFocusMode(profile, { enabled: raw.enabled, goal: raw.goal,
+      rationalEnabled: raw.rationalEnabled, decisionEnabled: raw.decisionEnabled,
+      planningMinutes: raw.planningMinutes, taskMinutes: raw.taskMinutes }, current);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ focusMode: await setSessionFocusMode(profileId, sessionKey, mode) });
+  } catch (error: any) { res.status(400).json({ error: error.message || 'Failed to save focus mode' }); }
 });
 
 router.get('/session-conversation-search-mode', requireCodexAccess, async (req, res) => {
@@ -5441,7 +5531,7 @@ router.delete('/session-subtasks/:subtaskId', requireCodexAccess, async (req, re
   }
 });
 
-router.post('/queue/items', requireCodexAccess, async (req, res) => {
+router.post(['/queue/items', '/queue/drafts'], requireCodexAccess, async (req, res) => {
   try {
     const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
     const visibleProfileId = requestedProfileId || 'developer';
@@ -5508,6 +5598,25 @@ router.post('/queue/items', requireCodexAccess, async (req, res) => {
         };
       })
       .filter((attachment: CodexUploadedAttachment | null): attachment is CodexUploadedAttachment => Boolean(attachment));
+
+    // A saved question is not a run: no mode expansion, context consumption,
+    // support turn, execution tick or completion notification may occur here.
+    if (req.path === '/queue/drafts' || req.body?.saveAsDraft === true) {
+      const item = await enqueueCodexQueueItem({
+        saveAsDraft: true,
+        profileId,
+        sourceProfileId: visibleProfileId,
+        queueKey,
+        clientRequestId,
+        sessionId,
+        cwd,
+        prompt,
+        promptPreview,
+        attachments,
+      });
+      res.status(201).json({ item });
+      return;
+    }
 
     const isDraftTarget = isDraftSessionKey(sessionId) || isDraftSessionKey(queueKey);
     const hydratedForkDraft = isDraftTarget
@@ -6915,6 +7024,32 @@ function readIncidentString(value: unknown): string | null {
   return normalized || null;
 }
 
+router.post('/incident-cases/park', requireCodexAccess, async (req, res) => {
+  try {
+    const result = await incidentDecisionCenter.parkCase({
+      requestId: String(req.body?.requestId || ''), caseId: readIncidentString(req.body?.caseId) || undefined,
+      title: String(req.body?.title || ''), summary: String(req.body?.summary || ''),
+      operatorQuestion: readIncidentString(req.body?.operatorQuestion) || undefined,
+      failureTicketId: readIncidentString(req.body?.failureTicketId),
+      investigatorProfileId: String(req.body?.investigatorProfileId || ''),
+      investigatorSessionId: String(req.body?.investigatorSessionId || ''),
+      metadata: readIncidentObject(req.body?.metadata),
+    });
+    res.status(201).json(result);
+  } catch (error: any) { res.status(400).json({ error: error.message || 'שמירה להכרעה נכשלה' }); }
+});
+
+router.post('/incident-cases/:caseId/verdict', requireCodexAccess, async (req, res) => {
+  try {
+    const result = await incidentDecisionCenter.recordOperatorVerdict(String(req.params.caseId), {
+      summary: String(req.body?.summary || ''), requestId: String(req.body?.requestId || ''),
+      executionScope: readIncidentStringArray(req.body?.executionScope),
+      testPlan: readIncidentStringArray(req.body?.testPlan),
+    });
+    res.status(202).json(result);
+  } catch (error: any) { res.status(400).json({ error: error.message || 'שמירת הכרעה נכשלה' }); }
+});
+
 function readIncidentBoolean(value: unknown): boolean {
   return value === true || value === 1 || value === '1' || value === 'true';
 }
@@ -6989,6 +7124,8 @@ async function handleIncidentSessionTaskWebhook(req: Request, res: Response) {
     const result = await incidentDecisionCenter.wakeSessionTask({
       caseId,
       taskType,
+      idempotencyKey: readIncidentString(req.body?.idempotency_key) || undefined,
+      decisionId: readIncidentString(req.body?.incident_decision_id || req.body?.decisionId) || undefined,
     });
     res.status(202).json(result);
   } catch (error: any) {
@@ -7186,6 +7323,20 @@ async function handleIncidentCaseActionRequest(req: Request, res: Response) {
     });
   }
 }
+
+router.post('/incident-cases/:caseId/wake', requireCodexAccess, async (req, res) => {
+  try {
+    const result = await incidentDecisionCenter.wakeSessionTask({
+      caseId: readRouteParam(req.params.caseId),
+      taskType: typeof req.body?.taskType === 'string' ? req.body.taskType : '',
+      idempotencyKey: typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey : undefined,
+      decisionId: typeof req.body?.decisionId === 'string' ? req.body.decisionId : undefined,
+    });
+    res.status(202).json(result);
+  } catch (error: any) {
+    res.status(typeof error?.statusCode === 'number' ? error.statusCode : 502).json({ error: 'הקפצת שיחת ההכרעה בשרת המקורי נכשלה.' });
+  }
+});
 
 router.get('/incident-center', requireCodexAccess, async (_req, res) => {
   res.type('html').send(buildIncidentDecisionCenterHtml());

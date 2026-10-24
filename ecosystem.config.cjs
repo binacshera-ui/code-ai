@@ -51,6 +51,7 @@ module.exports = {
       // protects the rest of the host from a runaway parent process.
       interpreter_args: '--env-file=.env --max-old-space-size=8192',
       env: {
+        CODE_AI_PROFILE_RUNTIME_USER: serviceEnvironment.CODE_AI_PROFILE_RUNTIME_USER?.trim(),
         NODE_ENV: serviceEnvironment.NODE_ENV?.trim() || 'production',
         PORT: servicePort,
         CODEX_APP_ROOT: serviceEnvironment.CODEX_APP_ROOT?.trim() || __dirname,

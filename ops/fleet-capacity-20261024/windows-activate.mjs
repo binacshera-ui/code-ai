@@ -1,0 +1,11 @@
+import fs from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import {windows} from './remote.mjs';
+const ops='/root/projects/code-ai/ops/fleet-capacity-20261024';
+const packet=JSON.parse(await fs.readFile(ops+'/windows-package.json','utf8'));
+const old=JSON.parse(await fs.readFile(ops+'/windows-source.json','utf8'));
+assert.equal(JSON.parse(await fs.readFile(ops+'/windows-preview.json','utf8')).passed,true);
+const args={ReleaseRoot:packet.remoteCandidate,NodeBinary:old.node,CodexBinary:packet.binary.path.split(String.fromCharCode(92)).join('/'),CodexHash:packet.binary.sha256,ExpectedVersion:packet.version};
+const script='& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:/Users/showp/.code-ai/remote-agent/windows-cutover-20261024.ps1" '+Object.entries(args).map(([key,value])=>'-'+key+' '+JSON.stringify(value)).join(' ')+';if($LASTEXITCODE -ne 0){throw "Cutover failed"}';
+const result=await windows(script,{timeout:100000});
+await fs.writeFile(ops+'/windows-activation.json',JSON.stringify(result,null,2)+'\n',{mode:0o600});console.log(JSON.stringify(result));

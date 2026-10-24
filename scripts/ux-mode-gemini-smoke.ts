@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { runGeminiEphemeralSpecialistPrompt } from '../server/geminiService.js';
+import { GEMINI_PRIMARY_MODEL } from '../server/geminiModelPolicy.js';
 
 const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'code-ai-ux-gemini-'));
 
@@ -16,7 +17,7 @@ try {
   const result = await runGeminiEphemeralSpecialistPrompt({
     profileId: process.env.CODE_AI_UX_GEMINI_PROFILE || 'gemini-developer',
     cwd: workspace,
-    model: 'gemini-3.1-pro-preview',
+    model: GEMINI_PRIMARY_MODEL,
     timeoutMs: 180_000,
     prompt: [
       'Act as a read-only UX/product specialist in a smoke test. Read product-context.md; do not edit files or run commands.',
@@ -30,7 +31,7 @@ try {
   assert.equal(payload.consultation_type, 'ux_customer_journey');
   assert.equal(typeof payload.executive_position, 'string');
   assert.ok(Array.isArray(payload.customer_stage_plan));
-  assert.equal(result.model, 'gemini-3.1-pro-preview');
+  assert.equal(result.model, GEMINI_PRIMARY_MODEL);
   console.log(`UX_MODE_GEMINI_SMOKE_OK model=${result.model || 'unknown'}`);
 } finally {
   await fs.rm(workspace, { recursive: true, force: true });

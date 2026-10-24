@@ -1,8 +1,12 @@
 export interface VersionedSessionSnapshot {
+  timelineProjectionVersion?: number;
   id: string;
   updatedAt: string;
   totalTimelineEntries: number;
   timelineWindowEnd?: number;
+}
+export function sameTimelineProjection(current: VersionedSessionSnapshot,incoming:VersionedSessionSnapshot):boolean {
+  return (current.timelineProjectionVersion||1)===(incoming.timelineProjectionVersion||1);
 }
 
 function parseSnapshotTimestamp(value: string): number | null {
@@ -28,6 +32,8 @@ export function shouldAcceptSessionSnapshot(
   if (!current || current.id !== incoming.id) {
     return true;
   }
+  const projectionDifference=(incoming.timelineProjectionVersion||1)-(current.timelineProjectionVersion||1);
+  if(projectionDifference)return projectionDifference>0;
 
   const currentTimestamp = parseSnapshotTimestamp(current.updatedAt);
   const incomingTimestamp = parseSnapshotTimestamp(incoming.updatedAt);

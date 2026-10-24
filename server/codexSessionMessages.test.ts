@@ -3,7 +3,19 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { normalizeCodexSessionRow } from './codexSessionMessages.js';
+import { normalizeCodexSessionRow,createCodexMessageProjection } from './codexSessionMessages.js';
+
+test('one native identity and two public representations display once; repeated real input survives',()=>{
+ const event=(payload:any,time='2026-10-12T00:00:00Z')=>({type:'event_msg',timestamp:time,payload});
+ const native=event({type:'item_completed',item:{type:'UserMessage',id:'one',clientId:'stable',content:[{type:'text',text:'עברית'}]}});
+ const legacy=event({type:'user_message',message:'עברית',client_user_message_id:'stable'});
+ for(const rows of [[native,legacy],[legacy,native]]){const project=createCodexMessageProjection();assert.equal(rows.map(project).filter(Boolean).length,1);}
+ const project=createCodexMessageProjection();assert.ok(project(native));assert.equal(project(native),null);
+ assert.ok(project(event({type:'task_started'})));
+ assert.ok(project(event({type:'user_message',message:'עברית'},'2026-10-12T00:01:00Z')));
+ const first=createCodexMessageProjection()(native),seed={entryType:'message',role:'user',kind:'prompt',text:first.payload.message,timestamp:first.timestamp,...first.payload};
+ assert.equal(createCodexMessageProjection([seed])(native),null,'incremental replay uses stable projection metadata');
+});
 
 test('only public completed message events are normalized; raw context and reasoning stay excluded', () => {
   const row = { type: 'event_msg', timestamp: '2026-09-06T06:00:00Z', payload: { type: 'item_completed', item: {
@@ -40,6 +52,7 @@ test('new and legacy rollouts render user, commentary and final bubbles once in 
     completed('AgentMessage', 'Progress', 'commentary', 7),
     { type: 'response_item', timestamp: '2026-09-06T06:00:08.000Z', payload: { type: 'function_call', name: 'check', call_id: 'call-1', arguments: '{}' } },
     completed('AgentMessage', 'New final', 'final_answer', 9),
+    event({type:'agent_message',message:'New final',phase:'final'},9),
     { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'New final' }] } },
     event({ type: 'task_complete', last_agent_message: 'New final' }, 10),
   ];

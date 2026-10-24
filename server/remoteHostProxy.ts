@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { createHmac, timingSafeEqual } from 'crypto';
 import http from 'http';
+import { readCodexFileSourceServer } from './codexFileAssets.js';
 import {
   ensureRemoteHostEndpoint,
   getRemoteHostConfig,
@@ -44,9 +45,12 @@ function readRequestedServerId(req: Request): string {
     return headerServerId;
   }
 
+  const mediaServer = readCodexFileSourceServer(req.method, req.path || '', req.query.server);
+  if (mediaServer) return mediaServer;
+
   // External session triggers cannot set custom browser headers. The server
-  // query parameter is accepted only on the token-protected trigger endpoint;
-  // all other routes require the dedicated header.
+  // query parameter is also accepted on narrowly scoped authenticated file
+  // media reads above. Other routes require the dedicated header.
   if (isPublicSessionTriggerRequest(req) && typeof req.query.server === 'string') {
     return req.query.server.trim().toLowerCase();
   }
@@ -115,7 +119,8 @@ function buildRemoteRequestPath(req: Request): string {
   const originalPath = req.originalUrl.startsWith('/api/codex')
     ? req.originalUrl
     : `/api/codex${req.url}`;
-  if (!isPublicSessionTriggerRequest(req)) {
+  if (!isPublicSessionTriggerRequest(req)
+    && !readCodexFileSourceServer(req.method, req.path || '', req.query.server)) {
     return originalPath;
   }
 
@@ -123,6 +128,7 @@ function buildRemoteRequestPath(req: Request): string {
   // URL would make a sidecar interpret the request as another remote hop.
   const parsed = new URL(originalPath, 'http://code-ai.internal');
   parsed.searchParams.delete('server');
+  parsed.pathname = parsed.pathname.replace(/^(\/api\/codex\/files\/asset\/)[^/]+\//, '$1local/');
   return `${parsed.pathname}${parsed.search}`;
 }
 

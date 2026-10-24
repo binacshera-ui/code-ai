@@ -8,7 +8,7 @@ const DEFAULT_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const MIN_UPDATE_INTERVAL_MS = 15 * 60 * 1000;
 const UPDATE_TIMEOUT_MS = 10 * 60 * 1000;
 
-export type CodexCliAutoUpdateState = 'disabled' | 'checking' | 'current' | 'updating' | 'updated' | 'error';
+export type CodexCliAutoUpdateState = 'disabled' | 'checking' | 'current' | 'available' | 'updating' | 'updated' | 'error';
 
 export interface CodexCliAutoUpdateSnapshot {
   enabled: boolean;
@@ -72,6 +72,10 @@ export function compareStableVersions(left: string, right: string): number {
     }
   }
   return 0;
+}
+
+export function isCodexCliInstallRequired(currentVersion: string | null, latestVersion: string): boolean {
+  return !currentVersion || compareStableVersions(currentVersion, latestVersion) < 0;
 }
 
 export function inferPosixNpmPrefixFromCodexPath(codexPath: string): string | null {
@@ -154,6 +158,7 @@ function runUpdateCommand(latestVersion: string, npmPrefix: string | null): Prom
   const npmArguments = [
     'install',
     '--global',
+    '--include=optional',
     ...(npmPrefix ? ['--prefix', npmPrefix] : []),
     packageSpec,
   ];
@@ -220,9 +225,6 @@ export async function checkForCodexCliUpdate(
     const command = resolveCodexCommand();
     try {
       const currentVersion = readInstalledVersion(command);
-      if (!currentVersion) {
-        throw new Error(`Could not read Codex CLI version from ${command}`);
-      }
       const latestVersion = await fetchLatestStableVersion();
       updateSnapshot = {
         ...updateSnapshot,
@@ -231,8 +233,17 @@ export async function checkForCodexCliUpdate(
         lastCheckedAt: new Date().toISOString(),
       };
 
-      if (compareStableVersions(currentVersion, latestVersion) >= 0) {
+      if (!isCodexCliInstallRequired(currentVersion, latestVersion)) {
         updateSnapshot = { ...updateSnapshot, state: 'current', error: null };
+        return getCodexCliAutoUpdateSnapshot();
+      }
+
+      // A shared native owner pins a qualified complete distribution. Replacing
+      // its npm executable cannot update that owner and breaks its next restart.
+      // Expose the available version; the fleet transaction advances the native
+      // binary, companions, plan hash and expected health version together.
+      if (process.env.CODE_AI_CODEX_SHARED_OWNER_PROFILES?.split(',').some((id) => id.trim())) {
+        updateSnapshot = { ...updateSnapshot, state: 'available', error: null };
         return getCodexCliAutoUpdateSnapshot();
       }
 
@@ -245,7 +256,7 @@ export async function checkForCodexCliUpdate(
 
       const installedVersion = readInstalledVersion(command);
       if (!installedVersion || compareStableVersions(installedVersion, latestVersion) < 0) {
-        throw new Error(`Codex CLI stayed on ${installedVersion || currentVersion} after updating to ${latestVersion}`);
+        throw new Error(`Codex CLI stayed on ${installedVersion || currentVersion || 'unavailable'} after updating to ${latestVersion}`);
       }
 
       updateSnapshot = {

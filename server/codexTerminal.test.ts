@@ -123,3 +123,15 @@ test('isolates terminals by owner and rejects oversized input', () => {
 
   closeCodexTerminal('owner-b', terminal.id);
 });
+
+test('round trips Hebrew UTF-8 through a real PTY with a non-UTF-8 parent locale', async () => {
+  const previous = process.env.LC_ALL;
+  process.env.LC_ALL = 'C';
+  let terminal: ReturnType<typeof createCodexTerminalSession>;
+  try { terminal = createCodexTerminalSession({ownerId:'owner-hebrew',profile,cwd:temporaryRoot}); }
+  finally { if (previous === undefined) delete process.env.LC_ALL; else process.env.LC_ALL = previous; }
+  writeCodexTerminalInput('owner-hebrew',terminal.id,"printf 'UTF8:%s שלום עולם GPU 123\\n' \"$(locale charmap)\"\r");
+  const result = await waitForOutput('owner-hebrew',terminal.id,value=>value.includes('UTF8:UTF-8 שלום עולם GPU 123'));
+  assert.ok(result.collected.includes('UTF8:UTF-8 שלום עולם GPU 123'));
+  closeCodexTerminal('owner-hebrew',terminal.id);
+});

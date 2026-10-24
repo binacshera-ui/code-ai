@@ -93,8 +93,28 @@ import {
   type CodexQueueStopPolicy,
 } from './codexQueueStopPolicy.js';
 import { stripFlowDocumentBlocks } from '../shared/flowMode.js';
+import { prepareWorkModeRun } from './codexWorkModeRuntime.js';
+import { dueRationalRuns, finishRationalRun, getRationalRun, listRationalHolds, rebindRationalRun, releaseRationalRun } from './codexRationalMode.js';
+import { CodexAppServerDetachedError, CodexSharedAdmissionRejectedError, type CodexSharedSubmission } from './codexAppServer.js';
+import { normalizeNativeSubmission, nativeSubmissionNeedsReconciliation, recoverNativeSubmission } from './codexSharedSubmission.mjs';
+import { advanceRecurringNativeSubmission, repairLegacyRecurringNativeSubmission } from './codexQueueRecurrence.mjs';
+import { isCapacityContinuationEligible, capacityContinuationPlan, sameCapacityConversation,
+  capacityContinuationObsolete, nativeActivityAfterCapacityFailure, capacityFailureHoldCanResume } from './codexCapacityContinuation.mjs';
+import { refreshCodexSharedModeContextAfterRebind } from './codexSharedModes.js';
+import { getSessionFocusMode, rebindSessionFocusMode, buildSessionFocusModePromptAdditions } from './codexFocusMode.js';
+import { claimQueueProgressGuard } from './codexQueueProgressGuard.mjs';
+import { isCodexAppServerTurnFailedError } from './codexNativeTurnOutcome.mjs';
+import { failureKindLabel, type CodexFailureKind } from '../shared/codexRunOutcome.js';
+import {
+  acquireCodexDeploymentAdmission,
+  acquireCodexDeploymentRecoveryAdmission,
+  isCodexDeploymentDrainError,
+  isCodexDeploymentDrainSealed,
+  registerCodexDeploymentDrainParticipant,
+} from './codexDeploymentDrain.mjs';
 
 export type CodexQueueItemStatus =
+  | 'draft'
   | 'scheduled'
   | 'queued'
   | 'running'
@@ -119,6 +139,23 @@ export interface CodexQueueItem {
   sourceProfileId: string | null;
   queueKey: string;
   clientRequestId?: string | null;
+  retryOfItemId?: string | null;
+  capacityRetryPendingAt?: string | null;
+  capacityRetry?: {
+    sourceItemId: string; rootItemId: string; sourceStartedAt: string | null;
+    failedAt: string; sourceWorkModeRunId: string | null; attempt: number;
+  } | null;
+  nativeSubmission?: CodexSharedSubmission | null;
+  nativeRunId?: string | null;
+  lastRunNativeSubmission?: (CodexSharedSubmission & { runId: string }) | null;
+  nativeCancellationRequestedAt?: string | null;
+  nativeReconcileAfter?: string | null;
+  workModeRunId?: string | null;
+  failureKind?: CodexFailureKind | null;
+  progressGuardWarning?: {
+    kind: 'repeated_failure'; turnId: string; fingerprint: string; count: number;
+    intervention: 'claimed' | 'applied' | 'unavailable'; at: string;
+  } | null;
   sessionId: string | null;
   cwd: string | null;
   model: string | null;
@@ -180,6 +217,8 @@ export type CodexQueueListItem = Pick<CodexQueueItem,
   | 'completedAt'
   | 'finalMessage'
   | 'error'
+  | 'failureKind'
+  | 'progressGuardWarning'
   | 'attempts'
   | 'scheduleMode'
   | 'recurringFrequency'
@@ -204,6 +243,8 @@ interface CodexQueueState {
 }
 
 interface EnqueueCodexQueueInput {
+  saveAsDraft?: boolean;
+  capacityRetry?: CodexQueueItem['capacityRetry'];
   profileId: string;
   sourceProfileId?: string | null;
   queueKey: string;
@@ -244,6 +285,7 @@ const QUEUE_ROOT = CODEX_APP_CONFIG.queueRoot;
 const STATE_FILE = path.join(QUEUE_ROOT, 'state.json');
 
 function queueNotificationDedupeKey(item: CodexQueueItem): string {
+  if (item.workModeRunId) return `work-mode:${item.workModeRunId}`;
   return `${item.id}:${item.startedAt || `attempt-${item.attempts}`}`;
 }
 
@@ -260,6 +302,9 @@ async function enqueueQueueOutcomeNotification(
     sessionTitle?: string | null;
   } = {},
 ): Promise<void> {
+  // Keep the first failure alert and the final recovery alert; don't notify
+  // the phone once per minute while the same model remains at capacity.
+  if (outcome === 'failed' && item.failureKind === 'model_capacity' && item.capacityRetry) return;
   const sessionKey = queueNotificationSessionKey(item);
   const notificationProfileId = item.sourceProfileId || item.profileId;
   const provider = CODEX_APP_CONFIG.profiles.find((profile) => profile.id === item.profileId)?.provider || null;
@@ -306,7 +351,9 @@ const QUEUE_SHUTDOWN_TIMEOUT_MS = 8_000;
 const QUEUE_EXECUTION_DISABLED = process.env.CODEX_QUEUE_DISABLE_EXECUTION === '1';
 
 let stateLoadedPromise: Promise<void> | null = null;
+let stateLoaded = false;
 let persistTail: Promise<void> = Promise.resolve();
+let pendingPersistWrites = 0;
 let state: CodexQueueState = {
   items: [],
   sessionBindings: {},
@@ -320,6 +367,18 @@ let activeWorkerItemIds = new Set<string>();
 let activeWorkerQueueKeys = new Set<string>();
 let activeWorkerQueueKeyByItemId = new Map<string, string>();
 let activeWorkerPromises = new Map<string, Promise<void>>();
+
+registerCodexDeploymentDrainParticipant('queue', () => ({
+  ready: stateLoaded,
+  active: Math.max(
+    activeWorkerItemIds.size,
+    activeWorkerPromises.size,
+    state.items.filter((item) => item.status === 'running' || item.status === 'cancelling'
+      || nativeSubmissionNeedsReconciliation(item.nativeSubmission)).length,
+  ),
+  inFlight: Number(workerTickInFlight) + Number(stopPolicyRefreshPromise !== null),
+  persisting: pendingPersistWrites > 0,
+}));
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -381,6 +440,18 @@ export async function resolveCodexQueueSessionId(
   return resolveSessionBindingFromState(sessionId, { fallbackToSelf: true });
 }
 
+/** Read-only ownership test used by the existing notification outbox. */
+export async function ownsCodexQueueNativeFailure(failure: import('./codexNativeFailureObserver.js').NativeFailureObservation): Promise<boolean> {
+  await ensureStateLoaded();
+  const at = Date.parse(failure.timestamp);
+  return state.items.some(item => (item.sourceProfileId || item.profileId) === failure.profileId
+    && (item.sessionId === failure.sessionId || item.queueKey === failure.sessionId)
+    && (item.nativeSubmission || item.lastRunNativeSubmission ?
+      [item.nativeSubmission?.turnId, item.lastRunNativeSubmission?.turnId].includes(failure.turnId)
+      : Boolean(item.startedAt && Date.parse(item.startedAt) <= at
+        && (!item.completedAt || at <= Date.parse(item.completedAt)))));
+}
+
 /**
  * Persist the provider-assigned id as soon as its startup event arrives. The
  * original draft queue key intentionally remains unchanged until the run is
@@ -417,6 +488,8 @@ function isDraftSessionKey(value: string | null | undefined): boolean {
 function cloneQueueItem(item: CodexQueueItem): CodexQueueItem {
   return {
     ...item,
+    capacityRetry: item.capacityRetry ? { ...item.capacityRetry } : null,
+    nativeSubmission: normalizeNativeSubmission(item.nativeSubmission, item.nativeRunId || item.id),
     attachments: item.attachments.map((attachment) => ({ ...attachment })),
     actionRestriction: item.actionRestriction
       ? {
@@ -1203,9 +1276,11 @@ async function writeStateSnapshot(snapshot: string): Promise<void> {
 
 async function persistState() {
   const snapshot = JSON.stringify(state, null, 2);
+  pendingPersistWrites += 1;
   const operation = persistTail
     .catch(() => undefined)
-    .then(() => writeStateSnapshot(snapshot));
+    .then(() => writeStateSnapshot(snapshot))
+    .finally(() => { pendingPersistWrites -= 1; });
   persistTail = operation;
   await operation;
 }
@@ -1270,7 +1345,7 @@ async function loadState() {
 
   state.items = state.items
     .filter((item) => {
-      if (!isTerminalStatus(item.status)) {
+      if (!isTerminalStatus(item.status) || nativeSubmissionNeedsReconciliation(item.nativeSubmission)) {
         return true;
       }
 
@@ -1348,7 +1423,20 @@ async function loadState() {
         changed = true;
       }
 
-      if (next.status === 'running') {
+      if (repairLegacyRecurringNativeSubmission(next)) changed = true;
+
+      if (next.status === 'cancelling' && nativeSubmissionNeedsReconciliation(next.nativeSubmission)) {
+        next.nativeCancellationRequestedAt ||= nowIso();
+      }
+      if ((next.status === 'running' || next.status === 'queued' || next.status === 'cancelling') && nativeSubmissionNeedsReconciliation(next.nativeSubmission)) {
+        // The native owner may still be working. Recover custody, not the
+        // prompt: the runner will reconcile this stable client ID only.
+        next.nativeSubmission = recoverNativeSubmission(next.nativeSubmission, next.nativeRunId || next.id);
+        next.nativeReconcileAfter = null;
+        next.status = 'queued';
+        next.error = 'Reconnecting to already submitted native work; not resending the message.';
+        changed = true;
+      } else if (next.status === 'running') {
         const wasScheduledStopInProgress = next.stopPolicy?.status === 'stopping';
         if (isRecurringItem(next)) {
           if (wasScheduledStopInProgress) {
@@ -1420,6 +1508,7 @@ async function ensureStateLoaded() {
   }
 
   await stateLoadedPromise;
+  stateLoaded = true;
 }
 
 async function refreshDueItems() {
@@ -1441,10 +1530,12 @@ async function refreshDueItems() {
   }
 }
 
-function hasBlockingPreviousItem(candidate: CodexQueueItem): boolean {
-  const now = Date.now();
-
-  return state.items.some((item) => {
+function hasBlockingPreviousItem(
+  items: readonly CodexQueueItem[],
+  candidate: CodexQueueItem,
+  now: number,
+): boolean {
+  return items.some((item) => {
     if (item.id === candidate.id) {
       return false;
     }
@@ -1453,7 +1544,8 @@ function hasBlockingPreviousItem(candidate: CodexQueueItem): boolean {
       return false;
     }
 
-    if (isTerminalStatus(item.status)) {
+    // Saved questions do not reserve a turn or block sent messages.
+    if (item.status === 'draft' || isTerminalStatus(item.status)) {
       return false;
     }
 
@@ -1478,6 +1570,8 @@ function applyRecurringResult(
     throw new Error('Recurring result cannot be applied to a one-time queue item');
   }
 
+  const nextScheduledAt = computeNextRecurringScheduledAt(item, Date.now());
+  advanceRecurringNativeSubmission(item);
   const finishedAt = nowIso();
 
   if (options.sessionId) {
@@ -1491,7 +1585,7 @@ function applyRecurringResult(
   item.updatedAt = finishedAt;
   item.finalMessage = lastRunStatus === 'completed' ? options.finalMessage || null : null;
   item.error = lastRunStatus === 'failed' ? options.error || 'Recurring Codex job failed' : null;
-  item.scheduledAt = computeNextRecurringScheduledAt(item, Date.now());
+  item.scheduledAt = nextScheduledAt;
   item.status = 'scheduled';
 }
 
@@ -1530,6 +1624,7 @@ function markQueueItemStopped(item: CodexQueueItem) {
   item.completedAt = stoppedAt;
   item.finalMessage = null;
   item.error = null;
+  item.failureKind = null;
 }
 
 function findStopDecisionItem(sourceItemId: string): CodexQueueItem | null {
@@ -1824,6 +1919,7 @@ async function refreshDueStopPolicies() {
 async function refreshQueueState() {
   if (!stopPolicyRefreshPromise) {
     stopPolicyRefreshPromise = (async () => {
+      await refreshRationalBudgets();
       await refreshDueStopPolicies();
       await refreshDueItems();
     })().finally(() => {
@@ -1834,14 +1930,21 @@ async function refreshQueueState() {
   await stopPolicyRefreshPromise;
 }
 
-function pickRunnableItems(limit: number): CodexQueueItem[] {
+export function selectRunnableCodexQueueItems(
+  items: readonly CodexQueueItem[],
+  limit: number,
+  activeItemIds: ReadonlySet<string>,
+  activeQueueKeys: ReadonlySet<string>,
+  now = Date.now(),
+): CodexQueueItem[] {
   if (limit <= 0) {
     return [];
   }
 
-  const reservedQueueKeys = new Set(activeWorkerQueueKeys);
-  const dueItems = state.items
-    .filter((item) => item.status === 'queued')
+  const reservedQueueKeys = new Set(activeQueueKeys);
+  const dueItems = items
+    .filter((item) => item.status === 'queued'
+      && (!item.nativeReconcileAfter || Date.parse(item.nativeReconcileAfter) <= now))
     .sort(compareQueueExecutionOrder);
 
   const pickedItems: CodexQueueItem[] = [];
@@ -1851,11 +1954,11 @@ function pickRunnableItems(limit: number): CodexQueueItem[] {
       break;
     }
 
-    if (activeWorkerItemIds.has(item.id) || reservedQueueKeys.has(item.queueKey)) {
+    if (activeItemIds.has(item.id) || reservedQueueKeys.has(item.queueKey)) {
       continue;
     }
 
-    if (!hasBlockingPreviousItem(item)) {
+    if (!hasBlockingPreviousItem(items, item, now)) {
       pickedItems.push(item);
       reservedQueueKeys.add(item.queueKey);
     }
@@ -1864,9 +1967,140 @@ function pickRunnableItems(limit: number): CodexQueueItem[] {
   return pickedItems;
 }
 
+function cancelPendingCapacityContinuations(target: CodexQueueItem, wholeConversation = false) {
+  const at = nowIso();
+  for (const item of state.items) {
+    if (!sameCapacityConversation(item, target)) continue;
+    const related = wholeConversation || item.id === target.id
+      || item.capacityRetry?.sourceItemId === target.id || item.capacityRetry?.rootItemId === target.id;
+    if (!related) continue;
+    if (item.capacityRetryPendingAt) item.capacityRetryPendingAt = null;
+    if (!item.capacityRetry || !['scheduled', 'queued'].includes(item.status)
+        || nativeSubmissionNeedsReconciliation(item.nativeSubmission)) continue;
+    item.status = 'cancelled'; item.completedAt = at; item.updatedAt = at;
+    item.error = 'ההמשך האוטומטי בוטל בעקבות עצירה או הודעה חדשה בשיחה.';
+  }
+}
+
+/** Durable worker intent, never a UI timer or a replay of the failed input. */
+export async function scheduleCodexCapacityContinuation(itemId: string): Promise<CodexQueueItem | null> {
+  await ensureStateLoaded();
+  const source = state.items.find(item => item.id === itemId);
+  if (!source?.capacityRetryPendingAt) return null;
+  const plan = capacityContinuationPlan(source);
+  if (!plan) { source.capacityRetryPendingAt = null; await persistState(); return null; }
+  const activeMode = <T extends { enabled: boolean }>(mode: T | null) => mode?.enabled ? mode : null;
+  const child = await enqueueCodexQueueItem({
+    ...plan, profileId: source.profileId, sourceProfileId: source.sourceProfileId,
+    sessionId: source.sessionId, queueKey: source.queueKey, cwd: source.cwd,
+    model: source.model, reasoningEffort: source.reasoningEffort, permissionModeId: source.permissionModeId,
+    sessionInstruction: source.sessionInstruction, actionRestriction: source.actionRestriction,
+    browserMode: activeMode(source.browserMode), personalChromeMode: activeMode(source.personalChromeMode),
+    phoneMode: activeMode(source.phoneMode), designMode: activeMode(source.designMode), uxMode: activeMode(source.uxMode),
+    goalMode: source.goalMode, priority: source.priority,
+    agentSessionId: source.agentSessionId, agentId: source.agentId, agentLinkKind: source.agentLinkKind,
+    stopPolicy: source.stopPolicy ? createCodexQueueStopPolicy({ stopAt: source.stopPolicy.stopAt,
+      mode: source.stopPolicy.mode, question: source.stopPolicy.question }) : null,
+  });
+  source.capacityRetryPendingAt = null;
+  await persistState();
+  return child;
+}
+
+async function prepareCapacityContinuation(item: CodexQueueItem): Promise<boolean> {
+  if (!item.capacityRetry || item.nativeSubmission) return true;
+  const source = state.items.find(row => row.id === item.capacityRetry!.sourceItemId);
+  if (capacityContinuationObsolete(item, source, state.items)) {
+    cancelPendingCapacityContinuations(item); await persistState(); return false;
+  }
+  try {
+    const detail = await getAgentSessionDetail(item.sessionId!, item.profileId, { tail: 32 });
+    if (nativeActivityAfterCapacityFailure(detail.timeline, item.capacityRetry.failedAt)) {
+      cancelPendingCapacityContinuations(item); await persistState(); return false;
+    }
+    if (item.capacityRetry.sourceWorkModeRunId) {
+      const run = await getRationalRun(item.capacityRetry.sourceWorkModeRunId);
+      // Only the failed model attempt's own hold may be released. Explicit
+      // budget expiry and unrelated/user holds retain their authority.
+      if (run?.enabled && !run.holdReleasedAt) {
+        if (!capacityFailureHoldCanResume(run, item)) {
+          cancelPendingCapacityContinuations(item); await persistState(); return false;
+        }
+        await releaseRationalRun(run.runId, run.profileId, run.sessionKey);
+      }
+    }
+    return item.status === 'queued' && !capacityContinuationObsolete(item, source, state.items);
+  } catch {
+    // A failed read is not proof that it is safe to submit another turn.
+    if (item.status !== 'queued') return false;
+    item.status = 'scheduled'; item.scheduledAt = new Date(Date.now() + 60_000).toISOString();
+    item.error = 'ממתין לאימות מצב השיחה לפני המשך אוטומטי.';
+    await persistState(); return false;
+  }
+}
+
+async function pickRunnableItems(limit: number): Promise<CodexQueueItem[]> {
+  const holds = await listRationalHolds();
+  const eligible = state.items.filter(item => !holds.some(hold =>
+    hold.profileId === (item.sourceProfileId || item.profileId)
+    && [item.queueKey, item.sessionId, state.sessionBindings[item.queueKey]].includes(hold.sessionKey)
+    // A detached original may still need exact-input reconciliation to stop it.
+    && !(item.workModeRunId === hold.runId && nativeSubmissionNeedsReconciliation(item.nativeSubmission))
+    && !(item.capacityRetry?.sourceWorkModeRunId === hold.runId)));
+  const selected = selectRunnableCodexQueueItems(eligible, limit, activeWorkerItemIds, activeWorkerQueueKeys);
+  const ready: CodexQueueItem[] = [];
+  for (const item of selected) if (await prepareCapacityContinuation(item)) ready.push(item);
+  return ready;
+}
+
+async function refreshRationalBudgets() {
+  for (const run of await dueRationalRuns()) {
+    const item = state.items.find(candidate => candidate.workModeRunId === run.runId);
+    if (!item) continue;
+    const reason = 'מצב הגיוני: הזמן שהוקצב הסתיים ללא השלמה. נשלחה בקשת עצירה להרצה המקורית; המשכים בשיחה מושהים עד החלטתך.';
+    if (isTerminalStatus(item.status)) {
+      await finishRationalRun(run.runId, item.status);
+    } else {
+      // Durable intention before touching the native run. On restart the same
+      // accepted input is reconciled and interrupted, never submitted again.
+      if (!item.nativeCancellationRequestedAt) {
+        item.nativeCancellationRequestedAt = nowIso();
+        item.updatedAt = nowIso();
+        await persistState();
+      }
+      if (item.status === 'running' && cancelAgentRun(item.id, item.profileId)) {
+        item.status = 'cancelling';
+        await persistState();
+      } else if ((item.status === 'queued' || item.status === 'scheduled')
+          && !nativeSubmissionNeedsReconciliation(item.nativeSubmission)) {
+        markQueueItemStopped(item);
+        await persistState();
+        await finishRationalRun(run.runId, 'cancelled');
+      }
+    }
+    await enqueueQueueOutcomeNotification(item, 'interrupted', { reason });
+  }
+}
+
 function launchQueueItem(item: CodexQueueItem) {
-  if (activeWorkerItemIds.has(item.id) || activeWorkerQueueKeys.has(item.queueKey)) {
+  if (item.status !== 'queued' || activeWorkerItemIds.has(item.id) || activeWorkerQueueKeys.has(item.queueKey)) {
     return;
+  }
+  if (item.capacityRetry && !item.nativeSubmission && capacityContinuationObsolete(item,
+      state.items.find(row => row.id === item.capacityRetry!.sourceItemId), state.items)) {
+    cancelPendingCapacityContinuations(item); void persistState(); return;
+  }
+
+  // Reserve synchronously at the actual launch, not at an earlier queue
+  // snapshot. Queued, draft and scheduled items remain durable under a fence.
+  let deploymentAdmission: { release(): void };
+  try {
+    deploymentAdmission = nativeSubmissionNeedsReconciliation(item.nativeSubmission)
+      ? acquireCodexDeploymentRecoveryAdmission('native-reconcile')
+      : acquireCodexDeploymentAdmission('queue');
+  } catch (error) {
+    if (isCodexDeploymentDrainError(error)) return;
+    throw error;
   }
 
   const workerQueueKey = item.queueKey;
@@ -1874,7 +2108,7 @@ function launchQueueItem(item: CodexQueueItem) {
   activeWorkerQueueKeys.add(workerQueueKey);
   activeWorkerQueueKeyByItemId.set(item.id, workerQueueKey);
 
-  const workerPromise = processQueueItem(item).finally(() => {
+  const workerPromise = processQueueItem(item, deploymentAdmission).finally(() => {
     const currentWorkerQueueKey = activeWorkerQueueKeyByItemId.get(item.id);
     activeWorkerItemIds.delete(item.id);
     activeWorkerQueueKeys.delete(workerQueueKey);
@@ -1883,6 +2117,7 @@ function launchQueueItem(item: CodexQueueItem) {
     }
     activeWorkerQueueKeyByItemId.delete(item.id);
     activeWorkerPromises.delete(item.id);
+    deploymentAdmission.release();
     scheduleImmediateTick();
   });
   activeWorkerPromises.set(item.id, workerPromise);
@@ -2032,16 +2267,17 @@ function getProviderForQueueItem(profileId: string): 'codex' | 'claude' | 'gemin
   return 'codex';
 }
 
-async function processQueueItem(item: CodexQueueItem) {
+async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { release(): void }) {
   const reboundSessionId = resolveQueueItemSessionId(item.sessionId, item.queueKey);
   if (reboundSessionId && item.sessionId !== reboundSessionId) {
     item.sessionId = reboundSessionId;
   }
 
-  item.status = 'running';
+  item.status = item.nativeCancellationRequestedAt ? 'cancelling' : 'running';
   item.startedAt = nowIso();
   item.updatedAt = item.startedAt;
   item.error = null;
+  item.failureKind = null;
   item.attempts += 1;
   await persistState();
 
@@ -2135,12 +2371,57 @@ async function processQueueItem(item: CodexQueueItem) {
   };
 
   try {
+    // Optional mode preparation belongs to the same failed-outcome boundary as
+    // native execution. A storage error must not leave a silently running row.
+    const focusModeAtRun = await getSessionFocusMode(item.sourceProfileId || item.profileId, resolvedSessionId || item.queueKey);
+    let workModePrompt: string | null = null;
+    if (focusModeAtRun.rationalEnabled || focusModeAtRun.decisionEnabled || item.workModeRunId) {
+      const previous = item.workModeRunId ? await getRationalRun(item.workModeRunId) : null;
+      if (!previous || (previous.finishedAt && !nativeSubmissionNeedsReconciliation(item.nativeSubmission))) {
+        item.workModeRunId = randomUUID();
+        await persistState();
+      }
+      const existing = item.workModeRunId ? await getRationalRun(item.workModeRunId) : null;
+      if (existing?.status === 'expired' && !nativeSubmissionNeedsReconciliation(item.nativeSubmission)) {
+        throw new Error('מצב הגיוני: התקציב הסתיים; לא נשלח קלט חדש.');
+      }
+      workModePrompt = await prepareWorkModeRun({ runId: item.workModeRunId!, profileId: item.profileId,
+        stateProfileId: item.sourceProfileId || item.profileId, sessionKey: resolvedSessionId || item.queueKey,
+        startedAt: existing?.startedAt || item.startedAt!, mode: focusModeAtRun });
+    }
+    const focusedRunPrompt = focusModeAtRun.enabled
+      ? `${effectiveRunPrompt}\n\n${buildSessionFocusModePromptAdditions({ mode: focusModeAtRun })}` : effectiveRunPrompt;
     const result = await runAgentPrompt(
-      effectiveRunPrompt,
+      [focusedRunPrompt, workModePrompt].filter(Boolean).join('\n\n'),
       resolvedSessionId,
       item.profileId,
       item.attachments,
       {
+        deploymentAdmission,
+        nativeRunId: item.nativeRunId || item.id,
+        nativeSubmission: item.nativeSubmission || null,
+        progressGuardEnabled: focusModeAtRun.enabled,
+        onProgressGuardClaim: (warning) => claimQueueProgressGuard(item, warning, persistState),
+        onProgressGuardWarning: async (warning) => {
+          if (item.progressGuardWarning?.turnId !== warning.turnId
+              || item.progressGuardWarning?.fingerprint !== warning.fingerprint) return;
+          item.progressGuardWarning = { ...item.progressGuardWarning, intervention: warning.intervention };
+          item.updatedAt = nowIso();
+          await persistState();
+        },
+        onNativeSubmissionChanged: async (submission) => {
+          item.nativeSubmission = normalizeNativeSubmission(submission, item.nativeRunId || item.id);
+          item.nativeReconcileAfter = null;
+          item.updatedAt = nowIso();
+          // In particular, persist 'prepared' before the native queue/add RPC.
+          await persistState();
+          if (item.nativeCancellationRequestedAt && nativeSubmissionNeedsReconciliation(item.nativeSubmission)
+              && (item.nativeSubmission?.turnId || item.nativeSubmission?.queuedSubmissionId)) {
+            // Reconnect to the exact stable input before native interruption.
+            // A restarted transport is never cancellation proof.
+            setImmediate(() => cancelAgentRun(item.id, item.profileId));
+          }
+        },
         runId: item.id,
         cwd: item.cwd || undefined,
         injectDirectoryContext: !resolvedSessionId,
@@ -2169,6 +2450,8 @@ async function processQueueItem(item: CodexQueueItem) {
         },
         onSessionStarted: async (startedSessionId) => {
           await bindCodexQueueItemToStartedSession(item.id, startedSessionId);
+          if (item.workModeRunId) await rebindRationalRun(item.workModeRunId, startedSessionId);
+          await rebindSessionFocusMode(item.sourceProfileId || item.profileId, resolvedSessionId || item.queueKey, startedSessionId);
           await rebindSessionFinalNotificationPreference(
             item.sourceProfileId || item.profileId,
             item.queueKey,
@@ -2177,6 +2460,15 @@ async function processQueueItem(item: CodexQueueItem) {
         },
       }
     );
+    if (item.workModeRunId) {
+      await rebindRationalRun(item.workModeRunId, result.sessionId);
+      const workResult = await finishRationalRun(item.workModeRunId, 'completed');
+      if (workResult?.enabled && workResult.status !== 'completed') {
+        throw new Error(workResult.status === 'expired'
+          ? 'מצב הגיוני: הזמן שהוקצב הסתיים ללא השלמה. השיחה מושהית עד החלטתך.'
+          : 'מצב הגיוני: ההרצה הסתיימה בלי שכל המשימות סומנו כהושלמו עם ראיות. השיחה מושהית עד החלטתך.');
+      }
+    }
     const displayFinalMessage = stripFlowDocumentBlocks(result.finalMessage || '');
 
     if (resolvedSessionId && result.sessionId !== resolvedSessionId) {
@@ -2205,6 +2497,12 @@ async function processQueueItem(item: CodexQueueItem) {
     await rebindSessionProjectMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionConversationSearchMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionFlowMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
+    for (const previous of new Set([resolvedSessionId || item.queueKey, item.queueKey])) {
+      for (const server of ['personal_chrome', 'browser_mode', 'phone_mode', 'design_mode', 'ux_mode'] as const) {
+        await refreshCodexSharedModeContextAfterRebind(item.profileId, result.sessionId,
+          server, item.sourceProfileId || item.profileId, previous);
+      }
+    }
     if (item.browserMode && item.browserMode.enabled !== true) {
       await consumeSessionBrowserModeAfterDispatch(item.sourceProfileId || item.profileId, result.sessionId);
     }
@@ -2326,6 +2624,28 @@ async function processQueueItem(item: CodexQueueItem) {
       sessionTitle: result.sessionTitle,
     });
   } catch (error: any) {
+    if (error instanceof CodexSharedAdmissionRejectedError) {
+      // Only the qualified broker's explicit nonacceptance proof permits this
+      // reset. Lost/uncertain ACKs retain custody and follow reconciliation.
+      item.nativeSubmission = null;
+      if (error.retryable) {
+        item.status = 'queued';
+        item.nativeReconcileAfter = new Date(Date.now() + 5_000).toISOString();
+        item.error = error.message;
+        item.updatedAt = nowIso();
+        await persistState();
+        return;
+      }
+    }
+    if (error instanceof CodexAppServerDetachedError) {
+      item.nativeSubmission = normalizeNativeSubmission(error.submission, item.nativeRunId || item.id);
+      item.status = 'queued';
+      item.nativeReconcileAfter = new Date(Date.now() + 30_000).toISOString();
+      item.error = 'Native submission is awaiting reconciliation; the message has not been resent.';
+      item.updatedAt = nowIso();
+      await persistState();
+      return;
+    }
     if (isAgentRunCancelledError(error)) {
       markQueueItemStopped(item);
       if (item.stopPolicy?.status === 'stopping') {
@@ -2371,9 +2691,11 @@ async function processQueueItem(item: CodexQueueItem) {
     }
 
     if (isRecurringItem(item)) {
+      item.failureKind = isCodexAppServerTurnFailedError(error) ? error.failure.kind : null;
       applyRecurringResult(item, 'failed', {
         error: error?.message || 'Codex job failed',
       });
+      if (isCapacityContinuationEligible(item)) item.capacityRetryPendingAt = item.completedAt;
       await persistState();
       await enqueueQueueOutcomeNotification(item, 'failed', {
         reason: error?.message || 'The recurring run failed before completion.',
@@ -2382,10 +2704,13 @@ async function processQueueItem(item: CodexQueueItem) {
     }
 
     item.status = 'failed';
+    item.failureKind = isCodexAppServerTurnFailedError(error) ? error.failure.kind : null;
     item.error = error?.message || 'Codex job failed';
     item.completedAt = nowIso();
     item.updatedAt = item.completedAt;
     markStopPolicyNotNeeded(item);
+    if (isCapacityContinuationEligible(item)) item.capacityRetryPendingAt = item.completedAt;
+    await persistState();
     if (item.agentSessionId && item.agentLinkKind === 'agent' && item.agentId) {
       await updateAgentRuntimeStatus(item.agentSessionId, item.agentId, {
         runtimeStatus: 'failed',
@@ -2401,7 +2726,12 @@ async function processQueueItem(item: CodexQueueItem) {
     const outcome: Exclude<SessionNotificationOutcome, 'completed'> = /\b(abort(?:ed)?|interrupt(?:ed)?|terminat(?:ed|ion)|disconnect(?:ed)?|closed?|restart)\b/iu.test(failureMessage)
       ? 'interrupted'
       : 'failed';
-    await enqueueQueueOutcomeNotification(item, outcome, { reason: failureMessage });
+    await enqueueQueueOutcomeNotification(item, outcome, { reason: item.failureKind
+      ? `${failureKindLabel(item.failureKind)}\n${failureMessage}` : failureMessage });
+  } finally {
+    if (item.workModeRunId && isTerminalStatus(item.status)) {
+      await finishRationalRun(item.workModeRunId, item.status);
+    }
   }
 }
 
@@ -2413,6 +2743,13 @@ async function tickWorker() {
   workerTickInFlight = true;
 
   try {
+    // Once sealed, even scheduler housekeeping must remain quiescent until
+    // the replacement runtime releases the durable lease. Scheduled entries
+    // are not cancelled or rewritten; they are refreshed after resume.
+    if (isCodexDeploymentDrainSealed()) return;
+    for (const item of state.items.filter(row => row.capacityRetryPendingAt)) {
+      await scheduleCodexCapacityContinuation(item.id);
+    }
     await refreshQueueState();
 
     if (!workerStarted || workerStopping) {
@@ -2424,7 +2761,7 @@ async function tickWorker() {
       return;
     }
 
-    const nextItems = pickRunnableItems(availableSlots);
+    const nextItems = await pickRunnableItems(availableSlots);
     if (nextItems.length === 0) {
       return;
     }
@@ -2600,6 +2937,8 @@ function toCodexQueueListItem(
     completedAt: item.completedAt,
     finalMessage: detailsIncluded ? item.finalMessage : null,
     error: item.error ? item.error.slice(0, QUEUE_LIST_ERROR_LIMIT) : null,
+    failureKind: item.failureKind || null,
+    progressGuardWarning: item.progressGuardWarning ? { ...item.progressGuardWarning } : null,
     attempts: item.attempts,
     scheduleMode: item.scheduleMode,
     recurringFrequency: item.recurringFrequency,
@@ -2645,7 +2984,7 @@ export async function listCodexQueueWorkspaceItems(
         resolvedSessionId
       );
       const detailsIncluded = isRelated
-        && (item.status === 'failed' || item.status === 'cancelled');
+        && (item.status === 'draft' || item.status === 'failed' || item.status === 'cancelled');
       return toCodexQueueListItem(item, detailsIncluded);
     }),
     boundSessionId,
@@ -2689,6 +3028,9 @@ export async function getCodexQueueItemSession(itemId: string): Promise<CodexSes
 export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Promise<CodexQueueItem> {
   await ensureStateLoaded();
 
+  if (input.saveAsDraft && (input.recurrence || input.scheduledAt || input.stopPolicy)) {
+    throw new Error('Drafts cannot be scheduled or armed for execution');
+  }
   if (input.recurrence && !input.scheduledAt) {
     throw new Error('Recurring queue items require a scheduled time');
   }
@@ -2723,6 +3065,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
   const item: CodexQueueItem = {
     id: randomUUID(),
     profileId: input.profileId,
+    capacityRetry: input.capacityRetry ? { ...input.capacityRetry } : null,
     sourceProfileId: typeof input.sourceProfileId === 'string' && input.sourceProfileId.trim()
       ? input.sourceProfileId.trim()
       : null,
@@ -2758,7 +3101,7 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
     goalMode: normalizeGoalMode(input.goalMode),
     forkContext: normalizeForkContext(input.forkContext),
     attachments: (input.attachments || []).map((attachment) => ({ ...attachment })),
-    status: new Date(scheduledAt).getTime() > Date.now() ? 'scheduled' : 'queued',
+    status: input.saveAsDraft ? 'draft' : new Date(scheduledAt).getTime() > Date.now() ? 'scheduled' : 'queued',
     scheduledAt,
     createdAt: now,
     updatedAt: now,
@@ -2801,13 +3144,17 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
     throw new Error('Queue item must contain prompt text or attachments');
   }
 
+  if (!input.capacityRetry && !input.saveAsDraft && Date.parse(item.scheduledAt) <= Date.now()) {
+    cancelPendingCapacityContinuations(item, true);
+  }
+
   if (item.sessionId) {
     state.sessionBindings[item.queueKey] = item.sessionId;
   }
 
   state.items.push(item);
   await persistState();
-  scheduleImmediateTick();
+  if (!input.saveAsDraft) scheduleImmediateTick();
   return cloneQueueItem(item);
 }
 
@@ -2869,11 +3216,16 @@ export async function cancelCodexQueueItem(itemId: string): Promise<CodexQueueIt
     throw new Error('Queue item is already stopping');
   }
 
+  if (item.status === 'draft') {
+    throw new Error('Drafts are not running; delete or edit the draft instead');
+  }
+
   if (item.status === 'running') {
     if (!cancelAgentRun(item.id, item.profileId)) {
       throw new Error('Running queue item could not be stopped');
     }
 
+    item.nativeCancellationRequestedAt = nowIso();
     item.stopPolicy = null;
     item.status = 'cancelling';
     item.updatedAt = nowIso();
@@ -2882,10 +3234,18 @@ export async function cancelCodexQueueItem(itemId: string): Promise<CodexQueueIt
     return cloneQueueItem(item);
   }
 
+  // A detached provider may still own this message even though the local
+  // transport is no longer running. Never acknowledge cancellation without
+  // native queue deletion or a correlated terminal cancellation event.
+  if (nativeSubmissionNeedsReconciliation(item.nativeSubmission)) {
+    throw new Error('Native submission must be reconciled before cancellation');
+  }
+
   if (isTerminalStatus(item.status) && item.status !== 'failed') {
     throw new Error('Queue item cannot be cancelled');
   }
 
+  cancelPendingCapacityContinuations(item);
   item.status = 'cancelled';
   item.stopPolicy = null;
   item.updatedAt = nowIso();
@@ -2917,6 +3277,53 @@ export async function retryCodexQueueItem(
     throw new Error('Only failed or cancelled queue items can be retried');
   }
 
+  cancelPendingCapacityContinuations(item);
+
+  if (item.nativeSubmission) {
+    if (nativeSubmissionNeedsReconciliation(item.nativeSubmission)) {
+      throw new Error('יש להמתין לאימות סיום הבקשה הקודמת לפני ניסיון נוסף.');
+    }
+    if (item.status === 'cancelled' && item.nativeSubmission.deliveryPhase !== 'cancelled') {
+      throw new Error('הבקשה הסתיימה במנוע; יש לבדוק את התוצאה לפני שליחה נוספת.');
+    }
+    // One explicit retry per terminal attempt. Repeated clicks and a response
+    // lost during login/cutover return the same child, never another prompt.
+    const existing = state.items.find((candidate) => candidate.retryOfItemId === item.id);
+    if (existing) return cloneQueueItem(existing);
+    const retry = cloneQueueItem(item);
+    const at = nowIso();
+    Object.assign(retry, {
+      id: randomUUID(), retryOfItemId: item.id, clientRequestId: `retry:${item.id}`,
+      nativeRunId: null, lastRunNativeSubmission: null,
+      capacityRetry: null, capacityRetryPendingAt: null,
+      nativeSubmission: null, nativeCancellationRequestedAt: null, nativeReconcileAfter: null,
+      workModeRunId: null,
+      scheduledAt: normalizeScheduledAt(scheduledAt), createdAt: at, updatedAt: at,
+      startedAt: null, completedAt: null, finalMessage: null, error: null, attempts: 0,
+      lastRunAt: null, lastRunStatus: null, stopPolicy: null,
+    });
+    retry.status = new Date(retry.scheduledAt).getTime() > Date.now() ? 'scheduled' : 'queued';
+    if (isRecurringItem(retry)) {
+      retry.scheduledAt = computeNextRecurringScheduledAt(retry, Date.now());
+      retry.status = 'scheduled';
+    }
+    if (retry.stopDecisionForItemId) {
+      const source = state.items.find((candidate) => candidate.id === retry.stopDecisionForItemId);
+      if (source?.stopPolicy?.mode === 'conditional') {
+        source.stopPolicy.decisionItemId = retry.id;
+        source.stopPolicy.status = 'awaiting-decision';
+        source.stopPolicy.resolvedAt = null; source.stopPolicy.decision = null;
+        source.stopPolicy.outcome = null; source.stopPolicy.error = null;
+      }
+    }
+    state.items.push(retry);
+    await persistState();
+    scheduleImmediateTick();
+    return cloneQueueItem(retry);
+  }
+
+  item.nativeCancellationRequestedAt = null;
+  item.workModeRunId = null;
   if (isRecurringItem(item)) {
     const nextScheduledAt = normalizeScheduledAt(scheduledAt || item.scheduledAt);
     item.scheduledAt = nextScheduledAt;
@@ -2959,10 +3366,15 @@ export async function deleteCodexQueueItem(itemId: string): Promise<void> {
     throw new Error('Queue item was not found');
   }
 
-  if (state.items[index].status !== 'cancelled' && state.items[index].status !== 'failed') {
-    throw new Error('Only failed or cancelled queue items can be deleted');
+  if (!['draft', 'cancelled', 'failed'].includes(state.items[index].status)) {
+    throw new Error('Only draft, failed or cancelled queue items can be deleted');
   }
 
+  if (nativeSubmissionNeedsReconciliation(state.items[index].nativeSubmission)) {
+    throw new Error('Native submission must be reconciled before deletion');
+  }
+
+  cancelPendingCapacityContinuations(state.items[index]);
   state.items.splice(index, 1);
   await persistState();
 }

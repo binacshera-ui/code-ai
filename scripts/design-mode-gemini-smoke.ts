@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { runGeminiEphemeralDesignPrompt } from '../server/geminiService.js';
+import { GEMINI_PRIMARY_MODEL } from '../server/geminiModelPolicy.js';
 
 const temporaryWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'code-ai-design-gemini-'));
 
@@ -28,6 +29,7 @@ try {
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/, '');
+  assert.equal(result.model, GEMINI_PRIMARY_MODEL);
   let contractStatus = 'natural-language';
   let payload: any = null;
   try {

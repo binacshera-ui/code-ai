@@ -13,7 +13,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from browser_mode_runtime import BrowserRuntime, BrowserRuntimeError
+if "--describe-tools" not in sys.argv:
+    from browser_mode_runtime import BrowserRuntime, BrowserRuntimeError
 
 SERVER_NAME = "Code-AI Browser Mode"
 SERVER_VERSION = "0.1.0"
@@ -586,6 +587,7 @@ def call_runtime(runtime, name, arguments):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--describe-tools", action="store_true")
     parser.add_argument("--bridge-info-file", required=False)
     parser.add_argument("--profile-dir", required=False)
     parser.add_argument("--screenshot-dir", required=False)
@@ -599,6 +601,10 @@ def main():
     parser.add_argument("--page-max-chars", type=int, default=12000)
     parser.add_argument("--run-js-max-chars", type=int, default=8000)
     args = parser.parse_args()
+
+    if args.describe_tools:
+        print(json.dumps({"tools": TOOL_DEFS}, ensure_ascii=False))
+        return
 
     if not args.bridge_info_file and (not args.profile_dir or not args.screenshot_dir):
         parser.error("--profile-dir and --screenshot-dir are required unless --bridge-info-file is used")

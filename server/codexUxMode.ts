@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server } from 'http';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { CODEX_APP_CONFIG } from './config.js';
+import { GEMINI_PRIMARY_MODEL } from './geminiModelPolicy.js';
 import {
   getGeminiModelCatalog,
   runGeminiEphemeralSpecialistPrompt,
@@ -106,7 +107,7 @@ const CODEX_UPLOAD_ROOT = path.resolve(CODEX_APP_CONFIG.uploadRoot);
  * UX Mode is deliberately pinned to one model. A Gemini profile chooses the
  * account/credentials only; silently falling back changes the debate quality.
  */
-const UX_GEMINI_MODEL = 'gemini-3.1-pro-preview';
+const UX_GEMINI_MODEL = GEMINI_PRIMARY_MODEL;
 
 const MAX_FIELD_CHARS = 20_000;
 const MAX_REQUEST_CHARS = 30_000;
@@ -809,7 +810,7 @@ function selectUxModel(catalog: Awaited<ReturnType<typeof getGeminiModelCatalog>
     'UX_REQUIRED_MODEL_UNAVAILABLE',
     `UX Mode requires ${UX_GEMINI_MODEL}, but it is not available for the selected Gemini profile.`,
     false,
-    'Choose a Gemini profile with Gemini 3.1 Pro Preview access, then retry. UX Mode will not silently fall back to another model.',
+    'Choose a Gemini profile with Gemini 4 Argon access, then retry. UX Mode will not silently fall back to another model.',
   );
 }
 
@@ -1338,6 +1339,16 @@ export async function prepareCodexUxModeForRun(
   state.uxModeByKey[buildKey(stateProfileId, sessionKey)] = record;
   await persistState();
   return { envCodeXHome: record.overlayCodexHome, mode: { ...record, debates: { ...record.debates } } };
+}
+
+/** Private native-owner entry, sharing the same registration and consultation limits. */
+export async function dispatchUxNativeModeTool(profileId: string, sessionKey: string, name: string, args: Record<string, unknown>): Promise<unknown> {
+  await ensureStateLoaded();
+  const current = state.uxModeByKey[buildKey(profileId, sessionKey)];
+  const registration = [...bridgeRegistrations.values()].find(value => value.profileId === profileId && value.sessionKey === sessionKey
+    && current?.enabled && value.record.bridgeInfoFile === current.bridgeInfoFile && value.record.updatedAt === current.updatedAt);
+  if (!registration) throw Object.assign(new Error('UX mode is unavailable'), { code: current?.enabled ? 'MODE_UNAVAILABLE' : 'MODE_DISABLED' });
+  return dispatchUxConsultation(registration, name, args);
 }
 
 export async function shutdownCodexUxModeBridge(): Promise<void> {

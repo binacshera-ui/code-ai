@@ -47,7 +47,7 @@ async function isProcessRunning(pid: number): Promise<boolean> {
     const processState = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
     return processState !== 'Z';
   } catch (error: any) {
-    if (error?.code === 'ENOENT') {
+    if (error?.code === 'ENOENT' || error?.code === 'ESRCH') {
       return false;
     }
     throw error;

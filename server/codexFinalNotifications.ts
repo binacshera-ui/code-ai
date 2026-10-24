@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { gzipSync } from 'zlib';
 import { CODEX_APP_CONFIG } from './config.js';
+import type { NativeFailureBatch, NativeFailureObservation } from './codexNativeFailureObserver.js';
 
 const SHORT_MESSAGE_LIMIT_BYTES = 3_600;
 const NTFY_ATTACHMENT_LIMIT_BYTES = 1_900_000;
@@ -10,7 +11,7 @@ const MAX_DELIVERY_ATTEMPTS = 6;
 const DELIVERY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const RETRY_DELAYS_MS = [5_000, 30_000, 2 * 60_000, 10 * 60_000, 60 * 60_000];
 
-type DeliveryStatus = 'pending' | 'sending' | 'delivered' | 'failed';
+type DeliveryStatus = 'pending' | 'paused' | 'sending' | 'delivered' | 'failed';
 export type SessionNotificationOutcome = 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
 interface PersistedSessionFinalNotificationDelivery {
@@ -37,7 +38,9 @@ interface PersistedSessionFinalNotificationDelivery {
 interface PersistedSessionFinalNotificationState {
   version: 1;
   overridesByKey: Record<string, boolean>;
+  sessionAliasesByKey: Record<string, string>;
   deliveriesById: Record<string, PersistedSessionFinalNotificationDelivery>;
+  nativeFailureCursor?: unknown;
 }
 
 export interface CodexSessionFinalNotificationPreference {
@@ -112,11 +115,15 @@ let workerStarted = false;
 let workerTickInFlight = false;
 let workerTimer: NodeJS.Timeout | null = null;
 let state: PersistedSessionFinalNotificationState = createEmptyState();
+let nativeFailureSource: ((cursor: unknown) => Promise<NativeFailureBatch>) | null = null;
+let ownsNativeFailure: ((failure: NativeFailureObservation) => Promise<boolean>) | null = null;
+let lastNativeFailureScanAt = 0;
 
 function createEmptyState(): PersistedSessionFinalNotificationState {
   return {
     version: 1,
     overridesByKey: {},
+    sessionAliasesByKey: {},
     deliveriesById: {},
   };
 }
@@ -215,6 +222,27 @@ function buildPreferenceKey(profileId: string, sessionKey: string): string {
   return JSON.stringify([profileId.trim(), sessionKey.trim()]);
 }
 
+function resolvePreferenceSessionKey(profileId: string, sessionKey: string): string {
+  let current = sessionKey.trim();
+  const seen = new Set<string>();
+  while (!seen.has(current)) {
+    seen.add(current);
+    const next = state.sessionAliasesByKey[buildPreferenceKey(profileId, current)];
+    if (!next || next === current) return current;
+    current = next;
+  }
+  // Invalid persisted aliases must not make preference reads loop forever.
+  return sessionKey.trim();
+}
+
+function sessionNotificationEnabled(profileId: string, sessionKey: string): boolean {
+  const config = resolveNtfyConfig();
+  const canonicalSessionKey = resolvePreferenceSessionKey(profileId, sessionKey);
+  const override = state.overridesByKey[buildPreferenceKey(profileId, canonicalSessionKey)];
+  return Boolean(config.endpoint) && config.enabled
+    && (typeof override === 'boolean' ? override : config.defaultSessionEnabled);
+}
+
 function normalizeText(value: unknown, maxLength: number): string | null {
   if (typeof value !== 'string') return null;
   const normalized = value.replace(/\u0000/gu, '').trim();
@@ -240,7 +268,9 @@ function normalizeDelivery(value: unknown): PersistedSessionFinalNotificationDel
     ? 'delivered'
     : candidate.status === 'failed'
       ? 'failed'
-      : 'pending';
+      : candidate.status === 'paused'
+        ? 'paused'
+        : 'pending';
   return {
     id,
     sequenceId,
@@ -277,19 +307,35 @@ async function ensureStateLoaded(): Promise<void> {
         )
         : {};
       const deliveriesById: Record<string, PersistedSessionFinalNotificationDelivery> = {};
+      const sessionAliasesByKey: Record<string, string> = {};
+      if (parsed.sessionAliasesByKey && typeof parsed.sessionAliasesByKey === 'object') {
+        for (const [key, value] of Object.entries(parsed.sessionAliasesByKey)) {
+          try {
+            const identity = JSON.parse(key);
+            const target = normalizeText(value, 240);
+            if (Array.isArray(identity) && identity.length === 2
+                && identity.every((part) => typeof part === 'string' && part.trim()) && target) {
+              sessionAliasesByKey[buildPreferenceKey(identity[0], identity[1])] = target;
+            }
+          } catch { /* Ignore malformed aliases, without exposing persisted values. */ }
+        }
+      }
       if (parsed.deliveriesById && typeof parsed.deliveriesById === 'object') {
         for (const value of Object.values(parsed.deliveriesById)) {
           const delivery = normalizeDelivery(value);
           if (delivery) deliveriesById[delivery.id] = delivery;
         }
       }
-      state = { version: 1, overridesByKey, deliveriesById };
+      state = { version: 1, overridesByKey, sessionAliasesByKey, deliveriesById, nativeFailureCursor: parsed.nativeFailureCursor };
       pruneDeliveredRecords();
     } catch (error: any) {
       if (error?.code !== 'ENOENT') throw error;
       state = createEmptyState();
     }
-  })();
+  })().catch((error) => {
+    stateLoadedPromise = null;
+    throw error;
+  });
   return stateLoadedPromise;
 }
 
@@ -297,7 +343,7 @@ function pruneDeliveredRecords(): void {
   const cutoff = Date.now() - DELIVERY_RETENTION_MS;
   for (const [id, delivery] of Object.entries(state.deliveriesById)) {
     if (
-      (delivery.status === 'delivered' || delivery.status === 'failed')
+      (delivery.status === 'delivered' || delivery.status === 'failed' || delivery.status === 'paused')
       && new Date(delivery.updatedAt).getTime() < cutoff
     ) {
       delete state.deliveriesById[id];
@@ -308,7 +354,9 @@ function pruneDeliveredRecords(): void {
 async function persistState(): Promise<void> {
   const snapshot = JSON.stringify(state, null, 2);
   const stateFile = getStateFile();
-  persistTail = persistTail.then(async () => {
+  // One failed write must fail that caller, not permanently poison every later
+  // preference update and worker retry in this process.
+  persistTail = persistTail.catch(() => undefined).then(async () => {
     await fs.mkdir(path.dirname(stateFile), { recursive: true });
     const temporaryFile = `${stateFile}.${process.pid}.${randomUUID()}.tmp`;
     try {
@@ -337,7 +385,7 @@ export async function getSessionFinalNotificationPreference(
 ): Promise<CodexSessionFinalNotificationPreference> {
   await ensureStateLoaded();
   const config = resolveNtfyConfig();
-  const override = state.overridesByKey[buildPreferenceKey(profileId, sessionKey)];
+  const override = state.overridesByKey[buildPreferenceKey(profileId, resolvePreferenceSessionKey(profileId, sessionKey))];
   const enabled = typeof override === 'boolean' ? override : config.defaultSessionEnabled;
   return {
     enabled,
@@ -355,14 +403,26 @@ export async function setSessionFinalNotificationPreference(
   enabled: boolean
 ): Promise<CodexSessionFinalNotificationPreference> {
   await ensureStateLoaded();
-  const key = buildPreferenceKey(profileId, sessionKey);
-  const config = resolveNtfyConfig();
-  if (enabled === config.defaultSessionEnabled) {
-    delete state.overridesByKey[key];
-  } else {
-    state.overridesByKey[key] = enabled;
+  const canonicalSessionKey = resolvePreferenceSessionKey(profileId, sessionKey);
+  const key = buildPreferenceKey(profileId, canonicalSessionKey);
+  pruneDeliveredRecords();
+  // Keep explicit opt-in as well as opt-out. Absence means "inherit default",
+  // not "the user explicitly enabled this real session after its draft".
+  state.overridesByKey[key] = enabled;
+  for (const delivery of Object.values(state.deliveriesById)) {
+    if (delivery.profileId !== profileId
+        || resolvePreferenceSessionKey(profileId, delivery.preferenceSessionKey) !== canonicalSessionKey) continue;
+    if (!enabled && delivery.status === 'pending') {
+      delivery.status = 'paused';
+      delivery.updatedAt = nowIso();
+    } else if (enabled && delivery.status === 'paused') {
+      delivery.status = 'pending';
+      delivery.nextAttemptAt = nowIso();
+      delivery.updatedAt = delivery.nextAttemptAt;
+    }
   }
   await persistState();
+  scheduleWorker(0);
   return getSessionFinalNotificationPreference(profileId, sessionKey);
 }
 
@@ -373,11 +433,30 @@ export async function rebindSessionFinalNotificationPreference(
 ): Promise<void> {
   await ensureStateLoaded();
   if (!fromSessionKey || !toSessionKey || fromSessionKey === toSessionKey) return;
-  const fromKey = buildPreferenceKey(profileId, fromSessionKey);
-  if (typeof state.overridesByKey[fromKey] !== 'boolean') return;
-  state.overridesByKey[buildPreferenceKey(profileId, toSessionKey)] = state.overridesByKey[fromKey];
+  const from = resolvePreferenceSessionKey(profileId, fromSessionKey);
+  const to = resolvePreferenceSessionKey(profileId, toSessionKey);
+  if (from === to) return;
+  const fromKey = buildPreferenceKey(profileId, from);
+  const toKey = buildPreferenceKey(profileId, to);
+  // A setting explicitly saved for the real conversation wins over a stale
+  // draft. Otherwise carry its override across the provider's assigned id.
+  if (typeof state.overridesByKey[fromKey] === 'boolean'
+      && typeof state.overridesByKey[toKey] !== 'boolean') {
+    state.overridesByKey[toKey] = state.overridesByKey[fromKey];
+  }
   delete state.overridesByKey[fromKey];
+  for (const delivery of Object.values(state.deliveriesById)) {
+    if (delivery.profileId !== profileId) continue;
+    if (resolvePreferenceSessionKey(profileId, delivery.preferenceSessionKey) === from) {
+      delivery.preferenceSessionKey = to;
+      if (delivery.sessionId === from || delivery.sessionId === fromSessionKey) delivery.sessionId = to;
+    }
+  }
+  // Keep the alias even when the preference is the default: a delayed browser
+  // save or a run captured before onSessionStarted must still address this chat.
+  state.sessionAliasesByKey[fromKey] = to;
   await persistState();
+  scheduleWorker(0);
 }
 
 export async function copySessionFinalNotificationPreference(
@@ -387,9 +466,13 @@ export async function copySessionFinalNotificationPreference(
   targetSessionKey: string
 ): Promise<void> {
   await ensureStateLoaded();
-  const value = state.overridesByKey[buildPreferenceKey(sourceProfileId, sourceSessionKey)];
+  const value = state.overridesByKey[buildPreferenceKey(
+    sourceProfileId, resolvePreferenceSessionKey(sourceProfileId, sourceSessionKey),
+  )];
   if (typeof value !== 'boolean') return;
-  state.overridesByKey[buildPreferenceKey(targetProfileId, targetSessionKey)] = value;
+  state.overridesByKey[buildPreferenceKey(
+    targetProfileId, resolvePreferenceSessionKey(targetProfileId, targetSessionKey),
+  )] = value;
   await persistState();
 }
 
@@ -398,9 +481,28 @@ export async function deleteSessionFinalNotificationPreference(
   sessionKey: string
 ): Promise<void> {
   await ensureStateLoaded();
-  const key = buildPreferenceKey(profileId, sessionKey);
-  if (typeof state.overridesByKey[key] !== 'boolean') return;
+  const canonicalSessionKey = resolvePreferenceSessionKey(profileId, sessionKey);
+  const key = buildPreferenceKey(profileId, canonicalSessionKey);
   delete state.overridesByKey[key];
+  for (const delivery of Object.values(state.deliveriesById)) {
+    if (delivery.profileId === profileId
+        && resolvePreferenceSessionKey(profileId, delivery.preferenceSessionKey) === canonicalSessionKey
+        && (delivery.status === 'pending' || delivery.status === 'paused')) {
+      delivery.status = 'failed';
+      delivery.finalMessage = null;
+      delivery.lastError = 'Session was deleted before notification delivery';
+      delivery.updatedAt = nowIso();
+    }
+  }
+  const aliasesToDelete: string[] = [];
+  for (const aliasKey of Object.keys(state.sessionAliasesByKey)) {
+    const [aliasProfileId, aliasSessionKey] = JSON.parse(aliasKey);
+    if (aliasProfileId === profileId
+        && resolvePreferenceSessionKey(profileId, aliasSessionKey) === canonicalSessionKey) {
+      aliasesToDelete.push(aliasKey);
+    }
+  }
+  for (const aliasKey of aliasesToDelete) delete state.sessionAliasesByKey[aliasKey];
   await persistState();
 }
 
@@ -437,9 +539,9 @@ function buildSessionLink(
     ? `/session/${encodeURIComponent(profileId)}/draft/${encodeURIComponent(sessionId)}`
     : `/session/${encodeURIComponent(profileId)}/${encodeURIComponent(sessionId)}`;
   const url = new URL(route, `${normalizedOrigin}/`);
-  if (serverId?.trim() && serverId.trim().toLowerCase() !== 'local') {
-    url.searchParams.set('server', serverId.trim().toLowerCase());
-  }
+  // An explicit local server is important: without it a notification opened
+  // after visiting a remote host inherits the browser's stored server choice.
+  url.searchParams.set('server', serverId?.trim().toLowerCase() || 'local');
   return url.toString();
 }
 
@@ -556,7 +658,7 @@ export function buildNtfyRequest(input: BuildNtfyRequestInput): NtfyRequestDescr
 async function deliverNotification(
   delivery: PersistedSessionFinalNotificationDelivery,
   fetchImpl: typeof fetch = fetch
-): Promise<void> {
+): Promise<boolean> {
   const config = resolveNtfyConfig();
   if (!config.endpoint || !config.enabled) {
     throw new Error('ntfy delivery is not configured or is globally disabled');
@@ -578,6 +680,10 @@ async function deliverNotification(
     finalMessage: delivery.finalMessage,
     publicOrigin: config.publicOrigin,
   });
+  // This check must happen after the durable 'sending' write and immediately
+  // before fetch. A toggle confirmed while that write was in flight wins. A
+  // request already handed to ntfy cannot be recalled.
+  if (!sessionNotificationEnabled(delivery.profileId, delivery.preferenceSessionKey)) return false;
   const response = await fetchImpl(config.endpoint, {
     method: request.method,
     headers: request.headers,
@@ -585,9 +691,10 @@ async function deliverNotification(
     signal: AbortSignal.timeout(20_000),
   });
   if (!response.ok) {
-    const detail = (await response.text().catch(() => '')).replace(/\s+/gu, ' ').trim().slice(0, 500);
-    throw new Error(`ntfy returned ${response.status}${detail ? `: ${detail}` : ''}`);
+    // Response bodies can echo a private topic URL or authorization details.
+    throw new Error(`ntfy returned ${response.status}`);
   }
+  return true;
 }
 
 function scheduleWorker(delayMs: number): void {
@@ -595,8 +702,11 @@ function scheduleWorker(delayMs: number): void {
   if (workerTimer) clearTimeout(workerTimer);
   workerTimer = setTimeout(() => {
     workerTimer = null;
-    void tickWorker();
-  }, Math.max(0, delayMs));
+    void tickWorker().catch(() => {
+      console.error('❌ Final notification worker could not persist or load its state; retrying.');
+      scheduleWorker(5_000);
+    });
+  }, Math.max(0, nativeFailureSource ? Math.min(5_000, delayMs) : delayMs));
   workerTimer.unref();
 }
 
@@ -609,6 +719,44 @@ async function tickWorker(): Promise<void> {
   workerTickInFlight = true;
   try {
     await ensureStateLoaded();
+    if (nativeFailureSource && Date.now() - lastNativeFailureScanAt >= 5_000) {
+      lastNativeFailureScanAt = Date.now();
+      try {
+        const batch = await nativeFailureSource(state.nativeFailureCursor);
+        for (const failure of batch.failures) {
+          // Queue-owned turns already have a notification owner. Native/GUI
+          // failures must not create fabricated queue rows or duplicate alerts.
+          if (await ownsNativeFailure?.(failure)) continue;
+          await enqueueSessionOutcomeNotification({ profileId: failure.profileId,
+            preferenceSessionKey: failure.sessionId, sessionId: failure.sessionId,
+            provider: 'codex', outcome: 'failed', reason: failure.reason,
+            dedupeKey: `native-failure:${failure.profileId}:${failure.sessionId}:${failure.turnId}` });
+        }
+        // Persist the observation cutoff as well as byte positions, even while
+        // disabled, so restart/restored files cannot replay an old failure.
+        state.nativeFailureCursor = batch.cursor;
+        await persistState();
+      } catch {
+        // Preserve the previous durable cursor; normal outbox delivery must
+        // continue even if a native rollout cannot currently be read.
+        console.warn('⚠️ Native failure observation will retry; outbox delivery remains active.');
+      }
+    }
+    let preferenceChanged = false;
+    for (const candidate of Object.values(state.deliveriesById)) {
+      const enabled = sessionNotificationEnabled(candidate.profileId, candidate.preferenceSessionKey);
+      if (candidate.status === 'pending' && !enabled) {
+        candidate.status = 'paused';
+        candidate.updatedAt = nowIso();
+        preferenceChanged = true;
+      } else if (candidate.status === 'paused' && enabled) {
+        candidate.status = 'pending';
+        candidate.updatedAt = nowIso();
+        preferenceChanged = true;
+      }
+    }
+    pruneDeliveredRecords();
+    if (preferenceChanged) await persistState();
     const now = Date.now();
     const delivery = Object.values(state.deliveriesById)
       .filter((candidate) => (
@@ -629,14 +777,29 @@ async function tickWorker(): Promise<void> {
     delivery.status = 'sending';
     delivery.attempts += 1;
     delivery.updatedAt = nowIso();
-    await persistState();
     try {
-      await deliverNotification(delivery);
-      delivery.status = 'delivered';
-      delivery.deliveredAt = nowIso();
-      delivery.updatedAt = delivery.deliveredAt;
-      delivery.lastError = null;
-      delivery.finalMessage = null;
+      await persistState();
+    } catch (error) {
+      // No request was sent. Leave the in-memory outbox eligible for the next
+      // tick rather than stranding it in 'sending' after transient disk errors.
+      delivery.status = sessionNotificationEnabled(delivery.profileId, delivery.preferenceSessionKey)
+        ? 'pending' : 'paused';
+      delivery.attempts -= 1;
+      throw error;
+    }
+    try {
+      const sent = await deliverNotification(delivery);
+      if (sent) {
+        delivery.status = 'delivered';
+        delivery.deliveredAt = nowIso();
+        delivery.updatedAt = delivery.deliveredAt;
+        delivery.lastError = null;
+        delivery.finalMessage = null;
+      } else {
+        delivery.status = 'paused';
+        delivery.attempts -= 1;
+        delivery.updatedAt = nowIso();
+      }
     } catch (error: any) {
       delivery.lastError = String(error?.message || error).slice(0, 1_000);
       delivery.updatedAt = nowIso();
@@ -645,7 +808,8 @@ async function tickWorker(): Promise<void> {
         delivery.finalMessage = null;
         console.error(`❌ ntfy final notification failed permanently (${delivery.id}):`, delivery.lastError);
       } else {
-        delivery.status = 'pending';
+        delivery.status = sessionNotificationEnabled(delivery.profileId, delivery.preferenceSessionKey)
+          ? 'pending' : 'paused';
         delivery.nextAttemptAt = new Date(Date.now() + nextRetryDelay(delivery.attempts)).toISOString();
         console.warn(`⚠️ ntfy final notification will retry (${delivery.id}):`, delivery.lastError);
       }
@@ -673,6 +837,7 @@ export async function enqueueFinalResponseNotification(
     return { queued: false, reason: 'duplicate' };
   }
   const timestamp = nowIso();
+  const preferenceSessionKey = resolvePreferenceSessionKey(input.profileId, input.preferenceSessionKey);
   const serverId = normalizeText(input.serverId, 64)
     || normalizeText(process.env.CODEX_SERVER_ID, 64)
     || 'local';
@@ -684,7 +849,7 @@ export async function enqueueFinalResponseNotification(
     sequenceId: `code-ai-${id.slice(0, 24)}`,
     profileId: input.profileId,
     sessionId: input.sessionId,
-    preferenceSessionKey: input.preferenceSessionKey,
+    preferenceSessionKey,
     sessionTitle: normalizeText(input.sessionTitle, 240),
     provider: normalizeText(input.provider, 40),
     outcome: normalizeOutcome(input.outcome),
@@ -745,7 +910,12 @@ export async function enqueueSessionOutcomeNotification(
   });
 }
 
-export async function startCodexFinalNotificationWorker(): Promise<void> {
+export async function startCodexFinalNotificationWorker(options: {
+  readNativeFailures?: (cursor: unknown) => Promise<NativeFailureBatch>;
+  ownsNativeFailure?: (failure: NativeFailureObservation) => Promise<boolean>;
+} = {}): Promise<void> {
+  nativeFailureSource = options.readNativeFailures || null;
+  ownsNativeFailure = options.ownsNativeFailure || null;
   await ensureStateLoaded();
   let changed = false;
   for (const delivery of Object.values(state.deliveriesById)) {
@@ -774,6 +944,9 @@ export async function deliverNtfyRequestForTest(
 }
 
 export function resetCodexFinalNotificationRuntimeForTests(): void {
+  nativeFailureSource = null;
+  ownsNativeFailure = null;
+  lastNativeFailureScanAt = 0;
   if (workerTimer) clearTimeout(workerTimer);
   workerTimer = null;
   workerStarted = false;

@@ -11,10 +11,12 @@
     <main id="connected" class="connected">
       <header class="toolbar">
         <div class="connection">
+          <img id="profile-avatar" class="profile-avatar" alt="" hidden />
           <span id="connection-dot" class="dot"></span>
           <span id="connection-label">פותח את CODE-AI…</span>
         </div>
         <div class="toolbar-actions">
+          <button id="profile-settings" type="button" title="שם ותמונה של פרופיל Chrome">◉</button>
           <button id="workspace-tabs" type="button" title="כל הטאבים וקבוצת העבודה של הסשן">▦ טאבים</button>
           <button id="pick-element" type="button" title="בחר מוקד חכם: DOM, נגישות, עיצוב והקשר">⌁ מוקד</button>
           <button id="pick-region" type="button" title="בחר אזור חכם עם האלמנטים והתוכן שבתוכו">▱ אזור</button>
@@ -23,6 +25,34 @@
         </div>
       </header>
       <section id="selection-banner" class="selection-banner" hidden></section>
+      <section id="pairing-drawer" class="profile-drawer pairing-drawer" hidden>
+        <form id="pairing-form">
+          <strong>חיבור ההתקנה החדשה</strong>
+          <p>גישה חופשית קובעת הרשאות פעולה אחרי החיבור. לאחר פירמוט צריך לצמד את ההתקנה החדשה פעם אחת.</p>
+          <p>בתוך CODE-AI פתח „Chrome אישי” ובחר „חיבור תוסף חדש” ← „צור קוד”. הדבק כאן את הקוד החד־פעמי. אין להזין כאן סיסמה.</p>
+          <label for="pairing-code">קוד חיבור מ־CODE-AI</label>
+          <input id="pairing-code" type="text" maxlength="12" autocomplete="off" spellcheck="false" dir="ltr" placeholder="XXXX-XXXX" required />
+          <button id="pairing-submit" type="submit">חבר את התוסף</button>
+          <p>הקוד תקף לעשר דקות. אל תשתף אותו בצ׳אט.</p>
+        </form>
+      </section>
+      <section id="profile-drawer" class="profile-drawer" hidden>
+        <form id="profile-form">
+          <strong>זיהוי פרופיל Chrome</strong>
+          <p>סוג החיבור: תוסף Chrome במחשב האישי</p>
+          <p id="profile-sync-status" role="status"></p>
+          <p>חיבור משותף לכל השיחות, גם כשהחלונית סגורה. Chrome עצמו חייב להישאר פועל.</p>
+          <label for="profile-name">שם הדפדפן / הפרופיל</label>
+          <input id="profile-name" type="text" maxlength="120" autocomplete="off" />
+          <label for="profile-picture">תמונת פרופיל</label>
+          <input id="profile-picture" type="file" accept="image/png,image/jpeg,image/webp" />
+          <label for="profile-import">ייבוא השם והתמונה המקומיים של Chrome</label>
+          <input id="profile-import" type="file" accept="application/json,.json" />
+          <p>Chrome אינו מספק לתוספים את השם והתמונה המקומיים. אפשר לייבא קובץ זיהוי שנוצר בכלי המקומי, או לבחור אותם כאן. אין צורך בכניסה לחשבון Google.</p>
+          <button type="submit">שמור פרטי פרופיל</button>
+          <button id="profile-close" type="button">סגור</button>
+        </form>
+      </section>
       <section id="workspace-drawer" class="workspace-drawer" hidden>
         <div class="workspace-heading">
           <div>

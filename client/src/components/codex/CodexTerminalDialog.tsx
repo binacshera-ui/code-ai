@@ -8,6 +8,9 @@ import { Terminal as XTermTerminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import {
   Clipboard,
+  ArrowUp,
+  ArrowDown,
+  BookOpen,
   Eraser,
   Keyboard,
   Loader2,
@@ -15,6 +18,7 @@ import {
   SquareTerminal,
   X,
 } from 'lucide-react';
+import { terminalHistoryKey, terminalReadableText, terminalScrollLines } from './terminalInteraction';
 
 export interface CodexTerminalSessionInfo {
   id: string;
@@ -25,6 +29,8 @@ export interface CodexTerminalSessionInfo {
   exited: boolean;
   exitCode: number | null;
   exitSignal: number | null;
+  codexCliVersion?: string | null;
+  codexLaunchCommand?: string | null;
 }
 
 export interface CodexTerminalOutput {
@@ -97,6 +103,14 @@ export function CodexTerminalDialog({
   const [statusMessage, setStatusMessage] = useState('מפעיל מעטפת אינטראקטיבית…');
   const [error, setError] = useState<string | null>(null);
   const [restartKey, setRestartKey] = useState(0);
+  const [readerOpen, setReaderOpen] = useState(false);
+  const readerOpenRef = useRef(false);
+  readerOpenRef.current = readerOpen;
+  const [readerText, setReaderText] = useState('');
+  const [inputText, setInputText] = useState('');
+  const [codexLaunch, setCodexLaunch] = useState<string | null>(null);
+  const [codexVersion, setCodexVersion] = useState<string | null>(null);
+  const [atBottom, setAtBottom] = useState(true);
 
   apiRef.current = api;
 
@@ -108,6 +122,7 @@ export function CodexTerminalDialog({
     let disposed = false;
     let pollingTimer: ReturnType<typeof setTimeout> | null = null;
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    let readerTimer: ReturnType<typeof setTimeout> | null = null;
     const abortController = new AbortController();
     const fitAddon = new FitAddon();
     const sessionApi = apiRef.current;
@@ -124,6 +139,8 @@ export function CodexTerminalDialog({
       minimumContrastRatio: 4.5,
       rightClickSelectsWord: true,
       scrollback: 50_000,
+      scrollOnUserInput: false,
+      smoothScrollDuration: 100,
       tabStopWidth: 4,
       theme: {
         background: '#0b1020',
@@ -148,11 +165,59 @@ export function CodexTerminalDialog({
         brightMagenta: '#e9d5ff',
         brightCyan: '#a5f3fc',
         brightWhite: '#ffffff',
+        ...(hostRef.current.closest('.code-ai-theme-dark') ? {
+          background: '#0a0a0a', foreground: '#ededed', cursor: '#ededed',
+          cursorAccent: '#0a0a0a', selectionBackground: '#404040',
+          black: '#171717', brightBlack: '#a3a3a3',
+        } : {}),
       },
     });
     terminal.loadAddon(fitAddon);
     terminal.open(hostRef.current);
     terminalRef.current = terminal;
+    const updateReader = () => {
+      if (readerOpenRef.current && !readerTimer) readerTimer = setTimeout(() => {
+        readerTimer = null;
+        if (!disposed) setReaderText(terminalReadableText(terminal.buffer.active));
+      }, 100);
+    };
+    const parsedDisposable = terminal.onWriteParsed(updateReader);
+    const scrollDisposable = terminal.onScroll(() => {
+      const buffer = terminal.buffer.active;
+      setAtBottom(buffer.viewportY >= buffer.baseY);
+    });
+    const historyWheel = (event: WheelEvent) => {
+      // Normal buffer is local history. Alternate-screen mouse input belongs to the TUI.
+      if (event.ctrlKey || (terminal.buffer.active.type === 'alternate' && !event.shiftKey)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      terminal.scrollLines(terminalScrollLines(event.deltaY, event.deltaMode, terminal.rows, 14 * 1.25));
+    };
+    const terminalHost = hostRef.current;
+    // Capture before xterm 6's internal smooth-scroll element handles the same event.
+    terminalHost.addEventListener('wheel', historyWheel, {capture:true,passive:false});
+    terminal.attachCustomKeyEventHandler(event => {
+      if (event.type !== 'keydown') return true;
+      const action = terminalHistoryKey(event);
+      if (action) {
+        event.preventDefault();
+        if (action === 'top') terminal.scrollToTop();
+        else if (action === 'bottom') terminal.scrollToBottom();
+        else terminal.scrollPages(action === 'pageUp' ? -1 : 1);
+        return false;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'c') {
+        event.preventDefault();
+        void navigator.clipboard.writeText(terminal.getSelection() || terminalReadableText(terminal.buffer.active)).catch(() => setError('ההעתקה לא הותרה בדפדפן'));
+        return false;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'v') {
+        event.preventDefault();
+        void navigator.clipboard.readText().then(text => { if (!disposed) terminal.paste(text); }).catch(() => setError('ההדבקה לא הותרה בדפדפן; אפשר להשתמש בשדה הקלט'));
+        return false;
+      }
+      return true;
+    });
 
     const fitTerminal = () => {
       if (disposed) {
@@ -245,6 +310,10 @@ export function CodexTerminalDialog({
       setStatus('starting');
       setStatusMessage('מפעיל מעטפת אינטראקטיבית…');
       setError(null);
+      setCodexLaunch(null);
+      setCodexVersion(null);
+      setReaderText('');
+      setAtBottom(true);
       sessionIdRef.current = null;
       inputBufferRef.current = '';
 
@@ -259,6 +328,8 @@ export function CodexTerminalDialog({
           return;
         }
         sessionIdRef.current = session.id;
+        setCodexLaunch(session.codexLaunchCommand || null);
+        setCodexVersion(session.codexCliVersion || null);
         setStatus('active');
         setStatusMessage(`מחובר · ${session.shell}`);
         terminal.focus();
@@ -283,6 +354,9 @@ export function CodexTerminalDialog({
       cancelAnimationFrame(startAnimationFrame);
       abortController.abort();
       dataDisposable.dispose();
+      parsedDisposable.dispose();
+      scrollDisposable.dispose();
+      terminalHost.removeEventListener('wheel', historyWheel, true);
       resizeObserver.disconnect();
       if (pollingTimer) {
         clearTimeout(pollingTimer);
@@ -290,6 +364,7 @@ export function CodexTerminalDialog({
       if (resizeTimer) {
         clearTimeout(resizeTimer);
       }
+      if (readerTimer) clearTimeout(readerTimer);
       if (inputTimerRef.current) {
         clearTimeout(inputTimerRef.current);
         inputTimerRef.current = null;
@@ -329,6 +404,18 @@ export function CodexTerminalDialog({
     }
   };
 
+  const pasteInput = (): boolean => {
+    const terminal = terminalRef.current;
+    if (!terminal) return false;
+    if (/[\r\n]/.test(inputText) && !terminal.modes.bracketedPasteMode) {
+      setError('התוכנה הפעילה אינה תומכת בהדבקה מרובת שורות. שלח שורה אחת בכל פעם.');
+      return false;
+    }
+    terminal.paste(inputText);
+    setInputText('');
+    return true;
+  };
+
   return (
     <div className="fixed inset-0 z-[96] flex items-stretch justify-center bg-slate-950/45 p-0 backdrop-blur-sm sm:items-center sm:p-4" dir="rtl">
       <button
@@ -352,6 +439,18 @@ export function CodexTerminalDialog({
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  const terminal = terminalRef.current;
+                  if (terminal) setReaderText(terminalReadableText(terminal.buffer.active));
+                  setReaderOpen(value => !value);
+                }}
+                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100"
+                aria-pressed={readerOpen}
+                title="קריאה בעברית"
+                aria-label="קריאה בעברית"
+              ><BookOpen className="h-4 w-4" /></button>
               <button
                 type="button"
                 onClick={() => terminalRef.current?.focus()}
@@ -408,13 +507,24 @@ export function CodexTerminalDialog({
           </div>
         </header>
 
+        <nav className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 px-4 py-2 text-xs" aria-label="כלי טרמינל">
+          <button type="button" disabled={status !== 'active' || !codexLaunch} onClick={() => { terminalRef.current?.paste(codexLaunch!); terminalRef.current?.input('\r', true); terminalRef.current?.focus(); }} className="rounded-lg bg-slate-100 px-3 py-2 disabled:opacity-40">הפעל Codex{codexVersion ? ` · ${codexVersion}` : ''}</button>
+          <button type="button" onClick={() => terminalRef.current?.scrollToTop()} aria-label="תחילת ההיסטוריה"><ArrowUp className="h-4 w-4" /></button>
+          <button type="button" onClick={() => terminalRef.current?.scrollPages(-1)} className="rounded px-2 py-1">עמוד קודם</button>
+          <button type="button" onClick={() => terminalRef.current?.scrollPages(1)} className="rounded px-2 py-1">עמוד הבא</button>
+          <button type="button" onClick={() => terminalRef.current?.scrollToBottom()} aria-label="סוף ההיסטוריה"><ArrowDown className="h-4 w-4" /></button>
+          {!atBottom && <button type="button" onClick={() => terminalRef.current?.scrollToBottom()} className="rounded bg-violet-50 px-2 py-1">חזור לפלט החדש</button>}
+        </nav>
+
         <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0b1020]" dir="ltr">
           <div
             ref={hostRef}
-            className="absolute inset-0 overflow-hidden px-2 py-3 text-left sm:px-3"
+            className={`code-ai-terminal-host absolute inset-0 overflow-hidden px-2 py-3 text-left sm:px-3 ${readerOpen ? 'invisible' : ''}`}
             dir="ltr"
             style={{ direction: 'ltr', textAlign: 'left' }}
           />
+          <style>{`.code-ai-terminal-host .xterm{height:100%}.code-ai-terminal-host .xterm-scrollable-element{overscroll-behavior:contain}.code-ai-terminal-host .xterm .xterm-scrollable-element>.scrollbar>.slider{background:#64748b}`}</style>
+          {readerOpen && <div className="absolute inset-0 overflow-auto p-4 text-slate-100" aria-label="פלט לקריאה בעברית" dir="auto" style={{whiteSpace:'pre-wrap',unicodeBidi:'plaintext',textAlign:'start',fontFamily:'Arial, sans-serif',overflowWrap:'anywhere'}}>{readerText || 'ממתין לפלט…'}</div>}
           {status === 'starting' && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#0b1020]/85">
               <div className="flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-4 py-2 text-xs text-slate-300" dir="rtl">
@@ -425,12 +535,18 @@ export function CodexTerminalDialog({
           )}
         </div>
 
+        <div className="flex shrink-0 items-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2">
+          <textarea aria-label="קלט לטרמינל בעברית ובאנגלית" dir="auto" rows={2} value={inputText} onChange={event => setInputText(event.target.value)} disabled={status !== 'active'} className="min-w-0 flex-1 resize-y rounded-lg border border-slate-200 bg-white p-2 text-sm text-slate-900" style={{unicodeBidi:'plaintext'}} placeholder="קלט בעברית או באנגלית — הדבקה שומרת על ירידות שורה" />
+          <button type="button" disabled={status !== 'active' || !inputText} onClick={pasteInput} className="rounded-lg bg-white px-3 py-2 text-xs disabled:opacity-40">הדבק קלט</button>
+          <button type="button" disabled={status !== 'active'} onClick={() => { if (inputText && !pasteInput()) return; terminalRef.current?.input('\r', true); }} className="rounded-lg bg-slate-900 px-3 py-2 text-xs text-white disabled:opacity-40">שלח Enter</button>
+        </div>
+
         <footer className="shrink-0 border-t border-slate-200 bg-white px-4 py-2.5 text-right">
           <div className="flex items-center justify-between gap-3 text-[11px]">
             <span className={status === 'failed' ? 'text-rose-600' : status === 'active' ? 'text-emerald-600' : 'text-slate-500'}>
               {statusMessage}
             </span>
-            <span className="text-slate-400">המסוף עצמו פועל משמאל לימין</span>
+            <span className="text-slate-400">Shift+PageUp/Down לגלילה · Shift+לחיצה לבחירה · קריאה בעברית בכפתור הספר</span>
           </div>
           {error && (
             <div className="mt-1 break-words text-xs text-rose-600">

@@ -94,9 +94,11 @@ type FetchLike = (
 ) => Promise<FetchResponseLike>;
 
 const accountUsageCache = new Map<string, AccountUsageCacheEntry>();
+const accountUsageEpochs = new Map<string, symbol>();
 
 export function clearCodexAccountUsageCache(profile: CodexAccountUsageProfile): void {
   const resolvedHome = path.resolve(profile.codexHome);
+  accountUsageEpochs.set(resolvedHome, Symbol());
   for (const cacheKey of accountUsageCache.keys()) {
     const separatorIndex = cacheKey.indexOf('\u0000');
     const cachedHome = separatorIndex >= 0 ? cacheKey.slice(separatorIndex + 1) : '';
@@ -333,7 +335,9 @@ export async function loadCodexAccountUsage(
   options: { forceRefresh?: boolean; fetchImpl?: FetchLike; now?: () => number } = {}
 ): Promise<CodexAccountUsageSnapshot> {
   const now = options.now || Date.now;
-  const cacheKey = `${profile.id}\u0000${path.resolve(profile.codexHome)}`;
+  const resolvedHome = path.resolve(profile.codexHome);
+  const epoch = accountUsageEpochs.get(resolvedHome);
+  const cacheKey = `${profile.id}\u0000${resolvedHome}`;
   const cached = accountUsageCache.get(cacheKey);
   if (!options.forceRefresh && cached && cached.expiresAt > now()) {
     return cached.snapshot;
@@ -366,7 +370,7 @@ export async function loadCodexAccountUsage(
       resetCredits: null,
       error: 'הפרופיל אינו מחובר לחשבון ChatGPT עם נתוני שימוש.',
     };
-    accountUsageCache.set(cacheKey, { expiresAt: now() + ACCOUNT_USAGE_CACHE_TTL_MS, snapshot });
+    if (accountUsageEpochs.get(resolvedHome) === epoch) accountUsageCache.set(cacheKey, { expiresAt: now() + ACCOUNT_USAGE_CACHE_TTL_MS, snapshot });
     return snapshot;
   }
 
@@ -407,7 +411,7 @@ export async function loadCodexAccountUsage(
     resetCredits,
     error: errors.length > 0 ? errors.join(' · ') : null,
   };
-  accountUsageCache.set(cacheKey, { expiresAt: now() + ACCOUNT_USAGE_CACHE_TTL_MS, snapshot });
+  if (accountUsageEpochs.get(resolvedHome) === epoch) accountUsageCache.set(cacheKey, { expiresAt: now() + ACCOUNT_USAGE_CACHE_TTL_MS, snapshot });
   return snapshot;
 }
 

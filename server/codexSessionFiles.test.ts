@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import { walkJsonlFiles } from './codexSessionFiles.js';
 
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
@@ -67,18 +68,100 @@ test('HDD-linked live session resolves from its rollout, including cache, pagina
     event(3, { type: 'agent_message', message: 'Live progress from HDD', phase: 'commentary' }),
   ];
   await fs.writeFile(logical, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+  const duplicateId = '11111111-2222-4333-8444-999999999994';
+  const duplicateMeta = {
+    ...rows[0],
+    payload: { ...rows[0].payload, id: duplicateId },
+  };
+  const duplicateStub = path.join(parent, '23', `rollout-2026-08-23T18-00-00-${duplicateId}.jsonl`);
+  const duplicateContinuation = path.join(parent, '23', `rollout-2026-08-23T18-01-00-${duplicateId}_continuation.jsonl`);
+  const stubContent = [duplicateMeta, event(1, { type: 'task_started' }), event(2, { type: 'turn_aborted' })]
+    .map(row => JSON.stringify(row)).join('\n') + '\n';
+  await fs.writeFile(duplicateStub, stubContent);
+  await fs.writeFile(duplicateContinuation, [
+    duplicateMeta,
+    event(1, { type: 'task_started' }),
+    event(2, { type: 'user_message', message: 'GPU prompt' }),
+    event(3, { type: 'agent_message', message: 'GPU answer', phase: 'final' }),
+    event(4, { type: 'task_complete', last_agent_message: 'GPU answer' }),
+  ].map(row => JSON.stringify(row)).join('\n') + '\n');
+  await fs.utimes(duplicateStub, new Date('2026-08-23T18:00:00Z'), new Date('2026-08-23T18:00:00Z'));
+  await fs.utimes(duplicateContinuation, new Date('2026-08-23T18:01:00Z'), new Date('2026-08-23T18:01:00Z'));
+  const orphanId = '11111111-2222-4333-8444-999999999992';
+  const archiveId = '11111111-2222-4333-8444-999999999993';
+  const detachedArchive = path.join(root, 'detached-archive');
+  await fs.mkdir(detachedArchive);
+  const detachedPath = path.join(detachedArchive, `rollout-${archiveId}.jsonl`);
+  await fs.writeFile(detachedPath, JSON.stringify({ ...rows[0], payload: { ...rows[0].payload, id: archiveId } }) + '\n' + JSON.stringify(event(3, { type: 'agent_message', message: 'External archive', phase: 'final' })) + '\n');
+  const state = new DatabaseSync(path.join(codexHome, 'state_5.sqlite'));
+  state.exec('CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT, created_at INTEGER, updated_at INTEGER, cwd TEXT, title TEXT, source TEXT, model_provider TEXT)');
+  for (const id of [sessionId, orphanId]) state.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, 'missing.jsonl', 1786823400, 1786823605, root, 'Stored history', 'cli', 'openai');
+  state.close();
+  const historyPath = path.join(codexHome, 'thread_history_1.sqlite');
+  const history = new DatabaseSync(historyPath);
+  history.exec('CREATE TABLE thread_items(thread_id TEXT, turn_id TEXT, item_id TEXT, rollout_ordinal INTEGER, created_at_ms INTEGER, item_type TEXT, item_json TEXT)');
+  for (const id of [sessionId, orphanId]) {
+    const insert = history.prepare('INSERT INTO thread_items VALUES (?, ?, ?, ?, ?, ?, ?)');
+    insert.run(id, 'turn1', 'user', 1, 1786823400000, 'userMessage', JSON.stringify({ type: 'userMessage', content: [{ type: 'text', text: 'Stored prompt' }] }));
+    insert.run(id, 'turn1', 'tool', 2, 1786823401000, 'commandExecution', JSON.stringify({ type: 'commandExecution', command: 'pwd', aggregatedOutput: root }));
+    insert.run(id, 'turn1', 'final', 3, 1786823402000, 'agentMessage', JSON.stringify({ type: 'agentMessage', phase: 'final_answer', text: 'Stored final' }));
+  }
+  history.close();
   process.env.CODEX_APP_ROOT = root;
   process.env.CODEX_STORAGE_ROOT = path.join(root, 'state');
-  process.env.CODEX_PROFILES_JSON = JSON.stringify([{ id: 'linked', label: 'Linked', provider: 'codex', codexHome, workspaceCwd: root }]);
+  process.env.CODEX_PROFILES_JSON = JSON.stringify([
+    { id: 'linked', label: 'Linked', provider: 'codex', codexHome, sessionArchiveRoots: [detachedArchive], workspaceCwd: root },
+    { id: 'other', label: 'Other', provider: 'codex', codexHome: path.join(root, 'other-home'), workspaceCwd: root },
+  ]);
   const service = await import('./codexService.js');
   const first = await service.getCodexSessionDetail(sessionId, 'linked', { tail: 120 });
   assert.equal(first.source, 'cli');
   assert.equal(first.path, logical);
   assert.ok(first.timeline.some(entry => entry.text === 'Live progress from HDD'));
+  const continuation = await service.getCodexSessionDetail(duplicateId, 'linked', { tail: 120 });
+  assert.equal(continuation.path, duplicateContinuation, 'newer duplicate rollout owns the visible conversation');
+  assert.ok(continuation.timeline.some(entry => entry.text === 'GPU answer'));
+  assert.equal((await service.getCodexSessionDetail(duplicateId, 'linked', { tail: 120 })).path, duplicateContinuation);
+  assert.equal(await fs.readFile(duplicateStub, 'utf8'), stubContent, 'older rollout remains intact');
   const summaries = await service.listCodexSessions('linked');
   assert.equal(summaries.filter(entry => entry.id === sessionId).length, 1);
+  assert.equal(summaries.filter(entry => entry.id === duplicateId).length, 1);
   assert.equal(summaries.find(entry => entry.id === sessionId)?.source, 'cli');
-  const persistedPath = path.join(root, 'state', 'session-read-cache', 'v4', 'linked', sessionId, 'tail-120-before-latest.json');
+  const external = await service.getCodexSessionDetail(archiveId, 'linked', { tail: 120 });
+  assert.equal(external.path, detachedPath);
+  assert.ok(external.timeline.some(entry => entry.text === 'External archive'));
+  assert.equal((await service.getCodexSessionDetail(archiveId, 'linked', { tail: 120 })).path, detachedPath, 'external archive cache is valid');
+  const recovered = await service.getCodexSessionDetail(orphanId, 'linked', { full: true });
+  assert.equal(recovered.source, 'history-db');
+  assert.equal(recovered.messages.length, 2);
+  assert.ok(recovered.timeline.some(entry => entry.toolName === 'exec_command'));
+  const olderRecovered = await service.getCodexSessionDetail(orphanId, 'linked', { tail: 2, before: 3 });
+  assert.deepEqual(olderRecovered.timeline, recovered.timeline.slice(1, 3));
+  assert.equal(olderRecovered.hasEarlierTimeline, true);
+  assert.deepEqual(await service.getCodexSessionDetail(orphanId, 'linked', { tail: 2, before: 3 }), olderRecovered, 'projection cache round trip');
+  assert.equal((await service.listCodexSessions('other')).length, 0, 'another profile cannot discover either archive or projection');
+  await assert.rejects(() => service.getCodexSessionDetail(archiveId, 'other'), /was not found/);
+  await assert.rejects(() => service.getCodexSessionDetail(orphanId, 'other'), /was not found/);
+  const databaseBefore = await fs.readFile(historyPath);
+  for (const operation of [
+    () => service.deleteCodexSession(orphanId, 'linked'),
+    () => service.deleteCodexTurn(orphanId, recovered.messages[0].id, 'linked'),
+    () => service.createCodexForkSession(orphanId, recovered.messages[0].id, 'linked'),
+    () => service.copyCodexSessionToProfile(orphanId, 'linked', 'other'),
+  ]) await assert.rejects(operation, /לתצוגה בלבד/);
+  assert.deepEqual(await fs.readFile(historyPath), databaseBefore, 'read and rejected mutations preserve provider history');
+  let projectionChanged = false;
+  const projectionSubscription = await service.subscribeCodexSessionChanges(orphanId, 'linked', () => { projectionChanged = true; });
+  t.after(async () => { projectionSubscription.close(); });
+  const writer = new DatabaseSync(historyPath);
+  writer.prepare('INSERT INTO thread_items VALUES (?, ?, ?, ?, ?, ?, ?)').run(orphanId, 'turn2', 'new', 4, 1786823606000, 'agentMessage', JSON.stringify({ type: 'agentMessage', phase: 'commentary', text: 'Projection live update' }));
+  writer.close();
+  for (let attempt = 0; attempt < 40 && !projectionChanged; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(projectionChanged, true, 'database/WAL revision invalidates live projection caches');
+  const projectionUpdated = await service.getCodexSessionDetail(orphanId, 'linked', { tail: 2, before: 3 });
+  assert.equal(projectionUpdated.totalTimelineEntries, recovered.totalTimelineEntries + 1);
+  assert.ok((await service.getCodexSessionDetail(orphanId, 'linked', { full: true })).messages.some(entry => entry.text === 'Projection live update'));
+  const persistedPath = path.join(root, 'state', 'session-read-cache', 'v7', 'linked', sessionId, 'tail-120-before-latest.json');
   const persisted = JSON.parse(await fs.readFile(persistedPath, 'utf8'));
   assert.equal(persisted.detail.path, logical);
   let changed = false;

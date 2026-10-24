@@ -1,4 +1,5 @@
 export type QueueLifecycleStatus =
+  | 'draft'
   | 'scheduled'
   | 'queued'
   | 'running'

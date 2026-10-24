@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { shouldAcceptSessionSnapshot } from './sessionTimelineSync.js';
+import { shouldAcceptSessionSnapshot,sameTimelineProjection } from './sessionTimelineSync.js';
+
+test('projection upgrade removes old duplicate rows despite unchanged source timestamp, never remerges old cache',()=>{
+ const before={id:'one',updatedAt:'2026-10-12T00:00:00Z',totalTimelineEntries:8},after={...before,totalTimelineEntries:6,timelineProjectionVersion:2};
+ assert.equal(shouldAcceptSessionSnapshot(before,after),true);assert.equal(sameTimelineProjection(before,after),false);assert.equal(shouldAcceptSessionSnapshot(after,before),false);
+});
 
 test('rejects an HTTP detail that completes after a newer live snapshot', () => {
   const liveSnapshot = {

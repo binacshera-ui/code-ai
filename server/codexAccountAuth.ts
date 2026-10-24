@@ -1,6 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { CODEX_APP_CONFIG } from './config.js';
+import { getSharedAccountCommand } from './codexSharedAccountAuth.mjs';
+import { invalidateCanonicalOwnerHealth } from './codexRuntimeHealth.mjs';
+import { invalidateCodexModelCatalogCache } from './codexService.js';
 import { clearCodexAccountUsageCache, type CodexAccountUsageProfile } from './codexAccountUsage.js';
 import {
   getProviderProcessSpawnOptions,
@@ -46,6 +50,7 @@ interface ParsedDeviceAuthPrompt {
 }
 
 const activeFlows = new Map<string, ActiveCodexDeviceAuthFlow>();
+const pendingLogouts = new Map<string, Promise<void>>();
 
 function stripAnsi(value: string): string {
   return value.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, '');
@@ -84,6 +89,18 @@ function buildCodexAuthEnv(profile: CodexAccountUsageProfile): NodeJS.ProcessEnv
     TERM: 'xterm-256color',
     NO_COLOR: '1',
   };
+}
+
+function invalidateAccountState(profile: CodexAccountUsageProfile): void {
+  clearCodexAccountUsageCache(profile);
+  invalidateCanonicalOwnerHealth(profile.codexHome);
+  invalidateCodexModelCatalogCache(profile.id);
+}
+
+function accountCommand(profile: CodexAccountUsageProfile, action: 'login' | 'logout') {
+  // The persistent owner must complete login/logout itself so its in-memory
+  // credentials and the canonical auth cache change together.
+  return getSharedAccountCommand(profile, action, CODEX_BIN, CODEX_APP_CONFIG.appRoot);
 }
 
 function getCodexHomeKey(profile: CodexAccountUsageProfile): string {
@@ -157,9 +174,7 @@ function finishFlow(
   flow.completedAt = new Date().toISOString();
   flow.error = error;
   flow.child = null;
-  if (state === 'authenticated') {
-    clearCodexAccountUsageCache({ id: flow.profileId, codexHome: flow.codexHomeKey });
-  }
+  invalidateAccountState({ id: flow.profileId, codexHome: flow.codexHomeKey });
   scheduleTerminalFlowRemoval(flow);
 }
 
@@ -198,8 +213,9 @@ export function getCodexDeviceAuthStatus(profile: CodexAccountUsageProfile): Cod
   return flow ? publicSnapshot(flow) : idleSnapshot(profile.id);
 }
 
-export function startCodexDeviceAuth(profile: CodexAccountUsageProfile): CodexDeviceAuthSnapshot {
+export async function startCodexDeviceAuth(profile: CodexAccountUsageProfile): Promise<CodexDeviceAuthSnapshot> {
   const codexHomeKey = getCodexHomeKey(profile);
+  await pendingLogouts.get(codexHomeKey);
   const existing = activeFlows.get(codexHomeKey);
   if (existing && (existing.state === 'starting' || existing.state === 'waiting')) {
     return publicSnapshot(existing);
@@ -208,6 +224,7 @@ export function startCodexDeviceAuth(profile: CodexAccountUsageProfile): CodexDe
     clearFlowTimers(existing);
   }
 
+  invalidateAccountState(profile);
   const startedAtMs = Date.now();
   const flow: ActiveCodexDeviceAuthFlow = {
     ...idleSnapshot(profile.id),
@@ -224,7 +241,8 @@ export function startCodexDeviceAuth(profile: CodexAccountUsageProfile): CodexDe
   activeFlows.set(codexHomeKey, flow);
 
   try {
-    const child = spawn(CODEX_BIN, ['login', '--device-auth'], {
+    const command = accountCommand(profile, 'login');
+    const child = spawn(command.bin, command.args, {
       cwd: profile.codexHome,
       env: buildCodexAuthEnv(profile),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -286,10 +304,11 @@ export function cancelCodexDeviceAuth(
 }
 
 async function runCodexLogout(profile: CodexAccountUsageProfile): Promise<void> {
+  const command = accountCommand(profile, 'logout');
   await new Promise<void>((resolve, reject) => {
     let output = '';
     let settled = false;
-    const child = spawn(CODEX_BIN, ['logout'], {
+    const child = spawn(command.bin, command.args, {
       cwd: profile.codexHome,
       env: buildCodexAuthEnv(profile),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -327,16 +346,32 @@ async function runCodexLogout(profile: CodexAccountUsageProfile): Promise<void> 
   });
 }
 
+async function waitForAuthChild(child: ChildProcess | null): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('תהליך ההתחברות הקודם עדיין נסגר.')), 7_000);
+    child.once('close', () => { clearTimeout(timer); resolve(); });
+    child.once('error', () => { clearTimeout(timer); resolve(); });
+  });
+}
+
 export async function disconnectCodexAccount(profile: CodexAccountUsageProfile): Promise<void> {
-  cancelCodexDeviceAuth(profile);
-  await runCodexLogout(profile);
-  const codexHomeKey = getCodexHomeKey(profile);
-  const existing = activeFlows.get(codexHomeKey);
-  if (existing) {
-    clearFlowTimers(existing);
-    activeFlows.delete(codexHomeKey);
-  }
-  clearCodexAccountUsageCache(profile);
+  const key = getCodexHomeKey(profile);
+  const existingLogout = pendingLogouts.get(key);
+  if (existingLogout) return existingLogout;
+  const operation = (async () => {
+    const child = activeFlows.get(key)?.child || null;
+    cancelCodexDeviceAuth(profile);
+    invalidateAccountState(profile);
+    try {
+      await waitForAuthChild(child);
+      await runCodexLogout(profile);
+      const existing = activeFlows.get(key);
+      if (existing) { clearFlowTimers(existing); activeFlows.delete(key); }
+    } finally { invalidateAccountState(profile); }
+  })();
+  pendingLogouts.set(key, operation);
+  try { await operation; } finally { if (pendingLogouts.get(key) === operation) pendingLogouts.delete(key); }
 }
 
 process.once('exit', () => {

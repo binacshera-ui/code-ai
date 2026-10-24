@@ -41,14 +41,20 @@ function readPngDimensions(buffer: Buffer): { width: number; height: number } {
 function fakeCatalog() {
   return {
     models: [{
-      slug: 'gemini-3-pro-preview',
-      displayName: 'Gemini 3 Pro Preview',
+      slug: 'gemini-4-argon',
+      displayName: 'Gemini 4 Argon',
       description: 'Design test model',
       defaultReasoningLevel: 'medium',
       supportedReasoningLevels: [],
       isConfiguredDefault: true,
+    }, {
+      slug: 'gemini-3.1-pro-preview', displayName: 'Earlier Pro', description: null,
+      defaultReasoningLevel: 'medium', supportedReasoningLevels: [], isConfiguredDefault: false,
+    }, {
+      slug: 'gemini-2.5-flash', displayName: 'Earlier Flash', description: null,
+      defaultReasoningLevel: 'medium', supportedReasoningLevels: [], isConfiguredDefault: false,
     }],
-    selectedModel: 'gemini-3-pro-preview',
+    selectedModel: 'gemini-3.1-pro-preview',
     selectedReasoningEffort: 'medium',
     responseSpeed: null,
     permissions: null,
@@ -235,7 +241,7 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
       dimensions: region ? readPngDimensions(region) : null,
     });
     const standardResponse = {
-      model: input.model || 'gemini-3-pro-preview',
+      model: input.model || 'gemini-4-argon',
       finalMessage: JSON.stringify({
         version: '1.0',
         executive_direction: 'Calm, precise, and implementation-ready.',
@@ -287,6 +293,7 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
     },
   });
   assert.deepEqual(invocations[0]?.dimensions, { width: 50, height: 40 });
+  assert.equal(regionResult.model, 'gemini-4-argon');
   assert.match(invocations[0]?.prompt || '', /design-brief\.md/);
   assert.ok((invocations[0]?.prompt.length || Infinity) < 1_024, 'the Gemini CLI bootstrap prompt stays below OS argv limits');
   assert.doesNotMatch(invocations[0]?.prompt || '', /Keep action|quiet-token|must-never-reach-gemini/);
@@ -306,11 +313,11 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
   assert.equal((regionResult.implementation_contract as any).copy_compatible_visual_snippets_verbatim, true);
   await fs.access(String(regionResult.artifact_path));
 
-  await dispatchDesignConsultationForTests({
+  const balancedResult = await dispatchDesignConsultationForTests({
     profileId: PROFILE_ID,
     sessionKey: SESSION_KEY,
     workspaceCwd: workspaceRoot,
-    record: stored,
+    record: { ...stored, quality: 'balanced' },
     toolName: 'design_polish',
     arguments: {
       request: 'Polish typography without using the canvas.',
@@ -319,6 +326,7 @@ test('activates the MCP and skill only for an enabled Design Mode session', asyn
     },
   });
   assert.equal(invocations[1]?.dimensions, null);
+  assert.equal(balancedResult.model, 'gemini-4-argon');
   assert.match(invocations[1]?.brief || '', /No reference image was intentionally supplied/);
 
   const recoveredReview = await dispatchDesignConsultationForTests({

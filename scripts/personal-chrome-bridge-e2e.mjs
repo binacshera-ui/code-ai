@@ -16,7 +16,7 @@ async function requestJson(pathname, init = {}, expectedStatus = 200) {
   if (setCookie) sessionCookie = setCookie.split(';', 1)[0];
   const contentType = response.headers.get('content-type') || '';
   const payload = contentType.includes('application/json') ? await response.json() : await response.text();
-  assert.equal(response.status, expectedStatus, `${pathname}: ${JSON.stringify(payload)}`);
+  assert.equal(response.status, expectedStatus, `${pathname}: unexpected HTTP status (response body omitted)`);
   return payload;
 }
 
@@ -128,6 +128,40 @@ async function main() {
 
   const devices = await requestJson('/api/codex/browser-extension/devices', { headers: extensionHeaders });
   assert.equal(devices.devices.find((device) => device.id === claim.deviceId)?.online, true);
+
+  const testProfileSync = process.env.CODE_AI_E2E_PROFILE_SYNC === '1';
+  let profileRevision = devices.devices.find(device => device.id === claim.deviceId)?.profileRevision || 0;
+  if (testProfileSync) {
+    const profilePath = `/api/codex/browser-extension/devices/${encodeURIComponent(claim.deviceId)}/profile`;
+    const saved = await requestJson(profilePath, {
+      method:'POST', headers:{'content-type':'application/json'},
+      body:JSON.stringify({baseRevision:profileRevision,profileIdentity:{name:'עריכה מהטלפון'}}),
+    });
+    assert.equal(saved.saved,true);assert.equal(saved.device.connectionType,'chrome-extension');
+    profileRevision = saved.device.profileRevision;
+    const pushed = await inbox.next(message => message.type === 'profile_updated');
+    assert.equal(pushed.profileIdentity.name,'עריכה מהטלפון');assert.equal(pushed.profileRevision,profileRevision);
+    const avatar = 'data:image/png;base64,aGVsbG8=';
+    const extensionEdit = await requestJson(profilePath, {
+      method:'POST', headers:{'content-type':'application/json',...extensionHeaders},
+      body:JSON.stringify({baseRevision:profileRevision,profileIdentity:{name:'עריכה מהתוסף',avatarDataUrl:avatar}}),
+    });
+    profileRevision = extensionEdit.device.profileRevision;
+    assert.equal((await inbox.next(message=>message.type==='profile_updated')).profileIdentity.avatarDataUrl,avatar);
+    const conflict = await requestJson(profilePath, {
+      method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({baseRevision:profileRevision-1,profileIdentity:{name:'stale'}}),
+    },409);
+    assert.equal(conflict.device.profileIdentity.name,'עריכה מהתוסף');
+    await requestJson(profilePath,{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({baseRevision:profileRevision,profileIdentity:{name:'invalid',avatarDataUrl:'https://tracker.invalid/a'}})},400);
+    if(storageRoot){
+      const file=path.join(storageRoot,'local/personal-chrome-bridge/state.json');
+      const stored=JSON.parse(await fs.readFile(file,'utf8')).devices.find(device=>device.id===claim.deviceId);
+      assert.equal(stored.profileIdentity.name,'עריכה מהתוסף');assert.equal(stored.profileRevision,profileRevision);
+      assert.equal((await fs.stat(file)).mode & 0o777,0o600);
+    }
+  }
 
   const profilePayload = await requestJson('/api/codex/profiles', { headers: extensionHeaders });
   const profiles = Array.isArray(profilePayload) ? profilePayload : profilePayload.profiles;
@@ -243,13 +277,29 @@ async function main() {
   await requestJson('/api/codex/browser-extension/tool-call', {
     method: 'POST', headers: bearer, body: JSON.stringify({ toolName: 'browser_status', arguments: {} }),
   }, 401);
+  if(testProfileSync){
+    await new Promise(resolve=>{ws.once('close',resolve);ws.close(1000,'Synthetic offline profile check');});
+    const offline = await requestJson(`/api/codex/browser-extension/devices/${encodeURIComponent(claim.deviceId)}/profile`,{
+      method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({baseRevision:profileRevision,profileIdentity:{name:'נשמר כשהתוסף מנותק'}}),
+    });
+    assert.equal(offline.device.online,false);
+    const reconnect=new WebSocket(socketUrl), reconnectInbox=createMessageInbox(reconnect);
+    await new Promise((resolve,reject)=>{reconnect.once('open',resolve);reconnect.once('error',reject);});
+    reconnect.send(JSON.stringify({type:'auth',version:1,deviceId:claim.deviceId,token:claim.deviceToken,extensionId,
+      profileIdentity:{name:'stale reconnect'}}));
+    const canonical=await reconnectInbox.next(message=>message.type==='auth_ok');
+    assert.equal(canonical.profileSyncSupported,true);assert.equal(canonical.profileIdentity.name,'נשמר כשהתוסף מנותק');
+    assert.equal(canonical.profileRevision,offline.device.profileRevision);
+    await new Promise(resolve=>{reconnect.once('close',resolve);reconnect.close(1000,'Synthetic reconnect complete');});
+  }
   await requestJson(`/api/codex/browser-extension/devices/${encodeURIComponent(claim.deviceId)}`, { method: 'DELETE', headers: extensionHeaders });
   await requestJson('/api/codex/browser-extension/enrollment/resume', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ extensionId, installationId }),
   }, 403);
   ws.close(1000, 'E2E complete');
-  console.log(JSON.stringify({ ok: true, deviceId: claim.deviceId, profileId: profile.id, testedTools: ['browser_status', 'browser_type', 'browser_network'], freeAccessApprovalBypassed: true }));
+  console.log(JSON.stringify({ ok: true, deviceId: claim.deviceId, profileId: profile.id, testedTools: ['browser_status', 'browser_type', 'browser_network'], freeAccessApprovalBypassed: true, profileSyncContract:testProfileSync }));
 }
 
 main().catch((error) => {

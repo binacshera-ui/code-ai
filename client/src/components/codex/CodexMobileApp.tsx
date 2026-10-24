@@ -24,10 +24,35 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { planUploadBatches } from '../../../../shared/uploadLimits';
+import { queueExecutionStatus } from '../../../../shared/queueExecutionStatus';
+import { failureKindLabel, queueFailureKind, latestNativeTimelineFailure, type CodexFailureKind } from '../../../../shared/codexRunOutcome';
+import { FocusModeDialog } from './FocusModeDialog';
+import { WorkModeStatus } from './WorkModeStatus';
+import { releaseWorkModeHoldsForUser, stopQueueItemForUser } from './workModeOwnerActions';
+import { WorkModeCards, WorkModeBadges } from './WorkModeCards';
+import { useSessionWorkModes } from './useSessionWorkModes';
+import { activeWorkModeLabels, type WorkModeKind, type WorkModePreferences } from './workModePreferences';
+import { createScopedPreferenceRequests } from './scopedPreferenceRequests';
 import { useSessionUnread, type SessionReadSnapshot } from './useSessionUnread';
 import { ActiveTaskChips } from './ActiveTaskChips';
+import { SendPromptButton } from './SendPromptButton';
+import { UserInputQuestionCard } from './UserInputQuestionCard';
+import { useCodexUserInput, type CodexUserInputApi } from './useCodexUserInput';
+import { interleaveUserInput } from './userInputTimeline';
+import { fetchWithDeploymentRetry } from './deploymentRetry';
+import type { ServerStatusSnapshot } from '../../../../shared/serverStatus';
+import { readServerStatus } from './serverStatusTransport';
 import { collectSessionActivity } from './sessionUnread';
 import ReactMarkdown from 'react-markdown';
+import { MarkdownFileImage, MarkdownImageLinkContext } from './MarkdownFileImage';
+import { HtmlFilePreview } from './HtmlFilePreview';
+import {
+  filePreviewDirectory,
+  isHtmlFilePreview,
+  markdownFileUrlTransform,
+  parseLocalFileHref,
+  withFileSourceServer,
+} from './markdownFiles';
 import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
 import {
@@ -77,7 +102,6 @@ import {
   Repeat,
   RotateCcw,
   ScanSearch,
-  Send,
   Server,
   Settings2,
   ShieldCheck,
@@ -136,6 +160,8 @@ import {
   type PersonalChromeModeValue,
   type PersonalChromePairingValue,
 } from './PersonalChromeModeDialog';
+import { ChromeProfileConflictError, mergeChromeProfiles, saveChromeProfile } from './personalChromeProfile';
+import type { ChromeProfileIdentity } from '../../../../chrome-extension/profileIdentity.js';
 import {
   PhoneModeDialog,
   type PhoneModeStatusValue,
@@ -158,6 +184,10 @@ import {
 const CodexTerminalDialog = lazy(async () => {
   const module = await import('./CodexTerminalDialog');
   return { default: module.CodexTerminalDialog };
+});
+const ServerStatusDialog = lazy(async () => {
+  const module = await import('./ServerStatusDialog');
+  return { default: module.ServerStatusDialog };
 });
 const FlowModeDialog = lazy(async () => {
   const module = await import('./FlowModeDialog');
@@ -188,7 +218,7 @@ import {
   buildTimelineRenderBlocks,
   flattenTimelineRenderBlocks,
 } from './timelinePresentation';
-import { shouldAcceptSessionSnapshot } from './sessionTimelineSync';
+import { shouldAcceptSessionSnapshot,sameTimelineProjection } from './sessionTimelineSync';
 import { selectPendingDraftConversations } from './pendingDraftConversations';
 import { observeQueueStatusTransitions } from './queueCompletionToast';
 import { buildWorkspaceMovePlan } from './workspaceMoveSelection';
@@ -337,6 +367,7 @@ function reconcileTimelineEntryReferences(
 }
 
 interface CodexSessionSummary {
+  nativeRunStatus?: 'active' | 'completed' | 'stopped' | 'failed';
   id: string;
   title: string;
   updatedAt: string;
@@ -477,6 +508,7 @@ interface CodexForkDraftServerContext extends ForkDraftContext {
 }
 
 interface CodexSessionDetail extends CodexSessionSummary {
+  timelineProjectionVersion?: number;
   cwd: string | null;
   modelProvider: string | null;
   timeline: CodexTimelineEntry[];
@@ -649,6 +681,11 @@ interface CodexSessionTrigger {
 }
 
 interface CodexQueueServerItem {
+  sourceProfileId?: string | null;
+  workModeRunId?: string | null;
+  failureKind?: CodexFailureKind | null;
+  progressGuardWarning?: { intervention: 'claimed' | 'applied' | 'unavailable'; turnId: string } | null;
+  nativeSubmission?: {deliveryPhase:string;turnId:string|null} | null;
   id: string;
   profileId: string;
   queueKey: string;
@@ -660,7 +697,7 @@ interface CodexQueueServerItem {
   promptPreview: string;
   forkContext?: ForkDraftContext | null;
   attachments: CodexUploadedAttachment[];
-  status: 'scheduled' | 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
+  status: 'draft' | 'scheduled' | 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
   scheduledAt: string;
   createdAt: string;
   updatedAt: string;
@@ -735,7 +772,7 @@ interface CodexModelCatalogResponse {
 
 interface CodexCliAutoUpdateSnapshotResponse {
   enabled: boolean;
-  state: 'disabled' | 'checking' | 'current' | 'updating' | 'updated' | 'error';
+  state: 'disabled' | 'checking' | 'current' | 'available' | 'updating' | 'updated' | 'error';
   currentVersion: string | null;
   latestVersion: string | null;
   lastCheckedAt: string | null;
@@ -1917,7 +1954,7 @@ function codexFetch(
   init?: RequestInit,
   explicitServerId?: string
 ): Promise<Response> {
-  return fetch(input, withCodeAiServerHeader(input, init, explicitServerId));
+  return fetch(input, withCodeAiServerHeader(input, { ...init, cache: 'no-store' }, explicitServerId));
 }
 
 function isolateMixedBidiText(value: string) {
@@ -2099,6 +2136,7 @@ function CodexUsagePopover({
   const [isLogoutConfirming, setIsLogoutConfirming] = useState(false);
   const [accountActionNotice, setAccountActionNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
   const handledAuthenticatedFlowRef = useRef<string | null>(null);
+  const accountAuthEpochRef = useRef(0);
 
   useLayoutEffect(() => {
     if (!anchorElement) {
@@ -2150,14 +2188,17 @@ function CodexUsagePopover({
     }
 
     let disposed = false;
+    let latestAuthPoll = 0;
     const pollAuthStatus = async () => {
+      const poll = ++latestAuthPoll;
+      const epoch = accountAuthEpochRef.current;
       try {
         const next = await fetchCodexAccountAuthStatus(profileId);
-        if (!disposed) {
+        if (!disposed && epoch === accountAuthEpochRef.current && poll === latestAuthPoll) {
           setAccountAuth(next);
         }
       } catch (authError: any) {
-        if (!disposed) {
+        if (!disposed && epoch === accountAuthEpochRef.current && poll === latestAuthPoll) {
           setAccountActionNotice({
             tone: 'error',
             text: authError?.message || 'לא ניתן לטעון את מצב החיבור לחשבון.',
@@ -2254,7 +2295,10 @@ function CodexUsagePopover({
     setIsLogoutConfirming(false);
     setAccountActionNotice(null);
     try {
-      setAccountAuth(await startCodexDeviceAuthRequest(profileId));
+      accountAuthEpochRef.current += 1;
+      const next = await startCodexDeviceAuthRequest(profileId);
+      accountAuthEpochRef.current += 1;
+      setAccountAuth(next);
     } catch (authError: any) {
       setAccountActionNotice({
         tone: 'error',
@@ -2272,7 +2316,9 @@ function CodexUsagePopover({
     setIsAccountActionPending(true);
     setAccountActionNotice(null);
     try {
+      accountAuthEpochRef.current += 1;
       const next = await cancelCodexDeviceAuthRequest(profileId, accountAuth?.flowId || null);
+      accountAuthEpochRef.current += 1;
       setAccountAuth(next);
       setAccountActionNotice({ tone: 'success', text: 'ניסיון ההתחברות בוטל.' });
     } catch (authError: any) {
@@ -2304,7 +2350,9 @@ function CodexUsagePopover({
     setIsAccountActionPending(true);
     setAccountActionNotice(null);
     try {
+      accountAuthEpochRef.current += 1;
       const nextSnapshot = await disconnectCodexAccountRequest(profileId);
+      accountAuthEpochRef.current += 1;
       setAccountAuth(null);
       setIsLogoutConfirming(false);
       await onAccountChanged(nextSnapshot);
@@ -2831,6 +2879,8 @@ function trimWords(text: string, limit = 5): string {
 
 function getQueueStatusLabel(status: CodexQueueServerItem['status']): string {
   switch (status) {
+    case 'draft':
+      return 'טיוטה';
     case 'scheduled':
       return 'מתוזמן';
     case 'queued':
@@ -2852,6 +2902,8 @@ function getQueueStatusLabel(status: CodexQueueServerItem['status']): string {
 
 function getQueueStatusSummaryLabel(status: CodexQueueServerItem['status']): string {
   switch (status) {
+    case 'draft':
+      return 'טיוטות';
     case 'scheduled':
       return 'מתוזמנות';
     case 'queued':
@@ -2906,7 +2958,7 @@ function shouldDisplayQueueItem(item: CodexQueueServerItem): boolean {
     return item.status !== 'completed';
   }
 
-  return isQueueItemActive(item) || item.status === 'failed' || item.status === 'cancelled';
+  return isQueueItemActive(item) || item.status === 'draft' || item.status === 'failed' || item.status === 'cancelled';
 }
 
 function getRecurringFrequencyLabel(frequency: CodexQueueServerItem['recurringFrequency']): string {
@@ -4131,7 +4183,9 @@ function parseSlashCommand(rawPrompt: string): { name: string; args: string } | 
 }
 
 async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
-  const response = await codexFetch(input, init);
+  // Pin the selected host for the whole retry, even if navigation changes it.
+  const requestServerId = activeCodeAiServerId || LOCAL_SERVER_ID;
+  const response = await fetchWithDeploymentRetry((request, options) => codexFetch(request, options, requestServerId), input, init);
   const contentType = response.headers.get('content-type') || '';
   const rawText = await response.text();
   const trimmed = rawText.trim();
@@ -4164,7 +4218,7 @@ async function fetchJsonForServer<T>(
   input: RequestInfo,
   init?: RequestInit
 ): Promise<T> {
-  const response = await codexFetch(input, init, serverId);
+  const response = await fetchWithDeploymentRetry((request, options) => codexFetch(request, options, serverId), input, init);
   const contentType = response.headers.get('content-type') || '';
   const rawText = await response.text();
   const trimmed = rawText.trim();
@@ -4439,8 +4493,8 @@ function isGoalClearCommand(command: { name: string; args: string }): boolean {
     || normalizedArgs === 'reset';
 }
 
-async function fetchFilePreview(rawPath: string): Promise<CodexFilePreviewLookupResult> {
-  const response = await codexFetch(`/api/codex/files/preview?path=${encodeURIComponent(rawPath)}`);
+async function fetchFilePreview(rawPath: string, sourceServerId: string): Promise<CodexFilePreviewLookupResult> {
+  const response = await codexFetch(`/api/codex/files/preview?path=${encodeURIComponent(rawPath)}`, undefined, sourceServerId);
   const data = await response.json();
 
   if (response.status === 409 && Array.isArray(data.matches)) {
@@ -4460,7 +4514,11 @@ async function fetchFilePreview(rawPath: string): Promise<CodexFilePreviewLookup
   const previewResponse = data as CodexFilePreviewResponse;
   return {
     kind: 'file',
-    file: previewResponse.file,
+    file: {
+      ...previewResponse.file,
+      contentUrl: withFileSourceServer(previewResponse.file.contentUrl, sourceServerId),
+      downloadUrl: withFileSourceServer(previewResponse.file.downloadUrl, sourceServerId),
+    },
   };
 }
 
@@ -4522,9 +4580,10 @@ function normalizeSessionFinalNotificationPreference(
 
 async function fetchSessionFinalNotificationPreference(
   profileId: string,
-  sessionKey: string
+  sessionKey: string,
+  serverId: string
 ): Promise<CodexSessionFinalNotificationPreference> {
-  const data = await fetchJson<CodexSessionFinalNotificationResponse>(
+  const data = await fetchJsonForServer<CodexSessionFinalNotificationResponse>(serverId,
     `/api/codex/session-final-notification?profileId=${encodeURIComponent(profileId)}&sessionKey=${encodeURIComponent(sessionKey)}`
   );
   return normalizeSessionFinalNotificationPreference(data.notification);
@@ -4533,9 +4592,10 @@ async function fetchSessionFinalNotificationPreference(
 async function saveSessionFinalNotificationPreference(
   profileId: string,
   sessionKey: string,
-  enabled: boolean
+  enabled: boolean,
+  serverId: string
 ): Promise<CodexSessionFinalNotificationPreference> {
-  const data = await fetchJson<CodexSessionFinalNotificationResponse>(
+  const data = await fetchJsonForServer<CodexSessionFinalNotificationResponse>(serverId,
     '/api/codex/session-final-notification',
     {
       method: 'POST',
@@ -5869,33 +5929,6 @@ function buildSessionTopicGroups(sessions: CodexSessionSummary[]): SessionTopicG
   return ordered;
 }
 
-function safeDecodeLocalFileHref(href: string): string {
-  try {
-    return decodeURIComponent(href);
-  } catch {
-    try {
-      // Preserve literal percent signs while still decoding valid %XX escapes.
-      return decodeURIComponent(href.replace(/%(?![0-9A-Fa-f]{2})/g, '%25'));
-    } catch {
-      return href;
-    }
-  }
-}
-
-function parseLocalFileHref(href: string): { rawPath: string } | null {
-  const decoded = safeDecodeLocalFileHref(href).trim();
-  if (
-    !decoded
-    || decoded.startsWith('#')
-    || decoded.startsWith('/api/')
-    || /^(?:https?:|mailto:|tel:)/i.test(decoded)
-  ) {
-    return null;
-  }
-
-  return { rawPath: decoded };
-}
-
 function isTextualPreviewKind(preview: Pick<CodexFilePreview, 'previewKind'>) {
   return preview.previewKind === 'markdown'
     || preview.previewKind === 'code'
@@ -6062,10 +6095,14 @@ function hasFileDrag(event: Pick<DragEvent<HTMLElement>, 'dataTransfer'>): boole
 const MessageMarkdown = memo(function MessageMarkdown({
   text,
   isUser,
+  sourceServerId,
+  sourceCwd,
   onOpenFilePreview,
 }: {
   text: string;
   isUser: boolean;
+  sourceServerId: string;
+  sourceCwd?: string | null;
   onOpenFilePreview?: (rawPath: string) => void;
 }) {
   return (
@@ -6075,6 +6112,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkIsolateMixedBidiText]}
+        urlTransform={markdownFileUrlTransform}
         components={{
           p: ({ children }) => (
             <p dir="auto" className="break-words text-right [overflow-wrap:anywhere] [word-break:normal]">{children}</p>
@@ -6102,7 +6140,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
           ),
           a: ({ href, children }) => (
             (() => {
-              const localFile = href ? parseLocalFileHref(href) : null;
+              const localFile = href ? parseLocalFileHref(href, sourceCwd) : null;
               const linkClassName = cn(
                 'break-words font-medium underline underline-offset-4',
                 isUser ? 'code-ai-user-meta' : 'text-cyan-700'
@@ -6110,27 +6148,41 @@ const MessageMarkdown = memo(function MessageMarkdown({
 
               if (localFile && onOpenFilePreview) {
                 return (
-                  <button
-                    type="button"
-                    onClick={() => onOpenFilePreview(localFile.rawPath)}
-                    className={cn(linkClassName, 'text-right')}
-                  >
-                    {children}
-                  </button>
+                  <MarkdownImageLinkContext.Provider value={true}>
+                    <button
+                      type="button"
+                      onClick={() => onOpenFilePreview(localFile.rawPath)}
+                      className={cn(linkClassName, 'text-right')}
+                    >
+                      {children}
+                    </button>
+                  </MarkdownImageLinkContext.Provider>
                 );
               }
 
               return (
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noreferrer"
-                  className={linkClassName}
-                >
-                  {children}
-                </a>
+                <MarkdownImageLinkContext.Provider value={true}>
+                  <a
+                    href={href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className={linkClassName}
+                  >
+                    {children}
+                  </a>
+                </MarkdownImageLinkContext.Provider>
               );
             })()
+          ),
+          img: ({ src, alt, title }) => (
+            <MarkdownFileImage
+              src={typeof src === 'string' ? src : undefined}
+              alt={alt}
+              title={title}
+              serverId={sourceServerId}
+              cwd={sourceCwd}
+              onOpenFilePreview={onOpenFilePreview}
+            />
           ),
           blockquote: ({ children }) => (
           <blockquote
@@ -6269,6 +6321,9 @@ const MessageMarkdown = memo(function MessageMarkdown({
 }, (previousProps, nextProps) => (
   previousProps.text === nextProps.text
   && previousProps.isUser === nextProps.isUser
+  && previousProps.sourceServerId === nextProps.sourceServerId
+  && previousProps.sourceCwd === nextProps.sourceCwd
+  && previousProps.onOpenFilePreview === nextProps.onOpenFilePreview
 ));
 
 const StatusRow = memo(function StatusRow({
@@ -6762,6 +6817,8 @@ function QueuePeekHandle({
 const MessageBubble = memo(function MessageBubble({
   entry,
   wordExportName,
+  sourceServerId,
+  sourceCwd,
   onOpenFilePreview,
   onOpenChanges,
   onFork,
@@ -6778,6 +6835,8 @@ const MessageBubble = memo(function MessageBubble({
 }: {
   entry: CodexTimelineEntry;
   wordExportName?: string;
+  sourceServerId: string;
+  sourceCwd?: string | null;
   onOpenFilePreview: (rawPath: string) => void;
   onOpenChanges?: (entryId: string) => void;
   onFork?: (entryId: string) => void;
@@ -6861,7 +6920,7 @@ const MessageBubble = memo(function MessageBubble({
               {messageText}
             </div>
           ) : (
-            <MessageMarkdown text={messageText} isUser={isUser} onOpenFilePreview={onOpenFilePreview} />
+            <MessageMarkdown text={messageText} isUser={isUser} sourceServerId={sourceServerId} sourceCwd={sourceCwd} onOpenFilePreview={onOpenFilePreview} />
           )}
           <div className="mt-2 flex items-center justify-end gap-1">
             <CopyButton
@@ -7002,6 +7061,9 @@ const MessageBubble = memo(function MessageBubble({
 }, (previousProps, nextProps) => (
   previousProps.entry === nextProps.entry
   && previousProps.wordExportName === nextProps.wordExportName
+  && previousProps.sourceServerId === nextProps.sourceServerId
+  && previousProps.sourceCwd === nextProps.sourceCwd
+  && previousProps.onOpenFilePreview === nextProps.onOpenFilePreview
   && previousProps.deferRichMarkdown === nextProps.deferRichMarkdown
   && previousProps.isTransfering === nextProps.isTransfering
   && previousProps.isChangeLoading === nextProps.isChangeLoading
@@ -7230,10 +7292,13 @@ function QueueItemCard({
     ? `${item.attachments.length} קבצים`
     : 'ללא קבצים';
   const isRecurring = item.scheduleMode === 'recurring';
+  const executionStatus = queueExecutionStatus(item);
   const scheduleText = isRecurring
     ? `הפעלה הבאה ${formatTimestamp(item.scheduledAt)}`
     : item.status === 'scheduled'
       ? `מיועד ל-${formatTimestamp(item.scheduledAt)}`
+      : executionStatus === 'queued'
+        ? `ממתין להפעלה · נוצר ב-${formatTimestamp(item.createdAt)}`
       : item.startedAt
         ? `התחיל ב-${formatTimestamp(item.startedAt)}`
         : `נוצר ב-${formatTimestamp(item.createdAt)}`;
@@ -7241,8 +7306,8 @@ function QueueItemCard({
   return (
     <div dir="rtl" className="rounded-[1.25rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
       <div className="flex flex-wrap items-center gap-2">
-        <Badge className={cn('rounded-full px-3 py-1 text-[11px] font-medium', getQueueStatusClass(item.status))}>
-          {getQueueStatusLabel(item.status)}
+        <Badge className={cn('rounded-full px-3 py-1 text-[11px] font-medium', getQueueStatusClass(queueExecutionStatus(item)))}>
+          {getQueueStatusLabel(queueExecutionStatus(item))}
         </Badge>
         {isRecurring && (
           <Badge className="rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-[11px] font-medium text-indigo-700">
@@ -7272,6 +7337,10 @@ function QueueItemCard({
       <div className="mt-3 text-sm font-medium leading-7 text-slate-800">
         {item.promptPreview || 'קבצים בלבד'}
       </div>
+
+      {item.status === 'draft' && (
+        <div className="mt-1 text-[11px] text-slate-500">נשמרה להמשך · לא נשלחה לסוכן</div>
+      )}
 
       <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
         <span>{attachmentText}</span>
@@ -7327,9 +7396,10 @@ function QueueItemCard({
       {item.error && (
         <div className="mt-3 rounded-[16px] border border-red-100 bg-red-50/70 px-3 py-2 text-xs leading-6 text-red-700">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="font-medium">שגיאה אחרונה</div>
+            <div className="font-medium">{item.status === 'failed' ? 'נעצרה · המשימה לא הושלמה' : 'שגיאה אחרונה'}</div>
             <CopyButton text={item.error} ariaLabel="העתק שגיאה" className="h-7 w-7 border-red-100 bg-white/80 text-[10px] text-red-700" />
           </div>
+          {item.status === 'failed' && <div>{failureKindLabel(queueFailureKind(item))}</div>}
           {item.error}
         </div>
       )}
@@ -7354,13 +7424,13 @@ function QueueItemCard({
           ariaLabel="העתק משימה"
           className="h-9 w-9 rounded-[16px] text-xs"
         />
-        {(item.status === 'failed' || item.status === 'cancelled') && (
+        {(item.status === 'draft' || item.status === 'failed' || item.status === 'cancelled') && (
           <Button
             variant="outline"
             className="h-9 rounded-[16px] border-slate-200 bg-white text-xs text-slate-700 hover:bg-slate-50"
             onClick={() => onEdit(item)}
           >
-            ערוך
+            {item.status === 'draft' ? 'ערוך ושלח' : 'ערוך'}
           </Button>
         )}
         {(item.status === 'running' || item.status === 'cancelling') && (
@@ -7406,7 +7476,7 @@ function QueueItemCard({
             נסה שוב
           </Button>
         )}
-        {(item.status === 'failed' || item.status === 'cancelled') && (
+        {(item.status === 'draft' || item.status === 'failed' || item.status === 'cancelled') && (
           <Button
             variant="outline"
             className="h-9 rounded-[16px] border-red-200 bg-white text-xs text-red-700 hover:bg-red-50"
@@ -7546,6 +7616,7 @@ function SessionCard({
             <div className="line-clamp-1 text-sm font-medium leading-6 text-slate-700">
                 {getSessionDisplayTitle(session)}
             </div>
+            {!isActive && session.nativeRunStatus === 'failed' && <div className="mt-1 text-[11px] font-medium text-rose-700">נעצרה · לא הושלמה</div>}
             {session.topic && topicColors && (
               <div className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-[11px]" style={{
                 backgroundColor: topicColors.bg,
@@ -7594,7 +7665,7 @@ function SessionCard({
             </div>
           </div>
           <div className="flex shrink-0 items-start gap-1.5">
-            {isUnread && (
+            {isUnread && session.nativeRunStatus !== 'failed' && (
               <span className="mt-2 h-2.5 w-2.5 shrink-0 rounded-full bg-blue-500" role="img" aria-label="השיחה הסתיימה וטרם נצפתה" title="השיחה הסתיימה וטרם נצפתה" />
             )}
             {isCopyMode && (
@@ -8152,9 +8223,9 @@ function SidebarPanel({
                           </span>
                           <span className={cn(
                             'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium',
-                            getQueueStatusClass(item.status)
+                            getQueueStatusClass(queueExecutionStatus(item))
                           )}>
-                            {getQueueStatusLabel(item.status)}
+                            {getQueueStatusLabel(queueExecutionStatus(item))}
                           </span>
                         </span>
                         <span className="mt-1 block truncate text-[11px] text-slate-400" dir="ltr" title={item.cwd || undefined}>
@@ -12043,7 +12114,7 @@ function TopicManagerDialog({
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
                   {sessionTrigger.lastTriggeredAt && (
-                    <span>הופעל לאחרונה: {formatDateTimeDisplay(sessionTrigger.lastTriggeredAt)}</span>
+                    <span>הופעל לאחרונה: {formatTimestamp(sessionTrigger.lastTriggeredAt)}</span>
                   )}
                   {sessionTrigger.lastPayloadPreview && (
                     <span className="truncate">אחרון: {sessionTrigger.lastPayloadPreview}</span>
@@ -13128,6 +13199,11 @@ function AgentSessionDialog({
 function ModePickerDialog({
   isOpen,
   currentProvider,
+  workModes,
+  workModesLoaded,
+  workModesError,
+  onOpenWorkMode,
+  onReloadWorkModes,
   isProfessionalModeSelected,
   isAnnotationsModeSelected,
   isGoalModeSelected,
@@ -13160,6 +13236,11 @@ function ModePickerDialog({
 }: {
   isOpen: boolean;
   currentProvider: CodexProfile['provider'] | null;
+  workModes: WorkModePreferences;
+  workModesLoaded: boolean;
+  workModesError: string | null;
+  onOpenWorkMode: (kind: WorkModeKind) => void;
+  onReloadWorkModes: () => void;
   isProfessionalModeSelected: boolean;
   isAnnotationsModeSelected: boolean;
   isGoalModeSelected: boolean;
@@ -13202,7 +13283,7 @@ function ModePickerDialog({
         onClick={onClose}
         aria-label="Close modes dialog"
       />
-      <div className="relative z-10 flex w-full max-w-sm max-h-[88dvh] flex-col overflow-hidden rounded-[1.7rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
+      <div role="dialog" aria-modal="true" aria-label="מצבים" dir="rtl" className="relative z-10 flex w-full max-w-sm max-h-[88dvh] flex-col overflow-hidden rounded-[1.7rem] border border-slate-100 bg-white shadow-[0_28px_90px_-36px_rgba(15,23,42,0.38)]">
         <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
           <div className="flex items-start gap-3">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-indigo-600">
@@ -13214,7 +13295,7 @@ function ModePickerDialog({
               </div>
               <div className="mt-1 text-lg font-semibold text-slate-800">מצבים</div>
               <div className="mt-1 text-xs text-slate-500">
-                בחר את מצב העבודה שיצור את השליחה או את זרימת הסוכנים.
+                כל מצבי העבודה במקום אחד. המצב הפעיל וההגדרות שלו מופיעים בכל כרטיס.
               </div>
             </div>
           </div>
@@ -13229,6 +13310,8 @@ function ModePickerDialog({
 
         <div className="min-h-0 overflow-y-auto overscroll-contain px-5 py-5">
           <div className="space-y-3">
+          <WorkModeCards mode={workModes} available={currentProvider === 'codex'} loaded={workModesLoaded}
+            error={workModesError} onOpen={onOpenWorkMode} onRetry={onReloadWorkModes} />
           <button
             type="button"
             onClick={onOpenConversationShare}
@@ -15425,6 +15508,7 @@ export function CodexMobileApp() {
   const [fileTreePathInput, setFileTreePathInput] = useState('');
   const [fileTreeFilter, setFileTreeFilter] = useState('');
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  const [isServerStatusOpen, setIsServerStatusOpen] = useState(false);
   const [isGamePickerOpen, setIsGamePickerOpen] = useState(false);
   const [isGameOpen, setIsGameOpen] = useState(false);
   const [isRunnerGameOpen, setIsRunnerGameOpen] = useState(false);
@@ -15475,6 +15559,8 @@ export function CodexMobileApp() {
   const [isInstructionDialogOpen, setIsInstructionDialogOpen] = useState(false);
   const [isInstructionLoading, setIsInstructionLoading] = useState(false);
   const [isFinalNotificationDialogOpen, setIsFinalNotificationDialogOpen] = useState(false);
+  const [isFocusModeDialogOpen, setIsFocusModeDialogOpen] = useState(false);
+  const [workModeDialogKind, setWorkModeDialogKind] = useState<WorkModeKind>('rational');
   const [isFinalNotificationLoading, setIsFinalNotificationLoading] = useState(false);
   const [isFinalNotificationSaving, setIsFinalNotificationSaving] = useState(false);
   const [isSessionContextSelectionLoading, setIsSessionContextSelectionLoading] = useState(false);
@@ -15614,6 +15700,8 @@ export function CodexMobileApp() {
   const [newTopicIcon, setNewTopicIcon] = useState(TOPIC_ICON_PRESETS[0]);
   const [newTopicColorKey, setNewTopicColorKey] = useState<keyof typeof TOPIC_COLOR_PRESETS>('sky');
   const [activeFilePreview, setActiveFilePreview] = useState<CodexFilePreview | null>(null);
+  const [filePreviewServerId, setFilePreviewServerId] = useState(serverId);
+  const filePreviewRequestRef = useRef(0);
   const [activeFileMatches, setActiveFileMatches] = useState<CodexFileMatch[]>([]);
   const [activeFileMatchesQuery, setActiveFileMatchesQuery] = useState('');
   const [activeFileMatchesLineNumber, setActiveFileMatchesLineNumber] = useState<number | null>(null);
@@ -15667,6 +15755,7 @@ export function CodexMobileApp() {
   const latestFullTimelineLoadTokenRef = useRef(0);
   const latestInstructionLoadTokenRef = useRef(0);
   const latestFinalNotificationLoadTokenRef = useRef(0);
+  const finalNotificationRequests = useRef(createScopedPreferenceRequests()).current;
   const latestSessionContextSelectionLoadTokenRef = useRef(0);
   const latestSessionBrowserModeLoadTokenRef = useRef(0);
   const latestSessionDesignModeLoadTokenRef = useRef(0);
@@ -15723,6 +15812,8 @@ export function CodexMobileApp() {
     [profiles, workspaceMode]
   );
   const currentQueueKey = selectedSessionId || draftConversationKey;
+  const finalNotificationScope = JSON.stringify([serverId, profileId, currentQueueKey]);
+  finalNotificationRequests.setScope(finalNotificationScope);
   const draftSidebarSessionId = forkDraftContext ? toDraftSessionId(draftConversationKey) : null;
   const activeQueueCount = queueItems.filter(isQueueItemActive).length;
   const effectiveDraftCwd = draftCwd || null;
@@ -15731,6 +15822,8 @@ export function CodexMobileApp() {
     || servers.find((server) => server.id === LOCAL_SERVER_ID)
     || null;
   const currentProfile = visibleProfiles.find((profile) => profile.id === profileId) || null;
+  const workModes = useSessionWorkModes(serverId, profileId, currentQueueKey, currentProfile?.provider === 'codex', fetchJsonForServer);
+  const workModeNames = currentProfile?.provider === 'codex' && workModes.loaded ? activeWorkModeLabels(workModes.mode) : [];
   const designGeminiProfiles = useMemo<DesignModeProfileOption[]>(
     () => profiles
       .filter((profile) => profile.provider === 'gemini' && profile.mode !== 'support')
@@ -15763,6 +15856,9 @@ export function CodexMobileApp() {
   );
   const selectedProfileWorkspaceCwd = currentProfile?.workspaceCwd || null;
   const activeComposerCwd = selectedSessionId ? activeSessionCwd : (effectiveDraftCwd || selectedProfileWorkspaceCwd);
+  const loadServerStatus = useCallback((signal: AbortSignal): Promise<ServerStatusSnapshot> => (
+    readServerStatus((requestSignal) => codexFetch('/api/codex/server-status', { signal: requestSignal }, serverId), signal)
+  ), [serverId]);
   const terminalApi = useMemo<CodexTerminalApi>(() => ({
     create: (columns, rows) => {
       if (!profileId || !activeComposerCwd) {
@@ -15800,6 +15896,20 @@ export function CodexMobileApp() {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profileId, completedAt }) }
     ),
   }), [profileId, serverId]);
+  const userInputScope = JSON.stringify([serverId, profileId, selectedSessionId]);
+  const userInputApi = useMemo<CodexUserInputApi | null>(() => {
+    if (!selectedSessionId || !profileId || currentProfile?.provider !== 'codex'
+      || !authStatus?.authenticated || authStatus.deviceUnlocked === false) return null;
+    const route = `/api/codex/sessions/${encodeURIComponent(selectedSessionId)}/user-input`;
+    return {
+      read: signal => fetchJsonForServer(serverId, `${route}?profile=${encodeURIComponent(profileId)}`, { signal }),
+      answer: (id, response) => fetchJsonForServer(serverId, `${route}/${encodeURIComponent(id)}/answer`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profileId, answers: response.answers }),
+      }),
+    };
+  }, [serverId, profileId, selectedSessionId, currentProfile?.provider, authStatus?.authenticated, authStatus?.deviceUnlocked]);
+  const userInput = useCodexUserInput(userInputScope, userInputApi, Boolean(selectedSessionId && activeSessionIds.has(selectedSessionId)));
   const liveSessionActivity = useMemo(() => collectSessionActivity(queueItems, profileId), [queueItems, profileId]);
   const isFilePreviewOpen = isFilePreviewLoading
     || Boolean(activeFilePreview)
@@ -15812,7 +15922,7 @@ export function CodexMobileApp() {
     sessions,
     selectedSession: selectedSession?.id === selectedSessionId ? selectedSession : null,
     viewport: mainScrollElement,
-    blocked: isSidebarOpen || isFolderPickerOpen || isFileTreeOpen || isTerminalOpen
+    blocked: isSidebarOpen || isFolderPickerOpen || isFileTreeOpen || isTerminalOpen || isServerStatusOpen
       || isFilePreviewOpen || isFullTimelineLoading
       || Boolean(selectedSessionId && activeSessionIds.has(selectedSessionId)),
   });
@@ -15862,6 +15972,12 @@ export function CodexMobileApp() {
     && (latestConversationQueueItem.status === 'failed' || latestConversationQueueItem.status === 'cancelled')
     ? latestConversationQueueItem
     : null;
+  const nativeTimelineFailure = useMemo(() => latestNativeTimelineFailure(selectedSession?.timeline || []), [selectedSession?.timeline]);
+  const currentNativeFailure = nativeTimelineFailure && currentSessionActiveQueueCount === 0
+    && Date.parse(nativeTimelineFailure.timestamp) >= Date.parse(latestConversationQueueItem?.completedAt || latestConversationQueueItem?.startedAt || '1970-01-01')
+    ? nativeTimelineFailure : null;
+  const conversationFailure = currentNativeFailure || (interruptedQueueItem?.status === 'failed'
+    ? { failureKind: queueFailureKind(interruptedQueueItem) } : null);
   const latestAbortedTimelineEntryId = useMemo(() => {
     const timeline = selectedSession?.timeline || [];
     let latestFinalIndex = -1;
@@ -15882,7 +15998,7 @@ export function CodexMobileApp() {
   const canContinueInterruptedSession = Boolean(
     selectedSessionId
     && currentSessionActiveQueueCount === 0
-    && (interruptedQueueItem || latestAbortedTimelineEntryId)
+    && (interruptedQueueItem || latestAbortedTimelineEntryId || currentNativeFailure)
   );
   const stopScheduleDialogItem = stopScheduleTarget
     ? queueItems.find((item) => item.id === stopScheduleTarget.id) || stopScheduleTarget
@@ -15890,6 +16006,7 @@ export function CodexMobileApp() {
   const collapsedQueueItems = visibleQueueItems;
   const collapsedQueueStatusSummary = useMemo(() => {
     const statusOrder: CodexQueueServerItem['status'][] = [
+      'draft',
       'queued',
       'scheduled',
       'running',
@@ -15926,6 +16043,10 @@ export function CodexMobileApp() {
     () => buildTimelineRenderBlocks(displayTimeline),
     [displayTimeline]
   );
+  const timelineWithQuestions = useMemo(() => interleaveUserInput(
+    timelineBlocks, userInput.requests,
+    block => block.type === 'tool-row' ? block.entries[0]?.timestamp || '' : block.entry.timestamp,
+  ), [timelineBlocks, userInput.requests]);
   const visibleTimelineEntries = useMemo(
     () => flattenTimelineRenderBlocks(timelineBlocks),
     [timelineBlocks]
@@ -16031,7 +16152,7 @@ export function CodexMobileApp() {
     sessionDetailAbortControllerRef.current?.abort();
     sessionDetailAbortControllerRef.current = null;
     let nextSession = session;
-    if (current?.id === session.id) {
+    if (current?.id === session.id&&sameTimelineProjection(current,session)) {
       const reconciledFreshTimeline = reconcileTimelineEntryReferences(
         current.timeline,
         session.timeline
@@ -17042,13 +17163,19 @@ export function CodexMobileApp() {
   async function loadServersAndProfiles() {
     setIsServerSwitching(true);
     try {
-      const loaded = await loadServers(true);
+      // Registry is local and cheap. Unrelated offline hosts must not delay
+      // opening the selected account; its own profile request connects as needed.
+      const loaded = await loadServers(false);
       activeServerRef.current = loaded.selectedServerId;
       setActiveCodeAiServerId(loaded.selectedServerId);
       writeStoredServerId(loaded.selectedServerId);
       writeCurrentServerRoute(loaded.selectedServerId);
       setServerId(loaded.selectedServerId);
       await loadProfiles(loaded.selectedServerId);
+      void loadServers(true).catch((loadError: any) => {
+        reportCodexClientLog({ type: 'servers-background-refresh-failed',
+          message: loadError.message || 'Failed to refresh server health' });
+      });
     } catch (loadError: any) {
       reportCodexClientLog({
         type: 'servers-load-failed',
@@ -17721,6 +17848,7 @@ export function CodexMobileApp() {
         && !full
         && Boolean(currentSession)
         && currentSession?.id === sessionId
+        && sameTimelineProjection(currentSession!,data.session)
         && data.session.totalTimelineEntries >= currentSession.totalTimelineEntries
         && currentSession.timeline.length > data.session.timeline.length
         && incomingOverlapsCurrentWindow
@@ -18235,8 +18363,12 @@ export function CodexMobileApp() {
       && requestedRouteMatchesProfile
       ? sessionRows.find((session) => session.id === requestedRoute.sessionId && !session.isDraft) || null
       : null;
-    if (requestedSession) {
-      const loadedSession = await loadSessionDetail(requestedSession.id, nextProfileId, { silent: true });
+    // A just-created thread may already be readable while the sidebar catalog
+    // is still cached. Deep links must try its authoritative detail endpoint
+    // before replacing a real conversation URL with an unrelated blank draft.
+    const requestedSessionId = requestedSession?.id || (requestedRouteMatchesProfile ? requestedRoute?.sessionId : null);
+    if (requestedSessionId) {
+      const loadedSession = await loadSessionDetail(requestedSessionId, nextProfileId, { silent: true });
       if (loadedSession && !loadedSession.isDraft) {
         initialSessionRouteRef.current = null;
         replaceCurrentSessionRoute(nextProfileId, loadedSession.id, 'session');
@@ -19282,17 +19414,17 @@ export function CodexMobileApp() {
     }
   }
 
-  async function enqueueCurrentPrompt() {
+  async function enqueueCurrentPrompt(saveAsDraft = false) {
     const trimmedPrompt = prompt.trim();
     if (!profileId || (!trimmedPrompt && draftAttachments.length === 0) || sendInFlightRef.current) {
       return;
     }
 
-    if (draftAttachments.length === 0 && await handleSupportedSlashCommand(trimmedPrompt)) {
+    if (!saveAsDraft && draftAttachments.length === 0 && await handleSupportedSlashCommand(trimmedPrompt)) {
       return;
     }
 
-    if (scheduleType === 'recurring' && !scheduledFor) {
+    if (!saveAsDraft && scheduleType === 'recurring' && !scheduledFor) {
       setError('בחר שעה לתיזמון הקבוע לפני השליחה.');
       return;
     }
@@ -19305,6 +19437,7 @@ export function CodexMobileApp() {
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .join('\n\n');
     const payloadFingerprint = JSON.stringify({
+      saveAsDraft,
       profileId,
       queueKey: currentQueueKey,
       sessionId: selectedSessionId,
@@ -19350,12 +19483,18 @@ export function CodexMobileApp() {
     setError(null);
 
     try {
-      const data = await fetchJson<CodexQueueCreateResponse>('/api/codex/queue/items', {
+      // A distinct route fails closed on an older server instead of sending it.
+      const request = <T,>(url: string, init?: RequestInit) => fetchJsonForServer<T>(serverId, url, init);
+      if (!saveAsDraft && currentProfile?.provider === 'codex' && workModes.mode.rationalEnabled && currentQueueKey) {
+        await releaseWorkModeHoldsForUser(request, { profileId, sessionKey: currentQueueKey });
+      }
+      const data = await request<CodexQueueCreateResponse>(saveAsDraft ? '/api/codex/queue/drafts' : '/api/codex/queue/items', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          saveAsDraft,
           clientRequestId,
           prompt: effectivePromptForProvider,
           promptPreview: trimmedPrompt,
@@ -19367,8 +19506,8 @@ export function CodexMobileApp() {
           model: selectedModelSlug || undefined,
           reasoningEffort: selectedReasoningEffort || undefined,
           permissionModeId: modelPermissionSnapshot?.selectedModeId || undefined,
-          scheduledAt: scheduledFor ? new Date(scheduledFor).toISOString() : undefined,
-          recurrence: scheduleType === 'recurring'
+          scheduledAt: !saveAsDraft && scheduledFor ? new Date(scheduledFor).toISOString() : undefined,
+          recurrence: !saveAsDraft && scheduleType === 'recurring'
             ? {
               frequency: recurringFreq,
               timeZone: browserTimeZone,
@@ -19422,8 +19561,9 @@ export function CodexMobileApp() {
       setScheduledFor('');
       setIsScheduleOpen(false);
       setScheduleType('once');
-      clearSessionContextSelectionAfterSend();
+      if (!saveAsDraft) clearSessionContextSelectionAfterSend();
       clearDraftAttachments();
+      if (saveAsDraft) setQueuePanelStage('details');
       sendDedupRef.current = null;
       recordCodexBreadcrumb('queue-enqueue-succeeded', {
         itemIds: createdItems.map((item) => item.id),
@@ -19467,7 +19607,11 @@ export function CodexMobileApp() {
     setError(null);
 
     try {
-      const data = await fetchJson<{ item: CodexQueueServerItem }>('/api/codex/queue/items', {
+      const request = <T,>(url: string, init?: RequestInit) => fetchJsonForServer<T>(serverId, url, init);
+      if (currentProfile?.provider === 'codex' && workModes.mode.rationalEnabled) {
+        await releaseWorkModeHoldsForUser(request, { profileId, sessionKey: selectedSessionId });
+      }
+      const data = await request<{ item: CodexQueueServerItem }>('/api/codex/queue/items', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -19515,15 +19659,14 @@ export function CodexMobileApp() {
   async function cancelQueueItem(itemId: string) {
     try {
       recordCodexBreadcrumb('queue-cancel-requested', { itemId });
-      const data = await fetchJson<CodexQueueItemResponse>(`/api/codex/queue/items/${encodeURIComponent(itemId)}/cancel`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-      startTransition(() => {
-        setQueueItems((current) => current.map((item) => (item.id === itemId ? data.item : item)));
-      });
+      const target = queueItems.find(item => item.id === itemId);
+      const request = <T,>(url: string, init?: RequestInit) => fetchJsonForServer<T>(serverId, url, init);
+      await stopQueueItemForUser<CodexQueueServerItem>(request, itemId, {
+        profileId: target?.sourceProfileId || target?.profileId || profileId,
+        sessionKey: target?.sessionId || target?.queueKey || currentQueueKey || '',
+      }, item => startTransition(() => {
+        setQueueItems(current => current.map(candidate => candidate.id === itemId ? item : candidate));
+      }));
     } catch (queueError: any) {
       reportCodexClientLog({
         type: 'queue-cancel-failed',
@@ -19618,14 +19761,24 @@ export function CodexMobileApp() {
   async function retryQueueItem(itemId: string) {
     try {
       recordCodexBreadcrumb('queue-retry-requested', { itemId });
-      const data = await fetchJson<CodexQueueItemResponse>(`/api/codex/queue/items/${encodeURIComponent(itemId)}/retry`, {
+      const target = queueItems.find(item => item.id === itemId);
+      const request = <T,>(url: string, init?: RequestInit) => fetchJsonForServer<T>(serverId, url, init);
+      const sessionKey = target?.sessionId || target?.queueKey || currentQueueKey;
+      if (currentProfile?.provider === 'codex' && workModes.mode.rationalEnabled && sessionKey) {
+        await releaseWorkModeHoldsForUser(request, {
+          profileId: target?.sourceProfileId || target?.profileId || profileId, sessionKey,
+        });
+      }
+      const data = await request<CodexQueueItemResponse>(`/api/codex/queue/items/${encodeURIComponent(itemId)}/retry`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
       });
       startTransition(() => {
-        setQueueItems((current) => current.map((item) => (item.id === itemId ? data.item : item)));
+        setQueueItems((current) => data.item.id === itemId
+          ? current.map((item) => item.id === itemId ? data.item : item)
+          : [...current.filter((item) => item.id !== data.item.id), data.item]);
       });
       await loadQueueItems(profileId, { silent: true });
     } catch (queueError: any) {
@@ -19909,7 +20062,9 @@ export function CodexMobileApp() {
     });
   }
 
-  async function handleOpenFilePreview(rawPath: string) {
+  const handleOpenFilePreview = useCallback(async (rawPath: string, sourceServerId = serverId) => {
+    const requestId = ++filePreviewRequestRef.current;
+    setFilePreviewServerId(sourceServerId);
     setActiveToolEntry(null);
     setIsFilePreviewLoading(true);
     setActiveFilePreview(null);
@@ -19923,7 +20078,8 @@ export function CodexMobileApp() {
         rawPath,
         selectedSessionId,
       });
-      const result = await fetchFilePreview(rawPath);
+      const result = await fetchFilePreview(rawPath, sourceServerId);
+      if (requestId !== filePreviewRequestRef.current) return;
       if (result.kind === 'matches') {
         setActiveFileMatches(result.matches);
         setActiveFileMatchesQuery(result.query);
@@ -19933,22 +20089,33 @@ export function CodexMobileApp() {
 
       setActiveFilePreview(result.file);
     } catch (previewError: any) {
+      if (requestId !== filePreviewRequestRef.current) return;
       reportCodexClientLog({
         type: 'file-preview-failed',
         message: previewError.message || 'Failed to preview file',
         details: {
           rawPath,
+          sourceServerId,
           selectedSessionId,
           profileId,
         },
       });
       setFilePreviewError(previewError.message || 'Failed to preview file');
     } finally {
-      setIsFilePreviewLoading(false);
+      if (requestId === filePreviewRequestRef.current) setIsFilePreviewLoading(false);
     }
-  }
+  }, [profileId, selectedSessionId, serverId]);
+
+  const handleOpenNestedFilePreview = useCallback((rawPath: string) => {
+    void handleOpenFilePreview(rawPath, filePreviewServerId);
+  }, [filePreviewServerId, handleOpenFilePreview]);
+
+  const fetchHtmlPreviewFile = useCallback((url: string, init: { signal: AbortSignal }) => (
+    codexFetch(url, { ...init, credentials: 'same-origin' }, filePreviewServerId)
+  ), [filePreviewServerId]);
 
   function closeFilePreview() {
+    filePreviewRequestRef.current += 1;
     setIsFilePreviewLoading(false);
     setIsFileDownloadLoading(false);
     setActiveFilePreview(null);
@@ -19969,7 +20136,7 @@ export function CodexMobileApp() {
     try {
       const response = await codexFetch(activeFilePreview.downloadUrl, {
         credentials: 'same-origin',
-      });
+      }, filePreviewServerId);
 
       if (!response.ok) {
         let errorMessage = `Failed to download file (${response.status})`;
@@ -20274,11 +20441,14 @@ export function CodexMobileApp() {
     nextSnapshot?: CodexRateLimitSnapshotResponse | null
   ): Promise<void> {
     if (nextSnapshot !== undefined) {
+      latestRateLimitLoadTokenRef.current += 1;
       setRateLimitSnapshot(nextSnapshot);
       setRateLimitError(null);
-      return;
     }
-    await loadRateLimitSnapshot(profileId, selectedSessionId, true);
+    await Promise.all([
+      loadModelCatalog(profileId, true),
+      ...(nextSnapshot === undefined ? [loadRateLimitSnapshot(profileId, selectedSessionId, true)] : []),
+    ]);
   }
 
   async function loadCurrentSessionInstruction(nextProfileId = profileId, nextSessionKey = currentQueueKey) {
@@ -20348,21 +20518,25 @@ export function CodexMobileApp() {
       return;
     }
 
+    const scope = JSON.stringify([serverId, nextProfileId, nextSessionKey]);
+    const ticket = finalNotificationRequests.beginRead(scope);
+    if (!ticket) return;
     const requestToken = ++latestFinalNotificationLoadTokenRef.current;
+    const isCurrent = () => requestToken === latestFinalNotificationLoadTokenRef.current && finalNotificationRequests.current(ticket);
     setIsFinalNotificationLoading(true);
     try {
-      const nextPreference = await fetchSessionFinalNotificationPreference(nextProfileId, nextSessionKey);
-      if (requestToken !== latestFinalNotificationLoadTokenRef.current) {
+      const nextPreference = await fetchSessionFinalNotificationPreference(nextProfileId, nextSessionKey, serverId);
+      if (!isCurrent()) {
         return;
       }
       setSessionFinalNotification(nextPreference);
     } catch (notificationError: any) {
-      if (requestToken === latestFinalNotificationLoadTokenRef.current) {
+      if (isCurrent()) {
         setSessionFinalNotification(createDefaultSessionFinalNotificationPreference());
         setError(notificationError.message || 'Failed to load final-response notification preference');
       }
     } finally {
-      if (requestToken === latestFinalNotificationLoadTokenRef.current) {
+      if (isCurrent()) {
         setIsFinalNotificationLoading(false);
       }
     }
@@ -20374,6 +20548,9 @@ export function CodexMobileApp() {
     }
 
     const previousPreference = sessionFinalNotification;
+    const ticket = finalNotificationRequests.beginWrite(finalNotificationScope);
+    if (!ticket) return;
+    ++latestFinalNotificationLoadTokenRef.current;
     const nextEnabled = !previousPreference.enabled;
     setIsFinalNotificationSaving(true);
     setSessionFinalNotification({
@@ -20386,14 +20563,18 @@ export function CodexMobileApp() {
       const savedPreference = await saveSessionFinalNotificationPreference(
         profileId,
         currentQueueKey,
-        nextEnabled
+        nextEnabled,
+        serverId
       );
-      setSessionFinalNotification(savedPreference);
+      if (finalNotificationRequests.current(ticket)) setSessionFinalNotification(savedPreference);
     } catch (notificationError: any) {
-      setSessionFinalNotification(previousPreference);
-      setError(notificationError.message || 'Failed to save final-response notification preference');
+      if (finalNotificationRequests.current(ticket)) {
+        setSessionFinalNotification(previousPreference);
+        setError(notificationError.message || 'Failed to save final-response notification preference');
+      }
     } finally {
-      setIsFinalNotificationSaving(false);
+      if (finalNotificationRequests.current(ticket)) setIsFinalNotificationSaving(false);
+      finalNotificationRequests.finishWrite(ticket);
     }
   }
 
@@ -20802,9 +20983,10 @@ export function CodexMobileApp() {
     setPersonalChromeError(null);
     try {
       const devices = await fetchPersonalChromeDevices();
-      setPersonalChromeDevices(devices);
+      setPersonalChromeDevices(current => mergeChromeProfiles(current, devices));
       setPersonalChromeModeDraft((current) => {
-        if (current.deviceId && devices.some((device) => device.id === current.deviceId)) return current;
+        const selected = devices.find((device) => device.id === current.deviceId);
+        if (selected) return { ...current, deviceName: selected.name };
         const first = devices[0];
         return first ? { ...current, deviceId: first.id, deviceName: first.name } : { ...current, deviceId: '', deviceName: '' };
       });
@@ -20814,6 +20996,43 @@ export function CodexMobileApp() {
       setIsSessionPersonalChromeModeLoading(false);
     }
   }
+
+  async function savePersonalChromeDeviceProfile(deviceId: string, identity: ChromeProfileIdentity, baseRevision: number) {
+    try {
+      const device = await saveChromeProfile(deviceId, identity, baseRevision, codexFetch);
+      setPersonalChromeDevices(current => mergeChromeProfiles(current, current.map(entry => entry.id === device.id ? device : entry)));
+      setPersonalChromeModeDraft(current => current.deviceId === device.id ? { ...current, deviceName: device.name } : current);
+      return device;
+    } catch (error) {
+      if (error instanceof ChromeProfileConflictError) {
+        setPersonalChromeDevices(current => mergeChromeProfiles(current, current.map(entry => entry.id === deviceId ? error.device : entry)));
+      }
+      throw error;
+    }
+  }
+
+  useEffect(() => {
+    if (authStatus?.authenticated !== true || authStatus.deviceUnlocked === false) {
+      setPersonalChromeDevices([]); return;
+    }
+    let active = true;
+    const refresh = async () => {
+      try {
+        const devices = await fetchPersonalChromeDevices();
+        if (active) setPersonalChromeDevices(current => mergeChromeProfiles(current, devices));
+      } catch { /* Keep saved names during a temporary network failure. */ }
+    };
+    void refresh();
+    const refreshVisible = () => { if (document.visibilityState !== 'hidden') void refresh(); };
+    const timer = window.setInterval(refreshVisible, isPersonalChromeModeDialogOpen ? 5000 : 15000);
+    window.addEventListener('focus', refreshVisible);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => {
+      active = false; window.clearInterval(timer);
+      window.removeEventListener('focus', refreshVisible);
+      document.removeEventListener('visibilitychange', refreshVisible);
+    };
+  }, [authStatus?.authenticated, authStatus?.deviceUnlocked, isPersonalChromeModeDialogOpen]);
 
   async function createPersonalChromePairingCode() {
     setPersonalChromeError(null);
@@ -21199,6 +21418,16 @@ export function CodexMobileApp() {
   function openModePickerDialog() {
     setIsAdditionsMenuOpen(false);
     setIsModePickerDialogOpen(true);
+    void workModes.reload();
+  }
+
+  function openWorkModeDialog(kind: WorkModeKind) {
+    if (currentProfile?.provider !== 'codex') return;
+    setIsHeaderActionsOpen(false);
+    setIsAdditionsMenuOpen(false);
+    setIsModePickerDialogOpen(false);
+    setWorkModeDialogKind(kind);
+    setIsFocusModeDialogOpen(true);
   }
 
   function openConversationShareDialog() {
@@ -22393,6 +22622,14 @@ export function CodexMobileApp() {
     () => agentSessions.find((record) => record.id === sessionContextSelection.agentSessionDraftId) || null,
     [agentSessions, sessionContextSelection.agentSessionDraftId]
   );
+  const activeModeNames = [...workModeNames,
+    ...(isProfessionalModeSelected ? ['מקצועי'] : []), ...(isAnnotationsModeSelected ? ['ביאורים'] : []),
+    ...(isGoalModeSelected ? ['מטרה'] : []), ...(selectedAgentSessionDraft ? ['סוכנים'] : []),
+    ...(sessionBrowserMode.enabled ? ['דפדפן'] : []), ...(sessionPersonalChromeMode.enabled ? ['Chrome אישי'] : []),
+    ...(sessionPhoneMode.enabled ? ['טלפון'] : []), ...(sessionProjectMode.enabled ? ['פרויקט'] : []),
+    ...(sessionConversationSearchMode.enabled ? ['חיפוש בשיחות'] : []), ...(sessionFlowMode.enabled ? ['זרימה'] : []),
+    ...(sessionDesignMode.enabled ? ['עיצוב וקנבס'] : []), ...(sessionUxMode.enabled ? ['חוויית משתמש'] : []),
+    ...(selectedActionRestriction ? ['הגבלת פעולה'] : [])];
   const modelPermissionTone = useMemo(
     () => getPermissionTone(modelPermissionSnapshot),
     [modelPermissionSnapshot]
@@ -22528,7 +22765,6 @@ export function CodexMobileApp() {
     }
 
     void loadCurrentSessionInstruction(profileId, currentQueueKey);
-    void loadCurrentSessionFinalNotification(profileId, currentQueueKey);
     void loadCurrentSessionContextSelection(profileId, currentQueueKey);
     void loadCurrentSessionBrowserMode(profileId, currentQueueKey);
     void loadCurrentSessionDesignMode(profileId, currentQueueKey);
@@ -22540,6 +22776,15 @@ export function CodexMobileApp() {
     void loadCurrentSessionFlowMode(profileId, currentQueueKey);
     void loadCurrentSessionReminders(profileId, currentQueueKey);
   }, [currentQueueKey, profileId]);
+
+  useEffect(() => {
+    setSessionFinalNotification(createDefaultSessionFinalNotificationPreference());
+    setIsFinalNotificationSaving(false);
+    setIsFinalNotificationLoading(false);
+    setIsFinalNotificationDialogOpen(false);
+    setIsFocusModeDialogOpen(false);
+    void loadCurrentSessionFinalNotification(profileId, currentQueueKey);
+  }, [currentQueueKey, profileId, serverId]);
 
   useEffect(() => {
     if (!profileId) {
@@ -23125,6 +23370,18 @@ export function CodexMobileApp() {
                 </button>
                 <button
                   type="button"
+                  data-testid="server-status-button"
+                  onClick={() => {
+                    setIsHeaderActionsOpen(false);
+                    setIsServerStatusOpen(true);
+                  }}
+                  className="col-span-2 flex min-h-11 items-center justify-center gap-2 rounded-[1.25rem] bg-emerald-50 px-3 py-3 text-center text-emerald-800 transition hover:bg-emerald-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600"
+                >
+                  <Gauge className="h-5 w-5" />
+                  <span className="text-xs font-semibold">מצב שרת</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => {
                     setIsTranscriptCollapsed((current) => !current);
                     setIsHeaderActionsOpen(false);
@@ -23277,6 +23534,23 @@ export function CodexMobileApp() {
             </div>
           )}
 
+          {conversationFailure && <div role="status" data-testid="incomplete-run-banner" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-800">
+            <div className="font-semibold">נעצרה · המשימה לא הושלמה</div>
+            <div>{failureKindLabel(conversationFailure.failureKind)}</div>
+            <div className="text-xs">אין החלפה או שליחה חוזרת אוטומטית; ההיסטוריה והכשל המקורי נשמרו.</div>
+          </div>}
+          {latestConversationQueueItem?.progressGuardWarning && <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-6 text-amber-900">
+            זוהתה חזרה על אותה פקודה שנכשלה. {latestConversationQueueItem.progressGuardWarning.intervention === 'applied'
+              ? 'נשלחה הנחיית מיקוד אחת בתוך התור הקיים.'
+              : latestConversationQueueItem.progressGuardWarning.intervention === 'claimed' ? 'הנחיית המיקוד נמצאת בבדיקה; אין שליחה חוזרת.' : 'לא ניתן היה לאמת קבלת הנחיית המיקוד; לא נשלחה שוב.'}
+          </div>}
+
+          {selectedSession?.source === 'history-db' && (
+            <div role="status" className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+              היסטוריה משוחזרת: ההודעות והכלים שמורים, אך קובץ השיחה המקורי חסר. אפשר לצפות בתהליך; המשך עבודה באותה שיחה מחייב שחזור של קובץ המקור.
+            </div>
+          )}
+
           {selectedSession?.agentSession?.plan && (
             <AgentSessionPlanCard
               record={{
@@ -23294,7 +23568,18 @@ export function CodexMobileApp() {
             />
           )}
 
-          {timelineBlocks.map((block) => {
+          {timelineWithQuestions.map((block) => {
+            if (block.type === 'user-input') {
+              return (
+                <UserInputQuestionCard
+                  key={`${userInputScope}:${block.request.id}`}
+                  request={block.request}
+                  submitting={userInput.submittingId === block.request.id}
+                  error={userInput.error?.id === block.request.id ? userInput.error.message : null}
+                  onSubmit={response => userInput.answer(block.request.id, response)}
+                />
+              );
+            }
             if (block.type === 'tool-row') {
               return (
                 <ToolGroupCard
@@ -23316,7 +23601,7 @@ export function CodexMobileApp() {
                 <StatusRow
                   key={block.entry.id}
                   entry={block.entry}
-                  onContinue={block.entry.id === latestAbortedTimelineEntryId
+                  onContinue={(block.entry.id === latestAbortedTimelineEntryId || block.entry.id === currentNativeFailure?.entryId)
                     && canContinueInterruptedSession
                     && !interruptedQueueItem
                     ? () => void continueAbortedSession()
@@ -23331,7 +23616,9 @@ export function CodexMobileApp() {
                 key={block.entry.id}
                 entry={block.entry}
                 wordExportName={selectedSession?.title || 'תשובת Codex'}
-                onOpenFilePreview={(rawPath) => void handleOpenFilePreview(rawPath)}
+                sourceServerId={serverId}
+                sourceCwd={activeSessionCwd || currentProfile?.workspaceCwd}
+                onOpenFilePreview={handleOpenFilePreview}
                 onOpenChanges={selectedSession ? (entryId) => void openSessionChangesForEntry(entryId) : undefined}
                 onFork={selectedSession ? (entryId) => forkFromTimelineEntry(entryId) : undefined}
                 onAddReminder={selectedConversationId ? (entry) => openCreateReminderDialog(entry) : undefined}
@@ -23434,10 +23721,13 @@ export function CodexMobileApp() {
         </main>
 
         <div
+          data-testid="conversation-composer"
           className="flex-none border-t border-slate-100/50 bg-gradient-to-t from-white via-white to-transparent pt-4"
           style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.25rem)' }}
         >
           <div className="px-4 pb-4">
+            {currentProfile?.provider === 'codex' && <WorkModeStatus profileId={profileId} sessionKey={currentQueueKey} mode={workModes.mode}
+              serverId={serverId} request={fetchJsonForServer} />}
             {error && (
               <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {error}
@@ -23544,8 +23834,9 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionProjectMode.enabled || sessionConversationSearchMode.enabled || sessionFlowMode.enabled || sessionDesignMode.enabled || sessionUxMode.enabled || sessionPersonalChromeMode.enabled || sessionPhoneMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionProjectModeLoading || isSessionConversationSearchModeLoading || isSessionFlowModeLoading || isSessionDesignModeLoading || isSessionUxModeLoading || isSessionPersonalChromeModeLoading || isSessionPhoneModeLoading) && (
+            {(workModeNames.length > 0 || selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionProjectMode.enabled || sessionConversationSearchMode.enabled || sessionFlowMode.enabled || sessionDesignMode.enabled || sessionUxMode.enabled || sessionPersonalChromeMode.enabled || sessionPhoneMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionProjectModeLoading || isSessionConversationSearchModeLoading || isSessionFlowModeLoading || isSessionDesignModeLoading || isSessionUxModeLoading || isSessionPersonalChromeModeLoading || isSessionPhoneModeLoading) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
+                {workModeNames.length > 0 && <WorkModeBadges mode={workModes.mode} onOpen={openWorkModeDialog} />}
                 {isProfessionalModeSelected && (
                   <button
                     type="button"
@@ -23595,7 +23886,7 @@ export function CodexMobileApp() {
                     className="inline-flex max-w-full items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100"
                   >
                     <Chrome className="h-3.5 w-3.5" />
-                    <span className="truncate">Chrome אישי · {sessionPersonalChromeMode.deviceName || 'מכשיר מזווג'} · {getPersonalChromeApprovalPolicyLabel(sessionPersonalChromeMode.approvalPolicy)}</span>
+                    <span className="truncate">תוסף Chrome · {personalChromeDevices.find(device => device.id === sessionPersonalChromeMode.deviceId)?.name || sessionPersonalChromeMode.deviceName || 'מכשיר מזווג'} · {getPersonalChromeApprovalPolicyLabel(sessionPersonalChromeMode.approvalPolicy)}</span>
                   </button>
                 )}
                 {sessionPhoneMode.enabled && (
@@ -24001,7 +24292,9 @@ export function CodexMobileApp() {
                                   ? 'בודק עדכון Codex…'
                                   : modelCliUpdateSnapshot.state === 'error'
                                     ? 'עדכון אוטומטי ינסה שוב'
-                                    : `CLI ${modelCliUpdateSnapshot.currentVersion || '—'} • עדכון אוטומטי`}
+                                    : modelCliUpdateSnapshot.state === 'available'
+                                      ? `CLI ${modelCliUpdateSnapshot.currentVersion || '—'} • זמינה גרסה ${modelCliUpdateSnapshot.latestVersion}`
+                                      : `CLI ${modelCliUpdateSnapshot.currentVersion || '—'} • עדכון אוטומטי`}
                               </div>
                             )}
                           </div>
@@ -24622,7 +24915,7 @@ export function CodexMobileApp() {
                           onClick={openModePickerDialog}
                           className={cn(
                             'flex w-full items-center justify-between gap-3 rounded-[0.9rem] border px-3 py-2 text-right transition',
-                            isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || selectedAgentSessionDraft
+                            activeModeNames.length > 0
                               ? 'border-indigo-200 bg-indigo-50/70'
                               : 'border-slate-100 bg-slate-50/80 hover:border-indigo-200 hover:bg-indigo-50/50'
                           )}
@@ -24630,35 +24923,21 @@ export function CodexMobileApp() {
                           <div className="min-w-0">
                             <div className="text-[11px] font-semibold text-slate-700">מצבים</div>
                             <div className="text-[9px] text-slate-400">
-                              {selectedAgentSessionDraft
-                                ? `סוכנים: ${selectedAgentSessionDraft.title}`
-                                : isGoalModeSelected
-                                  ? 'מטרה · עד 10 שלבי המשך אוטומטיים'
-                                : isProfessionalModeSelected
-                                  ? 'מקצועי · תכנון, ביצוע ובדיקה'
-                                : isAnnotationsModeSelected
-                                  ? 'ביאורים · ביצוע ודוח Markdown'
-                                  : 'מקצועי, מטרה, ביאורים או סוכנים'}
+                              {activeModeNames.length > 0 ? `${activeModeNames.length} פעילים · ${activeModeNames.join(' · ')}` : 'דפדפן, מיקוד, הגיוני, הכרעה, קנבס ועוד'}
                             </div>
                           </div>
-                          <LayoutGrid className={cn('h-4 w-4 shrink-0', isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || selectedAgentSessionDraft ? 'text-indigo-600' : 'text-indigo-500')} />
+                          <LayoutGrid className={cn('h-4 w-4 shrink-0', activeModeNames.length > 0 ? 'text-indigo-600' : 'text-indigo-500')} />
                         </button>
                       </div>
                     </div>
                   )}
                 </div>
 
-                <button
-                  onClick={() => void enqueueCurrentPrompt()}
+                <SendPromptButton
+                  onSend={() => void enqueueCurrentPrompt()}
+                  onSaveDraft={() => void enqueueCurrentPrompt(true)}
                   disabled={isUploading || isSending || (!prompt.trim() && draftAttachments.length === 0)}
-                  className={cn(
-                    'mb-[3px] ml-[3px] shrink-0 rounded-full border border-white/80 bg-gradient-to-br from-rose-200 via-amber-100 to-sky-200 p-[0.56rem] text-slate-700 shadow-[0_12px_26px_-16px_rgba(99,102,241,0.5)] transition-all active:scale-95',
-                    'hover:from-rose-200 hover:via-amber-100 hover:to-sky-200 hover:text-slate-800',
-                    'disabled:border-slate-100 disabled:bg-slate-100 disabled:text-slate-400 disabled:shadow-none disabled:opacity-35'
-                  )}
-                >
-                  <Send className="h-4 w-4 -ml-0.5" />
-                </button>
+                />
               </div>
             </div>
 
@@ -24808,6 +25087,10 @@ export function CodexMobileApp() {
         </div>
       )}
 
+      <FocusModeDialog open={isFocusModeDialogOpen} kind={workModeDialogKind} scope={workModes.scope} serverId={serverId}
+        value={workModes.mode} loaded={workModes.loaded} saving={workModes.saving} error={workModes.error}
+        onClose={() => setIsFocusModeDialogOpen(false)} onSave={workModes.save} />
+
       {isFinalNotificationDialogOpen && (
         <div className="fixed inset-0 z-[73] flex items-end justify-center bg-slate-950/20 p-4 backdrop-blur-sm sm:items-center">
           <button
@@ -24833,7 +25116,7 @@ export function CodexMobileApp() {
                     התראה כשהשיחה מסתיימת
                   </div>
                   <div className="mt-1 text-sm leading-6 text-slate-500">
-                    רק התשובה הסופית של הסוכן תישלח לטלפון. פעולות כלים והודעות ביניים אינן נשלחות.
+                    תישלח התשובה הסופית, או התראה שההרצה נעצרה ולא הושלמה, כולל מגבלת מודל. פעולות כלים והודעות ביניים אינן נשלחות.
                   </div>
                 </div>
               </div>
@@ -24991,6 +25274,18 @@ export function CodexMobileApp() {
         onClose={closeVaultRunnerDialog}
       />
 
+      {isServerStatusOpen && (
+        <Suspense fallback={<div role="status" className="fixed inset-0 z-[96] flex items-center justify-center bg-black/40" dir="rtl"><div className="rounded-2xl bg-white p-6 text-neutral-800">טוען מצב שרת…</div></div>}>
+          <ServerStatusDialog
+            key={serverId}
+            serverId={serverId}
+            serverLabel={currentServer?.label || 'שרת מקומי'}
+            loadStatus={loadServerStatus}
+            onClose={() => setIsServerStatusOpen(false)}
+          />
+        </Suspense>
+      )}
+
       {isTerminalOpen && (
         <Suspense fallback={(
           <div className="fixed inset-0 z-[96] flex items-center justify-center bg-slate-950/45 backdrop-blur-sm" dir="rtl">
@@ -25101,6 +25396,11 @@ export function CodexMobileApp() {
       <ModePickerDialog
         isOpen={isModePickerDialogOpen}
         currentProvider={currentProfile?.provider || null}
+        workModes={workModes.mode}
+        workModesLoaded={workModes.loaded}
+        workModesError={workModes.error}
+        onOpenWorkMode={openWorkModeDialog}
+        onReloadWorkModes={() => void workModes.reload()}
         isProfessionalModeSelected={isProfessionalModeSelected}
         isAnnotationsModeSelected={isAnnotationsModeSelected}
         isGoalModeSelected={isGoalModeSelected}
@@ -25268,6 +25568,7 @@ export function CodexMobileApp() {
         onRefresh={() => void loadPersonalChromeDevices()}
         onCreatePairing={() => void createPersonalChromePairingCode()}
         onRevokeDevice={(deviceId) => void revokePersonalChromeDeviceFromDialog(deviceId)}
+        onSaveProfile={savePersonalChromeDeviceProfile}
         onSave={() => void savePersonalChromeModeDraft()}
         onDisable={() => void disablePersonalChromeMode()}
       />
@@ -26053,7 +26354,8 @@ export function CodexMobileApp() {
                         key={match.path}
                         type="button"
                         onClick={() => void handleOpenFilePreview(
-                          activeFileMatchesLineNumber ? `${match.path}:${activeFileMatchesLineNumber}` : match.path
+                          activeFileMatchesLineNumber ? `${match.path}:${activeFileMatchesLineNumber}` : match.path,
+                          filePreviewServerId
                         )}
                         className="flex w-full flex-col items-start gap-2 rounded-[1.25rem] border border-slate-100 bg-white px-4 py-4 text-right shadow-sm transition-colors hover:bg-slate-50"
                       >
@@ -26083,6 +26385,16 @@ export function CodexMobileApp() {
                 <div className="rounded-[1.5rem] border border-red-100 bg-red-50 px-4 py-4 text-sm text-red-700">
                   {filePreviewError}
                 </div>
+              ) : activeFilePreview && isHtmlFilePreview(activeFilePreview) ? (
+                <HtmlFilePreview
+                  key={`${filePreviewServerId}:${activeFilePreview.contentUrl}`}
+                  contentUrl={activeFilePreview.contentUrl}
+                  content={activeFilePreview.content}
+                  name={activeFilePreview.name}
+                  serverId={filePreviewServerId}
+                  truncated={activeFilePreview.truncated}
+                  fetchFile={fetchHtmlPreviewFile}
+                />
               ) : activeFilePreview?.previewKind === 'image' ? (
                 <div className="rounded-[1.5rem] border border-slate-100 bg-slate-50/70 p-3">
                   <img
@@ -26131,7 +26443,9 @@ export function CodexMobileApp() {
                       <MessageMarkdown
                         text={activeFilePreview.content}
                         isUser={false}
-                        onOpenFilePreview={(rawPath) => void handleOpenFilePreview(rawPath)}
+                        sourceServerId={filePreviewServerId}
+                        sourceCwd={filePreviewDirectory(activeFilePreview.path)}
+                        onOpenFilePreview={handleOpenNestedFilePreview}
                       />
                     </div>
                   ) : activeFilePreview.previewKind === 'code' ? (
