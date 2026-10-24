@@ -259,3 +259,7 @@ CODEX_REMOTE_SSH_LOCAL_PORT=22
 כלל חומת האש הציבורי של Windows כבוי אלא אם נדרשת במפורש גישת LAN ישירה.
 לאחר שהמנהרה פעילה מתחברים משרת הבקרה באמצעות
 `ssh -p 44022 <windows-user>@127.0.0.1`.
+
+## רישיון
+
+Code AI היא תוכנת קוד פתוח ברישיון [MIT](https://github.com/binacshera-ui/code-ai/blob/main/LICENSE). לתלויות ולרכיבי צד שלישי חלים הרישיונות שלהם.

@@ -1,6 +1,7 @@
 {
   "name": "code-ai",
   "version": "1.0.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "test": "node scripts/test-question-images.mjs",

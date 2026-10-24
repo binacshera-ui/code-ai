@@ -223,6 +223,7 @@ async function main() {
     'skills',
     'scripts',
     '.env.example',
+    'LICENSE',
     'AGENT.md',
     'AGENT.he.md',
     'WINDOWS.FIELD-NOTES.he.md',

@@ -186,3 +186,7 @@ If you are looking for operational details, use:
 - `deploy/code-ai/install.mjs`
 - `ecosystem.config.cjs`
 - `AGENT.md`
+
+## License
+
+Code AI is open source under the [MIT License](https://github.com/binacshera-ui/code-ai/blob/main/LICENSE). Third-party dependencies and components retain their own licenses.
