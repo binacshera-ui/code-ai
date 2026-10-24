@@ -40,3 +40,11 @@ __pycache__/
 *.key
 *.p12
 *.pfx
+
+# Historical host-local aliases; their canonical source is under server/.
+/ops/fleet-update-20261014/codexNativeTransport.mjs
+/ops/fleet-update-20261014/codexRpcDiagnostic.mjs
+/ops/fleet-update-20261014/codexSharedHistory.mjs
+/ops/fleet-update-20261014/codexSharedSubmission.mjs
+/ops/fleet-update-20261014/codexUserInput.ts
+/ops/fleet-update-20261014/providerProcessLifecycle.ts

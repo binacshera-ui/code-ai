@@ -369,7 +369,7 @@ export const CODEX_APP_CONFIG = {
   trustedPersonalChromeExtensionIds: parseCsv(process.env.CODEX_PERSONAL_CHROME_TRUSTED_EXTENSION_IDS)
     .map((extensionId) => extensionId.toLowerCase())
     .filter((extensionId) => /^[a-p]{32}$/.test(extensionId)),
-  sessionSecret: process.env.SESSION_SECRET || 'code-ai-session-secret',
+  sessionSecret: process.env.SESSION_SECRET || '',
   databaseUrl: process.env.DATABASE_URL?.trim() || '',
   sessionCookieDomain: process.env.SESSION_COOKIE_DOMAIN?.trim() || '',
 };

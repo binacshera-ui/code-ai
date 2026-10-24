@@ -11,7 +11,7 @@ const {assertPrivateNativeEndpoint,validateBrokerJournal}=await import(pathToFil
 const {readSharedHistoryTurns}=await import(pathToFileURL(candidate+'/server/codexSharedHistory.mjs'));
 await assertPrivateNativeEndpoint(dir+'/engine.sock',home);
 const custody=JSON.parse(await fs.readFile(dir+'/ownership.json','utf8'));
-assert.equal(custody.codexHome,home);
+assert.equal(custody.codexHome,await fs.realpath(home));
 const stat=await fs.readFile('/proc/'+custody.nativePid+'/stat','utf8');
 assert.equal(stat.slice(stat.lastIndexOf(')')+2).trim().split(/\s+/)[19],custody.nativeIdentity.startTime);
 const W=createRequire(candidate+'/package.json')('ws'),w=new W('ws+unix://'+dir+'/engine.sock:/',{maxPayload:64*1024*1024,handshakeTimeout:5000});
@@ -20,7 +20,7 @@ w.on('message',b=>{let f;try{f=JSON.parse(b.toString());}catch{return w.terminat
 const rpc=(method,params)=>new Promise((y,x)=>{const id=++n,t=setTimeout(()=>{pending.delete(id);x(Error('census_timeout'));},10000);pending.set(id,{y,x,t});w.send(JSON.stringify({id,method,params}));});
 try{
  await new Promise((y,x)=>{w.once('open',y);w.once('error',x);});
- const init=await rpc('initialize',{clientInfo:{name:'code-ai-large-frame-idle-census',version:'1'},capabilities:{experimentalApi:true}});assert.equal(init.codexHome,home);
+ const init=await rpc('initialize',{clientInfo:{name:'code-ai-large-frame-idle-census',version:'1'},capabilities:{experimentalApi:true}});assert.equal(init.codexHome,await fs.realpath(home));
  w.send(JSON.stringify({method:'initialized',params:{}}));
  const loaded=await rpc('thread/loaded/list',{});assert.ok(Array.isArray(loaded.data));assert.ok(!loaded.nextCursor);
  const threads=[];
