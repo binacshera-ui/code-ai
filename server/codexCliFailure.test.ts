@@ -10,18 +10,18 @@ const profile: CodexProfile = {
   id: 'developer',
   label: 'Developer',
   provider: 'codex',
-  codexHome: '/home/developer/.codex',
+  codexHome: '/home/example/.codex',
   workspaceCwd: '/srv/workspace',
 };
 
 test('active-writer conflicts identify the exact conversation without blocking the profile', () => {
   const message = sanitizeCodexCliFailure(
     profile,
-    'Failed to create session: thread-store conflict: thread 019fedcd-32f3-7810-9c0e-d40881ea5cee already has an active writer',
+    'Failed to create session: thread-store conflict: thread 00000000-0000-4000-8000-000000000101 already has an active writer',
     'Codex failed'
   );
 
-  assert.match(message, /conversation "019fedcd-32f3-7810-9c0e-d40881ea5cee" is already open/i);
+  assert.match(message, /conversation "00000000-0000-4000-8000-000000000101" is already open/i);
   assert.match(message, /only this conversation is locked/i);
   assert.match(message, /other conversations remain available/i);
   assert.doesNotMatch(message, /profile "Developer" is already active/i);
@@ -66,7 +66,7 @@ test('real permission errors avoid unsafe ownership commands and inherited USER 
 });
 
 test('selected sessions always resume the same id with remote compaction v2', () => {
-  const sessionId = '019f184c-f25b-7c30-aa24-6ddd98f49c5c';
+  const sessionId = '00000000-0000-4000-8000-000000000102';
   const args = buildCodexInvocationArgs(
     ['--dangerously-bypass-approvals-and-sandbox', '--sandbox', 'danger-full-access'],
     sessionId,

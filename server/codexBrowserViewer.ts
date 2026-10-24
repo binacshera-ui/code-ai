@@ -164,13 +164,6 @@ interface BrowserHttpBridgeEndpoint {
   url: string;
 }
 
-// standalone-strip:start private-runtime-integration
-export interface BinaBrowserSessionConnection {
-  connected: boolean;
-  legacyConnected: boolean;
-  runtimeConnected: boolean;
-}
-// standalone-strip:end private-runtime-integration
 
 function buildViewerKey(profileId: string, sessionKey: string) {
   return `${profileId}:${sessionKey}`;
@@ -585,34 +578,6 @@ class BrowserViewerBridge {
     });
   }
 
-  // standalone-strip:start private-runtime-integration
-  async syncBinaSession(credentials: {
-    forumSession?: string | null;
-    runtimeSession?: string | null;
-  }): Promise<BinaBrowserSessionConnection> {
-    return this.enqueue(async () => {
-      await this.ensureReady();
-
-      if (this.httpBridgeUrl) {
-        const response = await fetch(`${this.httpBridgeUrl}/control/bina-session`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(this.httpBridgeToken ? { Authorization: `Bearer ${this.httpBridgeToken}` } : {}),
-          },
-          body: JSON.stringify(credentials),
-        });
-        const payload = await response.json().catch(() => null);
-        if (!response.ok || payload?.ok !== true) {
-          throw new Error(payload?.error?.message || 'Failed to synchronize the Bina browser session');
-        }
-        return payload.result as BinaBrowserSessionConnection;
-      }
-
-      return this.sendRpc('code-ai/control/sync-bina-session', credentials) as Promise<BinaBrowserSessionConnection>;
-    });
-  }
-  // standalone-strip:end private-runtime-integration
 
   async readLiveFrame(
     tabId: number,
@@ -1175,19 +1140,6 @@ export async function inspectSessionBrowserViewerPoint(
   return bridge.inspectAtPoint(x, y, tabId);
 }
 
-// standalone-strip:start private-runtime-integration
-export async function syncSessionBrowserViewerBinaAuth(
-  profile: CodexProfileConfig,
-  sessionKey: string,
-  credentials: {
-    forumSession?: string | null;
-    runtimeSession?: string | null;
-  },
-) {
-  const bridge = await resolveViewerBridge(profile, sessionKey);
-  return bridge.syncBinaSession(credentials);
-}
-// standalone-strip:end private-runtime-integration
 
 export async function closeSessionBrowserViewer(profileId: string, sessionKey: string) {
   const key = buildViewerKey(profileId, sessionKey);

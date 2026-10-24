@@ -63,7 +63,7 @@ test('overlay symlink setup corrects a stale link target', async () => {
 });
 
 test('persisted browser sessions are rebased after the Code AI repository moves', () => {
-  const legacyAppRoot = '/root/projects/legacy-monorepo/web/code-ai';
+  const legacyAppRoot = '/workspace/projects/legacy-monorepo/web/code-ai';
   const sessionDir = path.join(
     legacyAppRoot,
     '.code-ai/local/browser-mode/sessions/developer/session-123',

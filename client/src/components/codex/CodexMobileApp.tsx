@@ -6203,7 +6203,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
                 ? codeProps.className.match(/language-([A-Za-z0-9_-]+)/)
                 : null;
 
-              if (languageMatch?.[1] === 'bina-flow' || languageMatch?.[1] === 'bina_flow' || languageMatch?.[1] === 'flow-json') {
+              if (languageMatch?.[1] === 'code-ai-flow' || languageMatch?.[1] === 'code_ai_flow' || languageMatch?.[1] === 'flow-json') {
                 return (
                   <div className="my-3 flex items-center gap-2 rounded-2xl border border-teal-100 bg-gradient-to-l from-teal-50 to-violet-50 px-4 py-3 text-xs font-medium text-teal-800" dir="rtl">
                     <GitBranch className="h-4 w-4 shrink-0" />
@@ -8759,7 +8759,7 @@ function FolderPickerDialog({
                     onOpenPath();
                   }
                 }}
-                placeholder="/root/projects או C:\\repo"
+                placeholder="/workspace או C:\\repo"
                 dir="ltr"
                 className="h-10 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm text-slate-700 outline-none transition focus:border-slate-300"
               />
@@ -12024,7 +12024,7 @@ function TopicManagerDialog({
             <input
               value={triggerLabel}
               onChange={(event) => onChangeTriggerLabel(event.target.value)}
-              placeholder="שם לטריגר, לדוגמה התראות MAKE2"
+              placeholder="שם לטריגר, לדוגמה התראות הפרויקט"
               className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-700 outline-none transition focus:border-indigo-300"
             />
 

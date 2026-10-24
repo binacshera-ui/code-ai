@@ -52,7 +52,7 @@ test('workspace overrides persist, batch, rebind and delete independently per pr
 });
 
 test('workspace move prompt carries the new active path into the session', () => {
-  const prompt = buildWorkspaceMovePrompt('/root/projects/new-workspace');
+  const prompt = buildWorkspaceMovePrompt('/workspace/projects/new-workspace');
   assert.match(prompt, /עברנו למקור תיקייה פעילה חדשה/u);
   assert.match(prompt, /הנתיב הפעיל הוא: \/root\/projects\/new-workspace/u);
   assert.match(prompt, /workspace הפעיל/u);

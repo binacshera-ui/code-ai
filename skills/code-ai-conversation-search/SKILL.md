@@ -26,10 +26,10 @@ Use `scripts/search_sessions.mjs` from this skill directory. Pass every profile 
 node scripts/search_sessions.mjs \
   --scope project \
   --query 'מערכת לוגים חדשה' \
-  --project-root /root/projects/bina-cshera \
+  --project-root /workspace/project \
   --session-id SESSION_ID \
-  --profile developer=/home/developer/.codex \
-  --profile developer2=/home/developer2/.codex \
+  --profile developer=/home/example/.codex \
+  --profile developer2=/home/example-secondary/.codex \
   --titles-file /path/to/session-titles.json \
   --index-root /path/to/.code-ai/local/conversation-search-mode/index-v1 \
   --base-url https://app-codex.example \

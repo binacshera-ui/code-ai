@@ -57,23 +57,19 @@ const INCIDENT_CENTER_ROOT = path.join(CODEX_APP_CONFIG.storageRoot, 'incident-c
 const INCIDENT_CONTEXT_ROOT = path.join(INCIDENT_CENTER_ROOT, 'context');
 const FAILURE_HANDLING_BASE_URL = String(
   process.env.CODEX_INCIDENT_FAILURE_URL ||
-  process.env.BC2_FAILURE_URL ||
-  `http://127.0.0.1:${process.env.BC2_FAILURE_PORT || 8210}`
+  ''
 ).replace(/\/+$/g, '');
 const FAILURE_HANDLING_AUTH_TOKEN = String(
   process.env.CODEX_INCIDENT_FAILURE_AUTH_TOKEN ||
-  process.env.BC2_FAILURE_AUTH_TOKEN ||
   ''
 ).trim();
 const DEFAULT_INCIDENT_PROFILE_ID = String(
   process.env.CODEX_INCIDENT_PROFILE_ID ||
-  process.env.BC2_FAILURE_INCIDENT_PROFILE_ID ||
   CODEX_APP_CONFIG.defaultProfileId ||
   ''
 ).trim();
 const DEFAULT_INCIDENT_SESSION_ID = String(
   process.env.CODEX_INCIDENT_SESSION_ID ||
-  process.env.BC2_FAILURE_INCIDENT_SESSION_ID ||
   ''
 ).trim();
 
@@ -97,6 +93,7 @@ function failureHeaders() {
 }
 
 async function requestJson(pathname: string, options: RequestInit = {}) {
+  if (!FAILURE_HANDLING_BASE_URL) throw new Error('CODEX_INCIDENT_FAILURE_URL is required');
   const response = await fetch(`${FAILURE_HANDLING_BASE_URL}${pathname}`, {
     ...options,
     headers: {
@@ -292,16 +289,16 @@ function buildWakePrompt(caseRecord: IncidentCaseRecord, taskType: string, conte
       ? '3. שמור דוח ביצוע מלא עם כל שינוי, בדיקה, פריסה ואימות.'
       : '3. חקור לעומק, הפרד בין עובדה להשערה, והגש דוח ברור עם המלצה אחת.',
     '4. עדכן את תיק ההכרעה באמצעות הסקריפט:',
-    'node /root/projects/code-ai/scripts/incident-case-update.mjs ...',
+    `node ${JSON.stringify(path.join(CODEX_APP_CONFIG.appRoot, 'scripts', 'incident-case-update.mjs'))} ...`,
     '',
     'אם זו חקירה או מענה למפעיל:',
-    `node /root/projects/code-ai/scripts/incident-case-update.mjs report --case ${caseRecord.caseId} --context ${contextFilePath} --summary-file <path-to-your-json>`,
+    `node ${JSON.stringify(path.join(CODEX_APP_CONFIG.appRoot, 'scripts', 'incident-case-update.mjs'))} report --case ${caseRecord.caseId} --context ${contextFilePath} --summary-file <path-to-your-json>`,
     '',
     'אם זו הודעה חופשית למפעיל:',
-    `node /root/projects/code-ai/scripts/incident-case-update.mjs message --case ${caseRecord.caseId} --text-file <path-to-text> --kind investigator_reply`,
+    `node ${JSON.stringify(path.join(CODEX_APP_CONFIG.appRoot, 'scripts', 'incident-case-update.mjs'))} message --case ${caseRecord.caseId} --text-file <path-to-text> --kind investigator_reply`,
     '',
     'אם זו משימת ביצוע:',
-    `node /root/projects/code-ai/scripts/incident-case-update.mjs execution --case ${caseRecord.caseId} --context ${contextFilePath} --summary-file <path-to-your-json>`,
+    `node ${JSON.stringify(path.join(CODEX_APP_CONFIG.appRoot, 'scripts', 'incident-case-update.mjs'))} execution --case ${caseRecord.caseId} --context ${contextFilePath} --summary-file <path-to-your-json>`,
   ].filter(Boolean).join('\n');
 }
 

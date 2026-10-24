@@ -7,11 +7,11 @@ import {
 
 test('remote notification links preserve the selected server', () => {
   const route = readSessionRoute(
-    'https://code-ai.test/session/beam-user/session-123?server=beam-10g',
+    'https://code-ai.test/session/beam-user/session-123?server=remote-a',
   );
 
   assert.deepEqual(route, {
-    serverId: 'beam-10g',
+    serverId: 'remote-a',
     profileId: 'beam-user',
     sessionKey: 'session-123',
     sessionId: 'session-123',
@@ -24,11 +24,11 @@ test('remote notification links preserve the selected server', () => {
 test('session navigation keeps the remote server query parameter', () => {
   assert.equal(
     buildSessionHref(
-      'https://code-ai.test/session/beam-user/old-session?server=beam-10g',
+      'https://code-ai.test/session/beam-user/old-session?server=remote-a',
       'beam-user',
       'new-session',
       'session',
     ),
-    '/session/beam-user/new-session?server=beam-10g',
+    '/session/beam-user/new-session?server=remote-a',
   );
 });

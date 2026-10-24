@@ -8,8 +8,8 @@ The complete loop is:
 
 1. The user enables Flow Creation Mode for a draft or an existing session.
 2. The user creates, names, duplicates, deletes, or switches maps inside the same session.
-3. CODE-AI adds the active canonical flow, a lightweight map index, and the `bina-flow` contract to every turn.
-4. The agent investigates the real system and ends its answer with one complete `bina-flow` JSON document for that active map only.
+3. CODE-AI adds the active canonical flow, a lightweight map index, and the `code-ai-flow` contract to every turn.
+4. The agent investigates the real system and ends its answer with one complete `code-ai-flow` JSON document for that active map only.
 5. The server validates and versions the document before persisting it into the targeted map.
 6. A “צפה בזרימה” action opens the React Flow canvas and map shelf.
 7. The user can move, connect, add, edit, or remove modules and save a new map revision.
@@ -21,7 +21,7 @@ Use `@xyflow/react` 12.11.6 as the interaction engine, pin `@dagrejs/dagre` 3.1.
 
 Why:
 
-- The same engine is already proven in Bina Cshera 3.0's workflow builder.
+- The flow view uses the graph engine to arrange connected workflow nodes.
 - It supplies the hard canvas primitives: pan, zoom, fit view, selection, connection handles, keyboard deletion, controls, and MiniMap.
 - It is MIT licensed and actively maintained.
 - It does not dictate our domain model, persistence, validation, prompts, or visual language.
@@ -33,7 +33,7 @@ Rejected alternatives:
 - A custom SVG/canvas engine would duplicate mature interaction and accessibility work.
 - ELK Layered is stronger for deeply nested compound graphs and advanced port routing, but `elkjs` 0.12.0 adds a substantially larger runtime and its EPL-2.0/GPL licensing is less convenient for this client bundle. The current product does not need those missing capabilities.
 - A Mermaid-only view would be readable but would not support direct manipulation and module-level continuation.
-- Reusing Bina 3.0's workflow document one-to-one would leak execution semantics into an explanatory architecture map.
+- Architecture maps use a schema separate from workflow execution.
 
 Known Dagre boundary and integration plan:
 
@@ -66,7 +66,7 @@ The server enforces IDs, text limits, valid ownership/status values, unique modu
 - Only the active map is included as full JSON. Other maps are represented by a small title/count index, preventing prompt growth from multiplying with the number of maps.
 - A running agent turn is pinned to the active map ID and map revision captured at dispatch time. If the user switches maps meanwhile, valid output returns to the original map instead of overwriting the newly selected map. If that original map changed meanwhile, the stale output is rejected.
 - The agent must distinguish repository-owned code, managed infrastructure, containers, and external services, and attach file/URL/note evidence when known.
-- Invalid or partial `bina-flow` blocks do not replace the last valid document.
+- Invalid or partial `code-ai-flow` blocks do not replace the last valid document.
 
 ## UI architecture
 

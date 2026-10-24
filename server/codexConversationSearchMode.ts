@@ -209,7 +209,7 @@ function scopeLabel(scope: CodexConversationSearchScope): string {
 function publicSessionBaseUrl(): string {
   const host = CODEX_APP_CONFIG.publicHosts.find((candidate) => candidate.startsWith('app-codex.'))
     || CODEX_APP_CONFIG.publicHosts[0]
-    || 'app-codex.bina-cshera.co.il';
+    || 'localhost';
   return /^https?:\/\//i.test(host) ? host.replace(/\/+$/, '') : `https://${host.replace(/\/+$/, '')}`;
 }
 

@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
-import { loadEnvFile } from '../../../bina-cshera-2.0/platform/shared-runtime/src/env-file.js';
+import { loadEnvFile } from 'node:process';
 
-await loadEnvFile('/root/.bina-cshera-secrets/env/bc2-failure.env');
+// Optional operator-supplied environment file. No host path is assumed.
+if (process.env.CODEX_INCIDENT_ENV_FILE) loadEnvFile(process.env.CODEX_INCIDENT_ENV_FILE);
 
 function readFlag(args, name) {
   const index = args.indexOf(name);
@@ -67,10 +68,10 @@ const kind = readFlag(args, '--kind');
 const contextFile = readFlag(args, '--context');
 const baseUrl = String(
   process.env.CODEX_INCIDENT_FAILURE_URL ||
-  process.env.BC2_FAILURE_URL ||
-  `http://127.0.0.1:${process.env.BC2_FAILURE_PORT || 8210}`
+  ''
 ).replace(/\/+$/g, '');
-const authToken = process.env.CODEX_INCIDENT_FAILURE_AUTH_TOKEN || process.env.BC2_FAILURE_AUTH_TOKEN || '';
+const authToken = process.env.CODEX_INCIDENT_FAILURE_AUTH_TOKEN || '';
+if (!baseUrl) throw new Error('CODEX_INCIDENT_FAILURE_URL is required');
 
 let payload = {};
 if (summaryFile) {
@@ -140,6 +141,8 @@ switch (command) {
       actor_type: 'investigator',
       summary,
       status: payload.status || 'execution_in_progress',
+      case_status: ['completed', 'success', 'succeeded'].includes(payload.status)
+        ? 'waiting_completion_confirmation' : payload.status || 'execution_in_progress',
       execution_report: payload,
       changed_files: Array.isArray(payload.changed_files) ? payload.changed_files : [],
       changed_configs: Array.isArray(payload.changed_configs) ? payload.changed_configs : [],
