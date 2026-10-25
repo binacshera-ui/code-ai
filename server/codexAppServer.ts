@@ -340,20 +340,30 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
       void submissionPersistence.then(() => rejectCompletion(error), () => rejectCompletion(new CodexAppServerDetachedError(submission())));
     } else if (result) {
       // EOF lets native session writers flush before queue completion is reported.
-      // A bounded fallback handles native processes which do not close on EOF.
-      let closed = false;
-      const forceTimer = setTimeout(() => terminateProviderProcessTree(child, 500), 3_000);
+      // Process cleanup is not the turn outcome: turn/completed already proved
+      // success. In particular, inherited pipes can delay `close` after exit.
+      const finishCleanup = () => {
+        clearTimeout(forceTimer);
+        clearTimeout(deadline);
+        child.removeListener('close', finishCleanup);
+        void submissionPersistence.then(() => resolveCompletion(result), () => rejectCompletion(new CodexAppServerDetachedError(submission())));
+      };
+      const forceTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) terminateProviderProcessTree(child, 500);
+      }, 3_000);
       const deadline = setTimeout(() => {
-        if (!closed) rejectCompletion(new Error('Codex app-server did not shut down after turn completion'));
+        // Release only this run's disposable process/stdio handles. A shared
+        // native owner is outside this child process group and stays running.
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+        console.warn('Codex completed turn transport cleanup exceeded its deadline; preserving completed outcome');
+        finishCleanup();
       }, 5_000);
       forceTimer.unref?.();
       deadline.unref?.();
-      child.once('close', () => {
-        closed = true;
-        clearTimeout(forceTimer);
-        clearTimeout(deadline);
-        void submissionPersistence.then(() => resolveCompletion(result), () => rejectCompletion(new CodexAppServerDetachedError(submission())));
-      });
+      child.once('close', finishCleanup);
     }
   }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { runCodexAppServerTurn, CodexAppServerCancelledError, CodexAppServerDetachedError,
@@ -15,10 +15,18 @@ function fixture(mode: string): string {
   return `
     const readline = require('node:readline');
     const mode = ${JSON.stringify(mode)};
+    if(mode.endsWith('held-pipes')) {
+      // An independent process inherits the transport pipes, keeping close
+      // pending even after the owned adapter exits. Never a real native owner.
+      const descendant = require('node:child_process').spawn(process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'], {detached:true,stdio:['ignore',1,2]});
+      require('node:fs').writeFileSync(process.env.CODE_AI_FIXTURE_DESCENDANT_PID_FILE,String(descendant.pid));
+      descendant.unref();
+    }
     const send = m => process.stdout.write(JSON.stringify(m) + '\\n');
     const rl = readline.createInterface({input:process.stdin});
     if(mode==='graceful') rl.on('close',()=>setTimeout(()=>process.exit(0),100));
-    let initialized = false, acknowledged = false, approvals = 0;
+    let initialized = false, acknowledged = false, approvals = 0, submissions = 0;
     const nativeThread = mode.includes('child') ? 'child-thread' : 'parent-thread';
     const question = {id:'choice', header:'Target', question:'Where?', isOther:true, isSecret:false, options:[{label:'Local',description:'Here'}]};
     function userInput(){send({id:77,method:'item/tool/requestUserInput',params:{threadId:nativeThread,turnId:mode.startsWith('shared-child')||mode.startsWith('shared-recover-child')?'child-turn':'turn-one',itemId:'input-one',questions:[question],isBlocking:mode !== 'async',autoResolutionMs:1}});}
@@ -90,6 +98,7 @@ function fixture(mode: string): string {
           },20);
         } else send({id:m.id,result:{data:[],nextCursor:null}});
       } else if(m.method==='turn/start'||m.method==='thread/queue/add'){
+        if(mode.endsWith('held-pipes') && ++submissions !== 1) process.exit(41);
         if(mode==='shared-managed-busy'||mode==='shared-managed-uncertain') {
           send({id:m.id,error:{code:-32001,message:'PRIVATE_ERROR_MUST_NOT_ESCAPE',data:{
             codeAiAdmission:mode==='shared-managed-busy'?'notAccepted':'uncertain',reason:'foreign-queue-pending'}}});return;
@@ -123,6 +132,7 @@ function fixture(mode: string): string {
           send({id:m.id,result:{turn:{id:'turn-one',status:'inProgress'}}});
           send({method:'turn/started',params:{threadId:'parent-thread',turn:{id:'turn-one',status:'inProgress'}}});
         }
+        if(mode.endsWith('held-pipes')) {finishOwn();return;}
         if(mode==='oversize'){process.stdout.write('x'.repeat(2000));return;}
         if(mode==='malformed'){process.stdout.write('not json\\n');return;}
         if(mode==='failed'){send({method:'turn/completed',params:{threadId:'parent-thread',turn:{id:'turn-one',status:'failed',error:{message:'private-error'}}}});return;}
@@ -277,6 +287,42 @@ test('completed turns await graceful native EOF shutdown before reporting succes
   assert.equal((await run).lastMessage, 'Done');
   assert.ok(performance.now() - beforeAnswer >= 80, 'runner resolved before native process finished its EOF flush');
 });
+
+for (const mode of ['held-pipes', 'shared-held-pipes']) {
+  test(`${mode}: slow transport cleanup cannot fail a proven completed turn or resend input`, {
+    skip: process.platform === 'win32', timeout: 12_000,
+  }, async t => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'code-ai-completed-cleanup-'));
+    const bridgePath = path.join(root, 'synthetic-adapter.cjs');
+    const pidFile = path.join(root, 'independent-pipe-holder.pid');
+    await writeFile(bridgePath, fixture(mode));
+    t.after(async () => {
+      const pid = Number(await readFile(pidFile, 'utf8').catch(() => '0'));
+      if (Number.isSafeInteger(pid) && pid > 1) {
+        try { process.kill(pid, 'SIGKILL'); } catch (error: any) { if (error.code !== 'ESRCH') throw error; }
+      }
+      await rm(root, { recursive: true, force: true });
+    });
+    const phases: string[] = [];
+    const before = performance.now();
+    const result = await runCodexAppServerTurn({ ...options(mode),
+      env: { CODE_AI_FIXTURE_DESCENDANT_PID_FILE: pidFile },
+      ...(mode.startsWith('shared') ? { sharedTransport: { bridgePath, socketPath: '/synthetic/not-installed',
+        onSubmissionChanged: state => { phases.push(state.deliveryPhase); },
+      } } : {}),
+    });
+    assert.equal(result.sessionId, 'parent-thread');
+    assert.equal(result.lastMessage, 'Done');
+    assert.ok(performance.now() - before >= 4_900, 'fixture did not exercise the cleanup deadline');
+    // The adapter's forced cleanup must not kill the independent shared owner.
+    const pidText = await readFile(pidFile, 'utf8');
+    assert.doesNotThrow(() => process.kill(Number(pidText), 0));
+    if (mode.startsWith('shared')) {
+      assert.equal(phases.at(-1), 'completed');
+      assert.equal(phases.includes('detached'), false);
+    }
+  });
+}
 
 test('already aborted runs do not spawn a process', async () => {
   const controller = new AbortController();
