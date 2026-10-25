@@ -7311,7 +7311,7 @@ function QueueItemCard({
   return (
     <div dir="rtl" className="rounded-[1.25rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
       <div className="flex flex-wrap items-center gap-2">
-        <Badge className={cn('rounded-full px-3 py-1 text-[11px] font-medium', getQueueStatusClass(queueExecutionStatus(item)))}>
+        <Badge className={cn('rounded-full px-3 py-1 text-[11px] font-medium', getQueueStatusClass(modelRetryNotice(item) ? 'scheduled' : queueExecutionStatus(item)))}>
           {modelRetryNotice(item) ? 'ממתין לניסיון חוזר' : getQueueStatusLabel(queueExecutionStatus(item))}
         </Badge>
         {isRecurring && (
@@ -23542,7 +23542,6 @@ export function CodexMobileApp() {
             </div>
           )}
 
-          {conversationRetryNotice && <ModelRetryNotice notice={conversationRetryNotice} />}
           {conversationFailure && !conversationRetryNotice && <div role="status" data-testid="incomplete-run-banner" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-800">
             <div className="font-semibold">נעצרה · המשימה לא הושלמה</div>
             <div>{failureKindLabel(conversationFailure.failureKind)}</div>
@@ -23735,6 +23734,7 @@ export function CodexMobileApp() {
           style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.25rem)' }}
         >
           <div className="px-4 pb-4">
+            {conversationRetryNotice && <div className="mb-3"><ModelRetryNotice notice={conversationRetryNotice} /></div>}
             {currentProfile?.provider === 'codex' && <WorkModeStatus profileId={profileId} sessionKey={currentQueueKey} mode={workModes.mode}
               serverId={serverId} request={fetchJsonForServer} />}
             {error && (
