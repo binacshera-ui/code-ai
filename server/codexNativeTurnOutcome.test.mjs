@@ -29,6 +29,7 @@ test('the exact observed native capacity message is not a quota exhaustion', () 
 });
 
 test('HTTP detail keeps only the known category and an integer HTTP status', () => {
+  assert.equal(codexNativeTurnFailure({codexErrorInfo:{responseTooManyFailedAttempts:{httpStatusCode:429}}}).kind,'rate_limit');
   const error = new CodexAppServerTurnFailedError({ codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503, message: 'PRIVATE' } } }, true);
   assert.deepEqual(error.failure, { version: 1, kind: 'provider_failure', code: 'httpConnectionFailed', httpStatusCode: 503 });
   assert.equal(error.message, 'Codex recovered native turn failed (httpConnectionFailed; HTTP 503)');

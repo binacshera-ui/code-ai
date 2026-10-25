@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { normalizeCodexModelRetry, type CodexModelRetry } from '../shared/codexModelRetry.js';
 import { latestCompletionTimes, type SessionCompletion } from './codexSessionReadState.js';
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -141,6 +142,7 @@ export interface CodexQueueItem {
   clientRequestId?: string | null;
   retryOfItemId?: string | null;
   capacityRetryPendingAt?: string | null;
+  modelRetry?: CodexModelRetry | null;
   capacityRetry?: {
     sourceItemId: string; rootItemId: string; sourceStartedAt: string | null;
     failedAt: string; sourceWorkModeRunId: string | null; attempt: number;
@@ -218,6 +220,9 @@ export type CodexQueueListItem = Pick<CodexQueueItem,
   | 'finalMessage'
   | 'error'
   | 'failureKind'
+  | 'modelRetry'
+  | 'capacityRetry'
+  | 'nativeSubmission'
   | 'progressGuardWarning'
   | 'attempts'
   | 'scheduleMode'
@@ -304,7 +309,7 @@ async function enqueueQueueOutcomeNotification(
 ): Promise<void> {
   // Keep the first failure alert and the final recovery alert; don't notify
   // the phone once per minute while the same model remains at capacity.
-  if (outcome === 'failed' && item.failureKind === 'model_capacity' && item.capacityRetry) return;
+  if (outcome === 'failed' && ['model_capacity','rate_limit'].includes(item.failureKind || '') && item.capacityRetry) return;
   const sessionKey = queueNotificationSessionKey(item);
   const notificationProfileId = item.sourceProfileId || item.profileId;
   const provider = CODEX_APP_CONFIG.profiles.find((profile) => profile.id === item.profileId)?.provider || null;
@@ -489,6 +494,7 @@ function cloneQueueItem(item: CodexQueueItem): CodexQueueItem {
   return {
     ...item,
     capacityRetry: item.capacityRetry ? { ...item.capacityRetry } : null,
+    modelRetry: normalizeCodexModelRetry(item.modelRetry),
     nativeSubmission: normalizeNativeSubmission(item.nativeSubmission, item.nativeRunId || item.id),
     attachments: item.attachments.map((attachment) => ({ ...attachment })),
     actionRestriction: item.actionRestriction
@@ -1424,6 +1430,20 @@ async function loadState() {
       }
 
       if (repairLegacyRecurringNativeSubmission(next)) changed = true;
+      next.modelRetry = normalizeCodexModelRetry(next.modelRetry);
+
+      // A crash after confirmed interruption but before the catch handler must
+      // retain the retry intent, not turn it into a user cancellation or replay.
+      if (next.status === 'running' && next.modelRetry?.turnId === next.nativeSubmission?.turnId
+          && next.nativeSubmission?.deliveryPhase === 'cancelled' && !next.nativeCancellationRequestedAt) {
+        next.status = 'failed';
+        next.failureKind = next.modelRetry.kind;
+        next.error = 'ניסיון המודל נכשל; ההרצה נעצרה בבטחה לקראת ניסיון אוטומטי נוסף.';
+        next.completedAt = nowIso();
+        next.updatedAt = next.completedAt;
+        next.capacityRetryPendingAt = next.completedAt;
+        changed = true;
+      }
 
       if (next.status === 'cancelling' && nativeSubmissionNeedsReconciliation(next.nativeSubmission)) {
         next.nativeCancellationRequestedAt ||= nowIso();
@@ -2401,6 +2421,13 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
         nativeRunId: item.nativeRunId || item.id,
         nativeSubmission: item.nativeSubmission || null,
         progressGuardEnabled: focusModeAtRun.enabled,
+        modelRetry: item.nativeCancellationRequestedAt ? null : normalizeCodexModelRetry(item.modelRetry),
+        onModelRetry: async retry => {
+          if (item.nativeCancellationRequestedAt) return;
+          item.modelRetry = normalizeCodexModelRetry(retry);
+          item.updatedAt = nowIso();
+          await persistState();
+        },
         onProgressGuardClaim: (warning) => claimQueueProgressGuard(item, warning, persistState),
         onProgressGuardWarning: async (warning) => {
           if (item.progressGuardWarning?.turnId !== warning.turnId
@@ -2938,6 +2965,9 @@ function toCodexQueueListItem(
     finalMessage: detailsIncluded ? item.finalMessage : null,
     error: item.error ? item.error.slice(0, QUEUE_LIST_ERROR_LIMIT) : null,
     failureKind: item.failureKind || null,
+    modelRetry: normalizeCodexModelRetry(item.modelRetry),
+    capacityRetry: item.capacityRetry ? { ...item.capacityRetry } : null,
+    nativeSubmission: normalizeNativeSubmission(item.nativeSubmission, item.nativeRunId || item.id),
     progressGuardWarning: item.progressGuardWarning ? { ...item.progressGuardWarning } : null,
     attempts: item.attempts,
     scheduleMode: item.scheduleMode,
@@ -3296,6 +3326,7 @@ export async function retryCodexQueueItem(
       id: randomUUID(), retryOfItemId: item.id, clientRequestId: `retry:${item.id}`,
       nativeRunId: null, lastRunNativeSubmission: null,
       capacityRetry: null, capacityRetryPendingAt: null,
+      modelRetry: null,
       nativeSubmission: null, nativeCancellationRequestedAt: null, nativeReconcileAfter: null,
       workModeRunId: null,
       scheduledAt: normalizeScheduledAt(scheduledAt), createdAt: at, updatedAt: at,

@@ -490,6 +490,8 @@ async function runAdmittedAgentPrompt(
     nativeRunId?: string;
     onNativeSubmissionChanged?: (submission: import('./codexAppServer.js').CodexSharedSubmission) => Promise<void>;
     progressGuardEnabled?: boolean;
+    modelRetry?: import('../shared/codexModelRetry.js').CodexModelRetry | null;
+    onModelRetry?: import('./codexAppServer.js').CodexAppServerRunOptions['onModelRetry'];
     onProgressGuardClaim?: import('./codexAppServer.js').CodexAppServerRunOptions['onProgressGuardClaim'];
     onProgressGuardWarning?: import('./codexAppServer.js').CodexAppServerRunOptions['onProgressGuardWarning'];
     runId?: string;

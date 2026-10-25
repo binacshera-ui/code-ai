@@ -14,9 +14,20 @@ await mkdir(path.join(storage,'queue'));
 await writeFile(path.join(storage,'queue/state.json'),JSON.stringify({items:[source('one'),source('stop'),source('manual'),source('draft'),source('delete'),source('retry'),
  source('old',{capacityRetryPendingAt:null}),source('quota',{failureKind:'usage_limit'}),source('unknown',{nativeSubmission:{clientUserMessageId:'code-ai:unknown',queuedSubmissionId:'q-unknown',turnId:null,deliveryPhase:'detached'}}),
  source('daily',{status:'scheduled',lastRunStatus:'failed',scheduleMode:'recurring',recurringFrequency:'daily',recurringTimeZone:'UTC',scheduledAt:new Date(now+86400000).toISOString(),nativeSubmission:null,nativeRunId:'future-day'}),
+ source('rate',{failureKind:'rate_limit'}),source('recovered',{status:'running',failureKind:null,nativeSubmission:{clientUserMessageId:'code-ai:recovered',queuedSubmissionId:'q-recovered',turnId:'t-recovered',deliveryPhase:'cancelled'},modelRetry:{turnId:'t-recovered',kind:'rate_limit',detectedAt:at,retryAt:new Date(now+60000).toISOString()}}),
  source('pending-stop'),source('second',{capacityRetry:{sourceItemId:'prior',rootItemId:'root',sourceStartedAt:at,failedAt:at,sourceWorkModeRunId:null,attempt:1}})],sessionBindings:{}}));
 const q=await import('./codexQueue.js');
 after(async()=>{await q.shutdownCodexQueueWorker();await rm(storage,{recursive:true,force:true})});
+test('rate-limit retries and confirmed interruption survive API restart with the original deadline',async()=>{
+ for(const id of ['rate','recovered']){
+  const a=await q.scheduleCodexCapacityContinuation(id);assert.ok(a);assert.equal(Date.parse(a.scheduledAt)-now,60000);
+  assert.equal((await q.getCodexQueueItem(id)).status,'failed');
+ }
+ const projected=await q.listCodexQueueWorkspaceItems('developer','thread-recovered');
+ const recovered=projected.items.find(x=>x.id==='recovered');assert.ok(recovered);
+ assert.equal(recovered.modelRetry?.turnId,'t-recovered');assert.equal(recovered.nativeSubmission?.deliveryPhase,'cancelled');
+ assert.ok(projected.items.some(x=>x.capacityRetry?.sourceItemId==='recovered'));
+});
 test('concurrent scheduling persists one fresh continuation and preserves the failed row and settings',async()=>{
  const [a,b]=await Promise.all([q.scheduleCodexCapacityContinuation('one'),q.scheduleCodexCapacityContinuation('one')]);assert.ok(a&&b);assert.equal(a.id,b.id);
  assert.notEqual(a.id,'one');assert.equal(a.nativeSubmission,null);assert.equal(a.model,'keep-model');assert.equal(a.permissionModeId,'restricted');assert.equal(a.reasoningEffort,'high');

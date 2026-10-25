@@ -1,5 +1,6 @@
-/** Native terminal metadata only. Assistant text and transient error notices are
- * deliberately not inputs: only the owner's failed turn proves noncompletion.
+/** Native error classification only; classification is not terminal proof.
+ * Assistant prose is never an input. Only native terminal state proves the
+ * attempt has ended, including a confirmed interruption of a retrying attempt.
  */
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 import { isCodexModelCapacityMessage } from '../shared/codexCapacity.mjs';
@@ -38,7 +39,7 @@ export function codexNativeTurnFailure(error) {
   const kind = isCodexModelCapacityMessage(object(error) ? error.message : null) || code === 'serverOverloaded' ? 'model_capacity'
     : code === 'flexUnavailable' ? 'model_unavailable'
     : code === 'usageLimitExceeded' || code === 'sessionBudgetExceeded' ? 'usage_limit'
-      : code === 'rateLimitExceeded' ? 'rate_limit'
+      : code === 'rateLimitExceeded' || httpStatusCode === 429 ? 'rate_limit'
         : code === 'contextWindowExceeded' ? 'context_limit' : 'provider_failure';
   return Object.freeze({ version: 1, kind, code, httpStatusCode });
 }

@@ -5,9 +5,10 @@ import {CAPACITY_CONTINUATION_DELAY_MS,CAPACITY_CONTINUATION_PROMPT,isCapacityCo
 const at='2026-10-23T06:00:00.000Z';
 const source=(extra={})=>({id:'failed-1',profileId:'developer',sessionId:'thread-1',queueKey:'thread-1',status:'failed',failureKind:'model_capacity',
  startedAt:'2026-10-23T05:59:00.000Z',completedAt:at,capacityRetryPendingAt:at,...extra});
-test('only actual capacity failures auto-continue, never quota/auth/general unavailability or assistant prose',()=>{
+test('only actual capacity/rate failures auto-continue, never quota/auth/general unavailability or assistant prose',()=>{
  assert.equal(isCapacityContinuationEligible(source()),true);
- for(const extra of [{failureKind:'usage_limit'},{failureKind:'model_unavailable'},{failureKind:'rate_limit'},{failureKind:'provider_failure',error:'HTTP 401'},
+ assert.equal(isCapacityContinuationEligible(source({failureKind:'rate_limit'})),true);
+ for(const extra of [{failureKind:'usage_limit'},{failureKind:'model_unavailable'},{failureKind:'provider_failure',error:'HTTP 401'},
   {status:'completed'},{status:'cancelled'},{sessionId:null},{nativeCancellationRequestedAt:at},{stopDecisionForItemId:'decision'},
   {failureKind:null,error:'The answer mentions Selected model is at capacity. Please try a different model.'}])assert.equal(isCapacityContinuationEligible(source(extra)),false);
  assert.equal(isCapacityContinuationEligible(source({failureKind:null,error:'Selected model is at capacity. Please try a different model.'})),true);

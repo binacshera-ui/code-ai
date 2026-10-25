@@ -10,7 +10,8 @@ import { getProviderProcessSpawnOptions, terminateProviderProcessTree } from './
 import { readSharedHistoryTurns } from './codexSharedHistory.js';
 import { NATIVE_FRAME_BYTES } from './codexNativeTransport.mjs';
 import { nativeRpcTimeoutMs, publicRpcDiagnostic, validatePublicRpcDiagnostic } from './codexRpcDiagnostic.mjs';
-import { CodexAppServerTurnFailedError } from './codexNativeTurnOutcome.mjs';
+import { CodexAppServerTurnFailedError, codexNativeTurnFailure } from './codexNativeTurnOutcome.mjs';
+import { normalizeCodexModelRetry, type CodexModelRetry } from '../shared/codexModelRetry.js';
 import { createCodexProgressGuard } from './codexProgressGuard.mjs';
 export { CodexAppServerTurnFailedError, isCodexAppServerTurnFailedError } from './codexNativeTurnOutcome.mjs';
 
@@ -71,6 +72,10 @@ export interface CodexAppServerRunOptions {
   /** Durable one-use claim BEFORE steering; survives reconnecting this adapter. */
   onProgressGuardClaim?: (warning: CodexProgressGuardClaim) => Promise<boolean>;
   onProgressGuardWarning?: (warning: CodexProgressGuardWarning) => Promise<void>;
+  /** Only the durable queue owner can opt in to bounded model retries. */
+  modelRetry?: CodexModelRetry | null;
+  onModelRetry?: (retry: CodexModelRetry | null) => Promise<void>;
+  readModelRetry?: (threadId: string, turnId: string) => Promise<{turnId: string; kind: 'rate_limit' | 'model_capacity'; observedAt: string} | null>;
   signal?: AbortSignal;
   registry?: CodexUserInputRegistry;
   requestTimeoutMs?: number;
@@ -127,6 +132,14 @@ export interface CodexAppServerRunResult {
 
 export class CodexAppServerCancelledError extends Error {
   constructor() { super('Codex run was cancelled'); this.name = 'CodexAppServerCancelledError'; }
+}
+
+/** A failed sampling attempt whose native turn was CONFIRMED interrupted. */
+export class CodexAppServerRetryStoppedError extends CodexAppServerTurnFailedError {
+  constructor(public readonly retry: CodexModelRetry) {
+    super({ codexErrorInfo: retry.kind === 'rate_limit' ? 'rateLimitExceeded' : 'serverOverloaded' });
+    this.name = 'CodexAppServerRetryStoppedError';
+  }
 }
 
 /** The native owner still owns accepted work; never retry it as a new prompt. */
@@ -264,6 +277,12 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
   let nativeCancelDeadline: ReturnType<typeof setTimeout> | null = null;
   let queuedRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   let queuedRecoveryBusy = false;
+  let modelRetry = normalizeCodexModelRetry(options.modelRetry);
+  let retryInterruptSent = false;
+  let retryProbeBusy = false;
+  let retryProbe: ReturnType<typeof setInterval> | null = null;
+  let lastNativeProgressAt = 0;
+  let nativeProgressGeneration = 0;
   let submissionPersistence = Promise.resolve();
   const ownedChildThreads = new Set<string>();
   let reconcilingSharedSubmission = Boolean(options.sharedTransport?.resumeSubmission);
@@ -305,6 +324,7 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
   function stop(error?: Error, result?: CodexAppServerRunResult): void {
     if (stopped) return;
     if (queuedRecoveryTimer) clearTimeout(queuedRecoveryTimer);
+    if (retryProbe) clearInterval(retryProbe);
     if (options.sharedTransport && nativeSubmissionPossible && error && !(error instanceof CodexAppServerCancelledError)) {
       deliveryPhase = 'detached';
       error = new CodexAppServerDetachedError(submission());
@@ -365,6 +385,53 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
       deadline.unref?.();
       child.once('close', finishCleanup);
     }
+  }
+
+  function interruptionOutcome(): Error {
+    if (modelRetry?.turnId === turnId && !options.signal?.aborted) return new CodexAppServerRetryStoppedError(modelRetry);
+    cancelled = true;
+    return new CodexAppServerCancelledError();
+  }
+
+  async function interruptForModelRetry(kind: CodexModelRetry['kind']): Promise<void> {
+    if (!options.onModelRetry || stopped || aborting || retryInterruptSent || !ownTurnKnown || !turnId
+        || reconcilingSharedSubmission || options.signal?.aborted) return;
+    retryInterruptSent = true;
+    const progressBeforeClaim = nativeProgressGeneration;
+    if (modelRetry?.turnId !== turnId) {
+      const detectedAt = new Date().toISOString();
+      modelRetry = { turnId, kind, detectedAt, retryAt: new Date(Date.parse(detectedAt) + 60_000).toISOString() };
+    }
+    try {
+      // Persist BEFORE interruption. Lost acknowledgements reconcile the SAME
+      // native turn and can never create another prompt or replace a user stop.
+      await options.onModelRetry(modelRetry);
+      if (stopped || options.signal?.aborted) return;
+      if (nativeProgressGeneration !== progressBeforeClaim) {
+        modelRetry = null; retryInterruptSent = false;
+        await options.onModelRetry(null);
+        return;
+      }
+      await request('turn/interrupt', { threadId: sessionId, turnId });
+      if (!stopped) {
+        nativeCancelDeadline = setTimeout(() => stop(new CodexAppServerDetachedError(submission())), options.requestTimeoutMs ?? 60_000);
+        nativeCancelDeadline.unref?.();
+      }
+    } catch { if (!stopped) stop(new CodexAppServerDetachedError(submission())); }
+  }
+
+  async function probeModelRetry(): Promise<void> {
+    if (!options.onModelRetry || stopped || aborting || retryInterruptSent || retryProbeBusy
+        || !ownTurnKnown || !turnId || reconcilingSharedSubmission) return;
+    if (modelRetry?.turnId === turnId) { await interruptForModelRetry(modelRetry.kind); return; }
+    if (!options.readModelRetry) return;
+    retryProbeBusy = true;
+    const expectedTurn = turnId;
+    try {
+      const observed = await options.readModelRetry(sessionId, expectedTurn);
+      if (observed?.turnId === turnId && turnId === expectedTurn
+          && Date.parse(observed.observedAt) + 1000 >= lastNativeProgressAt) await interruptForModelRetry(observed.kind);
+    } finally { retryProbeBusy = false; }
   }
 
   function scheduleQueuedRecovery(): void {
@@ -485,8 +552,7 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
                   deliveryPhase = turn.status === 'interrupted' ? 'cancelled' : 'completed';
                   await persistSubmission();
                   if (turn.status === 'interrupted') {
-                    cancelled = true;
-                    stop(new CodexAppServerCancelledError());
+                    stop(interruptionOutcome());
                   } else if (turn.status === 'failed') stop(new CodexAppServerTurnFailedError(turn.error));
                   else {
                     let message = '', final = '';
@@ -769,7 +835,16 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
       registry.resolveNative(scope(), params.requestId, params.threadId);
     }
     const ownThread = params.threadId === sessionId;
+    if (ownThread && params.turnId === turnId && (frame.method.includes('/delta')
+        || ['item/started','item/completed'].includes(frame.method) && object(params.item) && params.item.type !== 'userMessage')) {
+      lastNativeProgressAt = Date.now();
+      nativeProgressGeneration++;
+    }
     if (ownThread && frame.method === 'item/completed') observeProgressGuard(params);
+    if (ownThread && frame.method === 'error' && params.turnId === turnId && params.willRetry === true) {
+      const failure = codexNativeTurnFailure(params.error);
+      if (failure.kind === 'rate_limit' || failure.kind === 'model_capacity') void interruptForModelRetry(failure.kind);
+    }
     if (ownThread && (frame.method === 'turn/started' || frame.method === 'turn/completed') && object(params.turn)
         && typeof params.turn.id === 'string') {
       if (!turnId) turnId = params.turn.id;
@@ -791,8 +866,7 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
       if (status === 'completed') {
         stop(undefined, { sessionId, lastMessage: finalMessage || lastMessage, threadPath });
       } else if (status === 'interrupted') {
-        cancelled = true;
-        stop(new CodexAppServerCancelledError());
+        stop(interruptionOutcome());
       } else if (status === 'failed') stop(new CodexAppServerTurnFailedError(params.turn.error));
       else stop(new Error('Invalid Codex native terminal turn status'));
       return;
@@ -825,6 +899,10 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
       : cancelled ? new CodexAppServerCancelledError() : new Error('Codex app-server exited before turn completion'));
   });
   options.signal?.addEventListener('abort', abort, { once: true });
+  if (options.onModelRetry) {
+    retryProbe = setInterval(() => { void probeModelRetry().catch(() => undefined); }, 5000);
+    retryProbe.unref?.();
+  }
 
   try {
     options.onSpawn?.(child);
@@ -907,14 +985,14 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
             nativeSubmissionPossible = false;
             deliveryPhase = 'cancelled';
             await persistSubmission();
-            cancelled = true;
-            stop(new CodexAppServerCancelledError());
+            stop(interruptionOutcome());
           } else if (turn.status === 'failed') {
             nativeSubmissionPossible = false;
             deliveryPhase = 'completed';
             await persistSubmission();
             throw new CodexAppServerTurnFailedError(turn.error, true);
           }
+          if (!stopped) await probeModelRetry();
           if (!stopped) await recoverOwnedChildren(turn.items);
           return await completion;
         }

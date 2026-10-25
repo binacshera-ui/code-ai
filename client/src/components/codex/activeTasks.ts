@@ -1,4 +1,5 @@
 import {queueExecutionStatus} from '../../../../shared/queueExecutionStatus';
+import type {CodexModelRetry} from '../../../../shared/codexModelRetry';
 
 export interface ActiveTaskItem {
   id: string;
@@ -6,6 +7,7 @@ export interface ActiveTaskItem {
   sessionId: string | null;
   queueKey: string;
   status: string;
+  modelRetry?: CodexModelRetry | null;
   nativeSubmission?: {deliveryPhase?:string;turnId?:string|null}|null;
   startedAt: string | null;
   promptPreview: string;

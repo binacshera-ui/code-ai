@@ -25,6 +25,9 @@ import {
 import { createPortal } from 'react-dom';
 import { planUploadBatches } from '../../../../shared/uploadLimits';
 import { queueExecutionStatus } from '../../../../shared/queueExecutionStatus';
+import type { CodexModelRetry } from '../../../../shared/codexModelRetry';
+import { ModelRetryNotice } from './ModelRetryNotice';
+import { modelRetryNotice, latestModelRetryNotice } from './modelRetryPresentation';
 import { failureKindLabel, queueFailureKind, latestNativeTimelineFailure, type CodexFailureKind } from '../../../../shared/codexRunOutcome';
 import { FocusModeDialog } from './FocusModeDialog';
 import { WorkModeStatus } from './WorkModeStatus';
@@ -681,6 +684,8 @@ interface CodexSessionTrigger {
 }
 
 interface CodexQueueServerItem {
+  modelRetry?: CodexModelRetry | null;
+  capacityRetry?: { attempt: number } | null;
   sourceProfileId?: string | null;
   workModeRunId?: string | null;
   failureKind?: CodexFailureKind | null;
@@ -7307,7 +7312,7 @@ function QueueItemCard({
     <div dir="rtl" className="rounded-[1.25rem] border border-slate-100 bg-white px-4 py-4 shadow-sm">
       <div className="flex flex-wrap items-center gap-2">
         <Badge className={cn('rounded-full px-3 py-1 text-[11px] font-medium', getQueueStatusClass(queueExecutionStatus(item)))}>
-          {getQueueStatusLabel(queueExecutionStatus(item))}
+          {modelRetryNotice(item) ? 'ממתין לניסיון חוזר' : getQueueStatusLabel(queueExecutionStatus(item))}
         </Badge>
         {isRecurring && (
           <Badge className="rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-[11px] font-medium text-indigo-700">
@@ -7392,6 +7397,8 @@ function QueueItemCard({
           )}
         </div>
       )}
+
+      {modelRetryNotice(item) && <div className="mt-3"><ModelRetryNotice notice={modelRetryNotice(item)!} /></div>}
 
       {item.error && (
         <div className="mt-3 rounded-[16px] border border-red-100 bg-red-50/70 px-3 py-2 text-xs leading-6 text-red-700">
@@ -15972,6 +15979,7 @@ export function CodexMobileApp() {
     && (latestConversationQueueItem.status === 'failed' || latestConversationQueueItem.status === 'cancelled')
     ? latestConversationQueueItem
     : null;
+  const conversationRetryNotice = useMemo(() => latestModelRetryNotice(visibleQueueItems), [visibleQueueItems]);
   const nativeTimelineFailure = useMemo(() => latestNativeTimelineFailure(selectedSession?.timeline || []), [selectedSession?.timeline]);
   const currentNativeFailure = nativeTimelineFailure && currentSessionActiveQueueCount === 0
     && Date.parse(nativeTimelineFailure.timestamp) >= Date.parse(latestConversationQueueItem?.completedAt || latestConversationQueueItem?.startedAt || '1970-01-01')
@@ -23534,7 +23542,8 @@ export function CodexMobileApp() {
             </div>
           )}
 
-          {conversationFailure && <div role="status" data-testid="incomplete-run-banner" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-800">
+          {conversationRetryNotice && <ModelRetryNotice notice={conversationRetryNotice} />}
+          {conversationFailure && !conversationRetryNotice && <div role="status" data-testid="incomplete-run-banner" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-800">
             <div className="font-semibold">נעצרה · המשימה לא הושלמה</div>
             <div>{failureKindLabel(conversationFailure.failureKind)}</div>
             <div className="text-xs">אין החלפה או שליחה חוזרת אוטומטית; ההיסטוריה והכשל המקורי נשמרו.</div>

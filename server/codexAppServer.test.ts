@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { runCodexAppServerTurn, CodexAppServerCancelledError, CodexAppServerDetachedError,
   CodexSharedOwnerSettingsMismatchError, isCodexSharedOwnerSettingsMismatchError, CodexSharedAdmissionRejectedError,
-  CodexAppServerTurnFailedError,
+  CodexAppServerTurnFailedError, CodexAppServerRetryStoppedError,
   isCodexSharedSubmissionTerminal,
   type CodexSharedSubmission, type CodexSharedOwnerSettings, type CodexAppServerRunOptions } from './codexAppServer.js';
 import { CodexUserInputRegistry } from './codexUserInput.js';
@@ -139,6 +139,13 @@ function fixture(mode: string): string {
         if(mode==='failed-code'){send({method:'turn/completed',params:{threadId:'parent-thread',turn:{id:'turn-one',status:'failed',error:{message:'private-error',codexErrorInfo:{httpConnectionFailed:{httpStatusCode:503}},additionalDetails:'private-detail'}}}});return;}
         if(mode==='failed-usage'||mode==='shared-failed-usage'){send({method:'turn/completed',params:{threadId:'parent-thread',turn:{id:'turn-one',status:'failed',error:{message:'This model is unavailable, try another model. PRIVATE_ERROR',codexErrorInfo:'usageLimitExceeded'}}}});return;}
         if(mode==='completed-quoted-error') {send({method:'item/completed',params:{threadId:'parent-thread',turnId:'turn-one',item:{type:'agentMessage',phase:'final_answer',text:'The quoted message says: this model is unavailable, try another model.'}}});send({method:'turn/completed',params:{threadId:'parent-thread',turn:{id:'turn-one',status:'completed'}}});return;}
+        if(mode.startsWith('shared-model-retry')) {
+          const notice={method:'error',params:{threadId:'parent-thread',turnId:mode.endsWith('foreign')?'desktop-turn':'turn-one',willRetry:true,error:{message:'PRIVATE_RETRY',codexErrorInfo:{responseTooManyFailedAttempts:{httpStatusCode:429}}}}};
+          send(notice);send(notice);
+          if(mode.endsWith('success'))finishOwn();
+          else if(mode.endsWith('foreign'))userInput();
+          return;
+        }
         if(mode==='retry-error'||mode==='nonretry-error-then-completed') send({method:'error',params:{threadId:'parent-thread',turnId:'turn-one',willRetry:mode==='retry-error',error:{message:'PRIVATE_RETRY',codexErrorInfo:'rateLimitExceeded'}}});
         if(mode.includes('progress-guard')) {
           for(let i=0;i<3;i++)send({method:'item/completed',params:{threadId:'parent-thread',turnId:mode.endsWith('foreign')?'desktop-turn':'turn-one',item:{id:'failed-'+i,type:'commandExecution',status:'completed',command:'synthetic failing command PRIVATE_COMMAND',aggregatedOutput:'PRIVATE_FAILURE_OUTPUT',exitCode:1}}});
@@ -171,7 +178,7 @@ function fixture(mode: string): string {
       } else if(m.method==='turn/interrupt') {
         if(m.params.turnId!=='turn-one') process.exit(28);
         send({id:m.id,result:{}});
-        if(mode==='shared-cancel-unresolved') return;
+        if(mode==='shared-cancel-unresolved'||mode==='shared-model-retry-unresolved') return;
         send({method:'turn/completed',params:{threadId:'parent-thread',turn:{id:'turn-one',status:'interrupted'}}});
       } else if(m.id===88) { process.exit(26); }
       else if(m.id>=70&&m.id<=74){
@@ -200,6 +207,62 @@ function options(mode: string, registry = new CodexUserInputRegistry()): CodexAp
     ...(mode === 'resume' ? { sessionId: 'parent-thread' } : {}),
   };
 }
+
+for (const mode of ['shared-model-retry', 'shared-model-retry-unresolved', 'shared-model-retry-success', 'shared-model-retry-persist-failure', 'shared-model-retry-manual-stop']) {
+  test(`${mode}: one durable intent, terminal proof before retry, no duplicate input`, async t => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cai-retry-'));
+    t.after(() => rm(root, {recursive:true,force:true}));
+    const bridgePath = path.join(root,'adapter.cjs');
+    await writeFile(bridgePath,fixture(mode));
+    const controller = new AbortController();
+    const intents: any[] = [], phases: string[] = [];
+    const run = runCodexAppServerTurn({...options(mode), signal:controller.signal, requestTimeoutMs:200,
+      sharedTransport:{bridgePath,socketPath:'/synthetic/not-installed',onSubmissionChanged:s=>{phases.push(s.deliveryPhase);}},
+      onModelRetry:async retry=>{
+        intents.push(retry);
+        if(mode.endsWith('persist-failure'))throw new Error('disk unavailable');
+        if(mode.endsWith('manual-stop'))controller.abort();
+      },
+    });
+    if(mode.endsWith('success'))assert.equal((await run).lastMessage,'Done');
+    else await assert.rejects(run,error=>{
+      assert.ok(error instanceof (mode.endsWith('manual-stop') ? CodexAppServerCancelledError
+        : mode.endsWith('unresolved')||mode.endsWith('persist-failure') ? CodexAppServerDetachedError : CodexAppServerRetryStoppedError));
+      if(error instanceof CodexAppServerRetryStoppedError)assert.equal(error.failure.kind,'rate_limit');
+      return true;
+    });
+    assert.equal(intents.length,1,'repeated errors must not claim a second retry');
+    assert.equal(Date.parse(intents[0].retryAt)-Date.parse(intents[0].detectedAt),60000);
+    assert.ok(!JSON.stringify(intents).includes('PRIVATE'));
+    if(mode==='shared-model-retry')assert.equal(phases.at(-1),'cancelled');
+    if(mode.endsWith('unresolved')||mode.endsWith('persist-failure'))assert.equal(phases.at(-1),'detached');
+  });
+}
+
+test('retry observer recovers a missed 429 only after exact shared client custody, without submitting again',async t=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'cai-retry-recover-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const bridgePath=path.join(root,'adapter.cjs');await writeFile(bridgePath,fixture('shared-recover-active'));
+  let observations=0,intents=0;
+  await assert.rejects(runCodexAppServerTurn({...options('shared-recover-active'),sessionId:'parent-thread',
+    sharedTransport:{bridgePath,socketPath:'/synthetic/not-installed',resumeSubmission:{clientUserMessageId:'code-ai:recovered',queuedSubmissionId:'queued-one',turnId:'turn-one',deliveryPhase:'detached'}},
+    readModelRetry:async(threadId,turnId)=>{observations++;assert.equal(threadId,'parent-thread');assert.equal(turnId,'turn-one');return {turnId,kind:'rate_limit',observedAt:new Date().toISOString()};},
+    onModelRetry:async()=>{intents++;},
+  }),CodexAppServerRetryStoppedError);
+  assert.equal(observations,1);assert.equal(intents,1);
+});
+
+test('foreign native retry cannot interrupt our active turn',async t=>{
+  const mode='shared-model-retry-foreign',root=await mkdtemp(path.join(os.tmpdir(),'cai-retry-foreign-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const bridgePath=path.join(root,'adapter.cjs');await writeFile(bridgePath,fixture(mode));
+  const registry=new CodexUserInputRegistry();let intents=0;
+  const run=runCodexAppServerTurn({...options(mode,registry),sharedTransport:{bridgePath,socketPath:'/synthetic/not-installed'},onModelRetry:async()=>{intents++;}});
+  await waitFor(()=>registry.list('codex-test','parent-thread').pendingCount===1);
+  const question=registry.list('codex-test','parent-thread').requests[0];
+  await registry.answer({profileId:'codex-test',sessionId:'parent-thread',requestId:question.id,answers:{choice:{answers:['Custom target']}}});
+  assert.equal((await run).lastMessage,'Done');assert.equal(intents,0);
+});
 
 test('safe RPC reason reaches the queue error without native messages or peer extra fields', async () => {
   await assert.rejects(runCodexAppServerTurn(options('rpc-diagnostic')), (error: unknown) => {

@@ -8,7 +8,7 @@ export const CAPACITY_CONTINUATION_PROMPT = 'Continue from the exact point where
 export function isCapacityContinuationEligible(item, now = Date.now()) {
   const failed = item.status === 'failed' || (item.scheduleMode === 'recurring' && item.status === 'scheduled' && item.lastRunStatus === 'failed');
   return Boolean(failed && item.sessionId && !item.nativeCancellationRequestedAt && !item.stopDecisionForItemId
-    && (item.failureKind === 'model_capacity' || (!item.failureKind && isCodexModelCapacityMessage(item.error)))
+    && (['model_capacity','rate_limit'].includes(item.failureKind) || (!item.failureKind && isCodexModelCapacityMessage(item.error)))
     && !nativeSubmissionNeedsReconciliation(item.nativeSubmission)
     && (!item.stopPolicy || (Date.parse(item.stopPolicy.stopAt) > now
       && ['armed', 'not-needed'].includes(item.stopPolicy.status))));
@@ -19,7 +19,7 @@ export function capacityContinuationPlan(source) {
   if (!Number.isFinite(Date.parse(failedAt)) || !isCapacityContinuationEligible(source)) return null;
   return {
     clientRequestId: `capacity-continue:${source.id}:${failedAt}`,
-    scheduledAt: new Date(Date.parse(failedAt) + CAPACITY_CONTINUATION_DELAY_MS).toISOString(),
+    scheduledAt: source.modelRetry?.retryAt || new Date(Date.parse(failedAt) + CAPACITY_CONTINUATION_DELAY_MS).toISOString(),
     prompt: CAPACITY_CONTINUATION_PROMPT,
     promptPreview: `המשך אוטומטי אחרי עומס במודל · ניסיון ${(source.capacityRetry?.attempt || 0) + 1}`,
     capacityRetry: {

@@ -1,4 +1,5 @@
 import { resolveCodexExecutionSelection } from './codexExecutionSelection.js';
+import { readCodexRetryObservation } from './codexRetryObservation.mjs';
 import { isCodexInlineImage } from './codexAttachmentInputs.js';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'child_process';
 import { randomUUID } from 'crypto';
@@ -5209,6 +5210,8 @@ export async function runCodexPrompt(
     progressGuardEnabled?: boolean;
     onProgressGuardClaim?: import('./codexAppServer.js').CodexAppServerRunOptions['onProgressGuardClaim'];
     onProgressGuardWarning?: import('./codexAppServer.js').CodexAppServerRunOptions['onProgressGuardWarning'];
+    modelRetry?: import('../shared/codexModelRetry.js').CodexModelRetry | null;
+    onModelRetry?: import('./codexAppServer.js').CodexAppServerRunOptions['onModelRetry'];
     runId?: string;
     cwd?: string;
     injectDirectoryContext?: boolean;
@@ -5402,6 +5405,9 @@ export async function runCodexPrompt(
         progressGuardEnabled: options.progressGuardEnabled,
         onProgressGuardClaim: options.onProgressGuardClaim,
         onProgressGuardWarning: options.onProgressGuardWarning,
+        modelRetry: options.modelRetry,
+        onModelRetry: options.onModelRetry,
+        readModelRetry: options.onModelRetry ? (threadId, turnId) => readCodexRetryObservation(profile.codexHome, threadId, turnId) : undefined,
         bin: CODEX_BIN, args, cwd: runCwd,
         env: buildCodexProcessEnv(profile, useSharedOwner ? null :
           preparedPhoneMode?.envCodeXHome || preparedPersonalChromeMode?.envCodeXHome || preparedBrowserMode?.envCodeXHome || preparedUxMode?.envCodeXHome || preparedDesignMode?.envCodeXHome || null),

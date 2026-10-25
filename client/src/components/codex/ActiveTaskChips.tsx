@@ -60,21 +60,24 @@ export function ActiveTaskChips<T extends ActiveTaskItem>({ scope, profileId, lo
         {snapshot.items.map(item => {
           const label = activeTaskLabel(item, titles);
           const stopping = item.status === 'cancelling';
+          const retrying = Boolean(item.modelRetry && item.modelRetry.turnId === item.nativeSubmission?.turnId);
+          const stateLabel = stopping ? 'בעצירה' : retrying ? 'נכשל · ממתין לניסיון חוזר' : 'פעילה';
           const selected = selectedSessionId === (item.sessionId || item.queueKey);
           return (
             <button
               key={item.id}
               type="button"
               data-active-task-id={item.id}
-              aria-label={`${stopping ? 'בעצירה' : 'פעילה'}: ${label}`}
+              aria-label={`${stateLabel}: ${label}`}
               aria-current={selected ? 'page' : undefined}
-              title={`${stopping ? 'בעצירה' : 'פעילה'}: ${label}`}
+              title={`${stateLabel}: ${label}`}
               onClick={() => onSelect(item)}
-              className={`inline-flex h-6 max-w-[10.5rem] items-center gap-1.5 rounded-full border px-2 text-[10px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${stopping ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'}`}
+              className={`inline-flex h-6 max-w-[10.5rem] items-center gap-1.5 rounded-full border px-2 text-[10px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${stopping || retrying ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'}`}
             >
-              <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${stopping ? 'bg-amber-500' : 'bg-emerald-500 motion-safe:animate-pulse'}`} />
+              <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${stopping || retrying ? 'bg-amber-500' : 'bg-emerald-500 motion-safe:animate-pulse'}`} />
               <span className="min-w-0 truncate">{label}</span>
               {stopping && <span className="shrink-0">· עוצר</span>}
+              {!stopping && retrying && <span className="shrink-0">· ניסיון חוזר</span>}
             </button>
           );
         })}
