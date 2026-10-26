@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'child_process';
+import { sessionListLimit } from './sessionListLimit.js';
 import { existsSync, createReadStream, promises as fs } from 'fs';
 import path from 'path';
 import readline from 'readline';
@@ -147,7 +148,6 @@ const CLAUDE_BIN = DEFAULT_CLAUDE_BIN_CANDIDATES.find((candidate) => candidate.i
   || DEFAULT_CLAUDE_BIN_CANDIDATES[0]
   || 'claude';
 const DEFAULT_PROFILE_ID = CODEX_APP_CONFIG.defaultProfileId;
-const MAX_SESSIONS = 500;
 const MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 const AUTH_STATUS_CACHE_TTL_MS = 60_000;
 const CLAUDE_USAGE_CACHE_TTL_MS = 20_000;
@@ -1709,7 +1709,7 @@ export async function updateClaudeResponseSpeed(profileId: string | undefined, m
 export async function listClaudeSessions(
   profileId?: string,
   query = '',
-  limit = MAX_SESSIONS,
+  limit?: number,
   allowExtendedLimit = false,
 ): Promise<CodexSessionSummary[]> {
   const profile = resolveProfile(profileId);
@@ -1784,7 +1784,7 @@ export async function listClaudeSessions(
 
   return summaries
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    .slice(0, allowExtendedLimit ? Math.max(0, limit) : Math.min(limit, MAX_SESSIONS));
+    .slice(0, sessionListLimit(limit, allowExtendedLimit));
 }
 
 export async function deleteClaudeSession(

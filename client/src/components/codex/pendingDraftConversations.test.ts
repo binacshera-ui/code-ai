@@ -52,3 +52,14 @@ test('keeps pre-session failures discoverable and applies sidebar search', () =>
   );
   assert.deepEqual(selectPendingDraftConversations([failed], new Set(), 'unrelated'), []);
 });
+
+test('bound terminal attempts never reappear as pending drafts with a partial catalog', () => {
+  for (const status of ['completed', 'failed', 'cancelled'] as const) {
+    assert.deepEqual(selectPendingDraftConversations([queueItem({ sessionId: 'older-session', status })], new Set()), []);
+  }
+});
+
+test('a newly bound active conversation remains reachable while its catalog catches up', () => {
+  const item = queueItem({ sessionId: 'new-session', status: 'queued' });
+  assert.deepEqual(selectPendingDraftConversations([item], new Set()), [item]);
+});

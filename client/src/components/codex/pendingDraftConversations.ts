@@ -41,7 +41,10 @@ export function selectPendingDraftConversations<T extends PendingDraftQueueItem>
 
   const normalizedSearch = search.trim().toLowerCase();
   return [...latestByDraftKey.values()].filter((item) => {
-    if (item.sessionId && knownSessionIds.has(item.sessionId)) {
+    // A bound terminal attempt is not a conversation awaiting creation, even
+    // when its real session is outside a partial/stale catalog response.
+    if (item.sessionId && (knownSessionIds.has(item.sessionId)
+      || ['completed', 'failed', 'cancelled'].includes(item.status))) {
       return false;
     }
     if (!normalizedSearch) {

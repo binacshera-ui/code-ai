@@ -625,7 +625,7 @@ async function loadAgentLinkedSessionSummaries(
     listAgentSessions(
       profileId,
       query,
-      limit ? Math.max(limit * 4, 80) : 160,
+      limit === undefined ? undefined : Math.max(limit * 4, 80),
       options,
     )
   )));

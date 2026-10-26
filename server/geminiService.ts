@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { sessionListLimit } from './sessionListLimit.js';
 import { randomUUID } from 'crypto';
 import { createReadStream, existsSync, promises as fs } from 'fs';
 import path from 'path';
@@ -127,7 +128,6 @@ function resolveGeminiBinary(): string {
 }
 
 const GEMINI_BIN = resolveGeminiBinary();
-const MAX_SESSIONS = 500;
 const MAX_TOOL_TEXT = 200_000;
 const GEMINI_RUNTIME_STATE_FILE = path.join(CODEX_APP_CONFIG.queueRoot, 'gemini-runtime-state.json');
 const GEMINI_MODEL_CACHE_TTL_MS = 60_000;
@@ -1452,7 +1452,7 @@ export function invalidateGeminiModelCatalogCache(profileId?: string): void {
 export async function listGeminiSessions(
   profileId?: string,
   query = '',
-  limit = MAX_SESSIONS,
+  limit?: number,
   allowExtendedLimit = false,
 ): Promise<CodexSessionSummary[]> {
   const profile = resolveProfile(profileId);
@@ -1527,7 +1527,7 @@ export async function listGeminiSessions(
 
   return summaries
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    .slice(0, allowExtendedLimit ? Math.max(0, limit) : Math.min(limit, MAX_SESSIONS));
+    .slice(0, sessionListLimit(limit, allowExtendedLimit));
 }
 
 export async function deleteGeminiSession(

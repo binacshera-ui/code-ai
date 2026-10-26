@@ -1,4 +1,5 @@
 import { resolveCodexExecutionSelection } from './codexExecutionSelection.js';
+import { sessionListLimit } from './sessionListLimit.js';
 import { readCodexRetryObservation } from './codexRetryObservation.mjs';
 import { isCodexInlineImage } from './codexAttachmentInputs.js';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'child_process';
@@ -608,7 +609,6 @@ interface ActiveCodexRun {
 
 const CODEX_BIN = process.env.CODEX_BIN || 'codex';
 const DEFAULT_PROFILE_ID = CODEX_APP_CONFIG.defaultProfileId;
-const MAX_SESSIONS = 500;
 const MAX_TOOL_TEXT = 200_000;
 const MAX_CODEX_STDOUT_LINE = 4 * 1024 * 1024;
 const MAX_CODEX_DIAGNOSTIC_LINE = 64 * 1024;
@@ -4104,7 +4104,7 @@ export function observeCodexNativeFailure(profileId: string): void {
 export async function listCodexSessions(
   profileId?: string,
   query = '',
-  limit = MAX_SESSIONS,
+  limit?: number,
   allowExtendedLimit = false,
 ): Promise<CodexSessionSummary[]> {
   const profile = resolveProfile(profileId);
@@ -4113,10 +4113,7 @@ export async function listCodexSessions(
   const matching = normalizedQuery
     ? catalog.filter((summary) => buildSessionSummarySearchText(summary).includes(normalizedQuery))
     : catalog;
-  return matching.slice(
-    0,
-    allowExtendedLimit ? Math.max(0, limit) : Math.min(limit, MAX_SESSIONS)
-  );
+  return matching.slice(0, sessionListLimit(limit, allowExtendedLimit));
 }
 
 export async function deleteCodexSession(

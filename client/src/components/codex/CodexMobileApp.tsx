@@ -8195,7 +8195,7 @@ function SidebarPanel({
             {!showArchived && pendingDraftItems.length > 0 && (
               <div className="mb-3 space-y-2">
                 <span className="block w-full px-2 text-right text-xs font-semibold tracking-wide text-slate-400">
-                  שיחות בתהליך
+                  שיחות חדשות
                 </span>
                 {pendingDraftItems.map((item) => {
                   const isActive = isQueueItemActive(item);
