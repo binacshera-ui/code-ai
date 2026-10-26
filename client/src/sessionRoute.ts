@@ -77,7 +77,7 @@ export function readSessionRoute(input?: string | SessionRouteLocation): Session
   const profileId = safeQueryRouteToken(url.searchParams.get('profile'));
   const sessionId = safeQueryRouteToken(url.searchParams.get('session'));
   const draftKey = safeQueryRouteToken(url.searchParams.get('draft'));
-  if (!profileId && !sessionId && !draftKey) return null;
+  if (!serverId && !profileId && !sessionId && !draftKey) return null;
   const sessionKey = sessionId || draftKey;
   return {
     serverId: serverId || (sessionId || draftKey ? 'local' : null),

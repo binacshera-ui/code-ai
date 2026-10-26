@@ -166,6 +166,14 @@ export class CodexSharedAdmissionRejectedError extends Error {
   }
 }
 
+/** A resume refusal before turn/start: the external writer accepted no input. */
+export class CodexExternalWriterBusyError extends Error {
+  constructor() {
+    super('השיחה פתוחה לכתיבה באפליקציית Codex אחרת. ההודעה טרם נשלחה; ננסה שוב בעוד 60 שניות.');
+    this.name = 'CodexExternalWriterBusyError';
+  }
+}
+
 export function isCodexSharedOwnerSettingsMismatchError(error: unknown): error is CodexSharedOwnerSettingsMismatchError {
   return error instanceof CodexSharedOwnerSettingsMismatchError;
 }
@@ -931,6 +939,12 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
         } } : {}),
       } : {}),
       ...(sessionId ? { threadId: sessionId, excludeTurns: true } : { ephemeral: false }),
+    }).catch(error => {
+      // Only an explicit resume refusal is safe to retry. Never convert lost
+      // ACKs, shared-owner custody or turn/start failures into a fresh input.
+      if (sessionId && !options.sharedTransport && error instanceof CodexRpcRejectedError
+          && error.diagnostic?.reason === 'thread-writer-conflict') throw new CodexExternalWriterBusyError();
+      throw error;
     });
     if (!object(threadResult) || !object(threadResult.thread) || typeof threadResult.thread.id !== 'string'
         || !threadResult.thread.id.trim()) throw new Error('Codex app-server did not return a thread ID');

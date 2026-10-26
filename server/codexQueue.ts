@@ -96,7 +96,7 @@ import {
 import { stripFlowDocumentBlocks } from '../shared/flowMode.js';
 import { prepareWorkModeRun } from './codexWorkModeRuntime.js';
 import { dueRationalRuns, finishRationalRun, getRationalRun, listRationalHolds, rebindRationalRun, releaseRationalRun } from './codexRationalMode.js';
-import { CodexAppServerDetachedError, CodexSharedAdmissionRejectedError, type CodexSharedSubmission } from './codexAppServer.js';
+import { CodexAppServerDetachedError, CodexExternalWriterBusyError, CodexSharedAdmissionRejectedError, type CodexSharedSubmission } from './codexAppServer.js';
 import { normalizeNativeSubmission, nativeSubmissionNeedsReconciliation, recoverNativeSubmission } from './codexSharedSubmission.mjs';
 import { advanceRecurringNativeSubmission, repairLegacyRecurringNativeSubmission } from './codexQueueRecurrence.mjs';
 import { MAX_CAPACITY_FAILURES, isCapacityContinuationEligible, capacityContinuationPlan, sameCapacityConversation,
@@ -2686,6 +2686,14 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
       sessionTitle: result.sessionTitle,
     });
   } catch (error: any) {
+    if (error instanceof CodexExternalWriterBusyError && !item.nativeSubmission && item.status !== 'cancelling') {
+      item.status = 'queued';
+      item.nativeReconcileAfter = new Date(Date.now() + 60_000).toISOString();
+      item.error = error.message;
+      item.updatedAt = nowIso();
+      await persistState();
+      return;
+    }
     if (error instanceof CodexSharedAdmissionRejectedError) {
       // Only the qualified broker's explicit nonacceptance proof permits this
       // reset. Lost/uncertain ACKs retain custody and follow reconciliation.
@@ -2708,7 +2716,7 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
       await persistState();
       return;
     }
-    if (isAgentRunCancelledError(error)) {
+    if (isAgentRunCancelledError(error) || (error instanceof CodexExternalWriterBusyError && item.status === 'cancelling')) {
       markQueueItemStopped(item);
       if (item.stopPolicy?.status === 'stopping') {
         if (item.stopPolicy.mode === 'hard') {

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { runCodexAppServerTurn, CodexAppServerCancelledError, CodexAppServerDetachedError,
   CodexSharedOwnerSettingsMismatchError, isCodexSharedOwnerSettingsMismatchError, CodexSharedAdmissionRejectedError,
-  CodexAppServerTurnFailedError, CodexAppServerRetryStoppedError,
+  CodexAppServerTurnFailedError, CodexAppServerRetryStoppedError, CodexExternalWriterBusyError,
   isCodexSharedSubmissionTerminal,
   type CodexSharedSubmission, type CodexSharedOwnerSettings, type CodexAppServerRunOptions } from './codexAppServer.js';
 import { CodexUserInputRegistry } from './codexUserInput.js';
@@ -33,6 +33,7 @@ function fixture(mode: string): string {
     function finishOwn(){send({method:'item/completed',params:{threadId:'parent-thread',turnId:'turn-one',item:{type:'agentMessage',phase:'final_answer',text:'Done'}}});send({method:'turn/completed',params:{threadId:'parent-thread',turn:{id:'turn-one',status:'completed'}}});}
     rl.on('line',line=>{
       const m=JSON.parse(line);
+      if(mode==='external-writer') require('node:fs').appendFileSync(process.env.CODE_AI_FIXTURE_METHODS, m.method+'\\n');
       if(m.method==='initialize'){
         if(mode==='shared-recover-init-detached'){process.exit(0);return;}
         if(m.params.capabilities?.experimentalApi!==true) process.exit(14);
@@ -40,6 +41,9 @@ function fixture(mode: string): string {
           ...(mode.startsWith('shared-managed')?{codeAiSharedOwner:{version:1,turnSettings:true}}:{})}});
       } else if(m.method==='initialized') { acknowledged=true; }
       else if(m.method==='thread/start'||m.method==='thread/resume'){
+        if(mode==='external-writer') {
+          send({id:m.id,error:{code:-32600,message:'Thread already has an active writer in another Codex process'}});return;
+        }
         if(mode==='rpc-diagnostic') {
           send({id:m.id,error:{code:-32603,message:'PRIVATE_ERROR_MUST_NOT_ESCAPE token=private-test-marker',data:{
             codeAiDiagnostic:{version:1,operation:'thread/resume',reason:'native-read-timeout',nativeCode:null,elapsedMs:120000,secret:'private-test-marker'}}}});return;
@@ -393,6 +397,19 @@ test('already aborted runs do not spawn a process', async () => {
   let spawned = false;
   await assert.rejects(runCodexAppServerTurn({ ...options('blocking'), signal: controller.signal, onSpawn: () => { spawned = true; } }), CodexAppServerCancelledError);
   assert.equal(spawned, false);
+});
+
+test('an external writer resume refusal is typed and sends no turn input', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'code-ai-writer-proof-'));
+  const file = path.join(directory, 'methods.txt');
+  try {
+    const base = options('external-writer');
+    await assert.rejects(runCodexAppServerTurn({ ...base, sessionId: 'parent-thread',
+      env: { ...base.env, CODE_AI_FIXTURE_METHODS: file } }), CodexExternalWriterBusyError);
+    const methods = (await readFile(file, 'utf8')).trim().split('\n');
+    assert.ok(methods.includes('thread/resume'));
+    assert.equal(methods.some(method => ['turn/start', 'turn/steer', 'thread/queue/add'].includes(method)), false);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('spawn diagnostics expose safe OS codes without private executable paths', async () => {

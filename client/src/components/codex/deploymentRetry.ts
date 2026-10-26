@@ -1,5 +1,5 @@
-/** Only retry an explicit pre-handler maintenance refusal. A network failure
- * cannot prove a write was not accepted, so it is deliberately not replayed. */
+/** Reads may recover from a transient gateway/network outage. Writes require
+ * explicit pre-handler nonacceptance proof; ambiguous writes are never replayed. */
 export async function fetchWithDeploymentRetry(
   fetcher: (input: RequestInfo, init?: RequestInit) => Promise<Response>,
   input: RequestInfo,
@@ -8,14 +8,32 @@ export async function fetchWithDeploymentRetry(
 ): Promise<Response> {
   const method = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
   const body = init?.body;
+  const readOnly = method === 'GET' || method === 'HEAD';
   // Streams, FormData and Request bodies may be consumed; never replay them.
   const repeatable = (method === 'GET' || method === 'HEAD')
     || (typeof body === 'string' && hasStableRequestId(body));
   const wait = options.wait || waitForRetry;
   const deadline = Date.now() + (options.maxWaitMs ?? 120_000);
+  let readRetries = 0;
   for (;;) {
     init?.signal?.throwIfAborted();
-    const response = await fetcher(input, init);
+    let response: Response;
+    try { response = await fetcher(input, init); }
+    catch (error) {
+      init?.signal?.throwIfAborted();
+      if (!readOnly || !(error instanceof TypeError) || readRetries >= 3 || Date.now() >= deadline) throw error;
+      readRetries++;
+      await wait(Math.min(2_000, Math.max(0, deadline - Date.now())), init?.signal);
+      continue;
+    }
+    if (readOnly && [502, 503, 504].includes(response.status) && readRetries < 3 && Date.now() < deadline) {
+      readRetries++;
+      await response.body?.cancel();
+      await wait(Math.min(2_000, Math.max(0, deadline - Date.now())), init?.signal);
+      continue;
+    }
+    // Exhausted ordinary read recovery must return the actual response intact.
+    if (readOnly) return response;
     if (!repeatable || response.status !== 503 || Date.now() >= deadline) return response;
     if (!(response.headers.get('content-type') || '').includes('application/json')) return response;
     let refusal: unknown;

@@ -5,6 +5,13 @@ import {
   readSessionRoute,
 } from './sessionRoute';
 
+test('a server-only entry URL selects its server instead of stale local storage', () => {
+  const route = readSessionRoute('https://code-ai.test/?server=remote-a');
+  assert.equal(route?.serverId, 'remote-a');
+  assert.equal(route?.sessionKey, null);
+  assert.equal(readSessionRoute('https://code-ai.test/'), null);
+});
+
 test('remote notification links preserve the selected server', () => {
   const route = readSessionRoute(
     'https://code-ai.test/session/beam-user/session-123?server=remote-a',
