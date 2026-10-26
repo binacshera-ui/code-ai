@@ -23,10 +23,12 @@ test('delay is exactly one minute from the confirmed failure, with one stable re
  assert.equal(a.prompt,CAPACITY_CONTINUATION_PROMPT);assert.match(a.prompt,/do not repeat completed work/);
  assert.equal(a.capacityRetry.attempt,1);
 });
-test('each further capacity failure advances the attempt without restarting the task',()=>{
- const first=capacityContinuationPlan(source());const next=capacityContinuationPlan(source({id:'retry-1',capacityRetry:first.capacityRetry,capacityRetryPendingAt:'2026-10-23T06:01:30Z'}));
- assert.equal(next.capacityRetry.attempt,2);assert.equal(next.capacityRetry.rootItemId,'failed-1');assert.notEqual(next.clientRequestId,first.clientRequestId);
- assert.equal(next.prompt,first.prompt);
+test('automatic continuation stops after the second failed turn',()=>{
+ const first=capacityContinuationPlan(source());
+ assert.equal(first.capacityRetry.attempt,1);
+ const secondFailure=source({id:'retry-1',capacityRetry:first.capacityRetry,capacityRetryPendingAt:'2026-10-23T06:01:30Z'});
+ assert.equal(isCapacityContinuationEligible(secondFailure),false);
+ assert.equal(capacityContinuationPlan(secondFailure),null);
 });
 test('explicit stops and absolute deadlines take precedence',()=>{
  const now=Date.parse(at);

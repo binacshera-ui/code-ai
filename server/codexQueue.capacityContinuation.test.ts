@@ -64,10 +64,10 @@ test('old failures, quota errors and unresolved custody never auto-restart',asyn
  for(const id of ['old','quota','unknown'])assert.equal(await q.scheduleCodexCapacityContinuation(id),null);
  assert.equal((await q.getCodexQueueItem('unknown')).nativeSubmission?.clientUserMessageId,'code-ai:unknown');
 });
-test('daily cadence is unchanged and each later capacity failure adds exactly one one-time continuation',async()=>{
+test('daily cadence is unchanged and a second failed turn does not schedule another continuation',async()=>{
  const daily=await q.getCodexQueueItem('daily'),a=await q.scheduleCodexCapacityContinuation('daily'),b=await q.scheduleCodexCapacityContinuation('second');
- assert.ok(a&&b);assert.equal(a.scheduleMode,'once');assert.equal((await q.getCodexQueueItem('daily')).scheduledAt,daily.scheduledAt);
- assert.equal(b.capacityRetry?.attempt,2);assert.equal(b.capacityRetry?.rootItemId,'root');
+ assert.ok(a);assert.equal(a.scheduleMode,'once');assert.equal((await q.getCodexQueueItem('daily')).scheduledAt,daily.scheduledAt);
+ assert.equal(b,null);assert.equal((await q.getCodexQueueItem('second')).capacityRetryPendingAt,null);
 });
 test('cold-process restart preserves the pending continuation and cannot create another one',async()=>{
  const child=(await q.listCodexQueueItems()).find(x=>x.capacityRetry?.sourceItemId==='draft');assert.ok(child);

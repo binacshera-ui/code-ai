@@ -109,6 +109,25 @@ test('atomically replaces state and keeps the previous valid snapshot as a backu
   assert.equal(queueFiles.some((name) => name.endsWith('.tmp')), false);
 });
 
+test('persists a burst of 100 distinct scheduled conversations before resolving any enqueue', async () => {
+  const scheduledAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const prefix = 'burst-';
+  const added = await Promise.all(Array.from({ length: 100 }, (_, index) =>
+    queue.enqueueCodexQueueItem({
+      profileId: 'developer',
+      queueKey: prefix + index,
+      prompt: 'scheduled work ' + index,
+      scheduledAt,
+    })
+  ));
+
+  assert.equal(new Set(added.map((item) => item.id)).size, 100);
+  const persisted = JSON.parse(await readFile(stateFile, 'utf8'));
+  const burstItems = persisted.items.filter((item: { queueKey: string }) => item.queueKey.startsWith(prefix));
+  assert.equal(burstItems.length, 100);
+  assert.equal(new Set(burstItems.map((item: { queueKey: string }) => item.queueKey)).size, 100);
+});
+
 test('binds a started provider session without losing its original draft key', async () => {
   const item = await queue.enqueueCodexQueueItem({
     profileId: 'developer',

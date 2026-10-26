@@ -1,13 +1,15 @@
 import { isCodexModelCapacityMessage } from '../shared/codexCapacity.mjs';
 import { nativeSubmissionNeedsReconciliation } from './codexSharedSubmission.mjs';
 
+export const MAX_CAPACITY_FAILURES = 2;
 export const CAPACITY_CONTINUATION_DELAY_MS = 60_000;
 // Exact same task-continuation instruction as the existing UI action.
 export const CAPACITY_CONTINUATION_PROMPT = 'Continue from the exact point where the previous turn was aborted. Continue the same task without restarting, do not repeat completed work, and finish the response fully until the task is complete.';
 
 export function isCapacityContinuationEligible(item, now = Date.now()) {
   const failed = item.status === 'failed' || (item.scheduleMode === 'recurring' && item.status === 'scheduled' && item.lastRunStatus === 'failed');
-  return Boolean(failed && item.sessionId && !item.nativeCancellationRequestedAt && !item.stopDecisionForItemId
+  const failuresSoFar = 1 + (item.capacityRetry?.attempt || 0);
+  return Boolean(failed && failuresSoFar < MAX_CAPACITY_FAILURES && item.sessionId && !item.nativeCancellationRequestedAt && !item.stopDecisionForItemId
     && (['model_capacity','rate_limit'].includes(item.failureKind) || (!item.failureKind && isCodexModelCapacityMessage(item.error)))
     && !nativeSubmissionNeedsReconciliation(item.nativeSubmission)
     && (!item.stopPolicy || (Date.parse(item.stopPolicy.stopAt) > now

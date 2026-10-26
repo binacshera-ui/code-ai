@@ -99,7 +99,7 @@ import { dueRationalRuns, finishRationalRun, getRationalRun, listRationalHolds, 
 import { CodexAppServerDetachedError, CodexSharedAdmissionRejectedError, type CodexSharedSubmission } from './codexAppServer.js';
 import { normalizeNativeSubmission, nativeSubmissionNeedsReconciliation, recoverNativeSubmission } from './codexSharedSubmission.mjs';
 import { advanceRecurringNativeSubmission, repairLegacyRecurringNativeSubmission } from './codexQueueRecurrence.mjs';
-import { isCapacityContinuationEligible, capacityContinuationPlan, sameCapacityConversation,
+import { MAX_CAPACITY_FAILURES, isCapacityContinuationEligible, capacityContinuationPlan, sameCapacityConversation,
   capacityContinuationObsolete, nativeActivityAfterCapacityFailure, capacityFailureHoldCanResume } from './codexCapacityContinuation.mjs';
 import { refreshCodexSharedModeContextAfterRebind } from './codexSharedModes.js';
 import { getSessionFocusMode, rebindSessionFocusMode, buildSessionFocusModePromptAdditions } from './codexFocusMode.js';
@@ -309,7 +309,7 @@ async function enqueueQueueOutcomeNotification(
 ): Promise<void> {
   // Keep the first failure alert and the final recovery alert; don't notify
   // the phone once per minute while the same model remains at capacity.
-  if (outcome === 'failed' && ['model_capacity','rate_limit'].includes(item.failureKind || '') && item.capacityRetry) return;
+  if (outcome === 'failed' && item.capacityRetry && isCapacityContinuationEligible(item)) return;
   const sessionKey = queueNotificationSessionKey(item);
   const notificationProfileId = item.sourceProfileId || item.profileId;
   const provider = CODEX_APP_CONFIG.profiles.find((profile) => profile.id === item.profileId)?.provider || null;
@@ -341,10 +341,10 @@ async function enqueueQueueOutcomeNotification(
 }
 const STATE_BACKUP_FILE = `${STATE_FILE}.bak`;
 const WORKER_POLL_MS = 1500;
-const MAX_PARALLEL_QUEUE_ITEMS = Math.max(
-  1,
-  Number(process.env.CODEX_QUEUE_MAX_PARALLEL_ITEMS) || 20
-);
+const configuredParallelItems = Number(process.env.CODEX_QUEUE_MAX_PARALLEL_ITEMS);
+const MAX_PARALLEL_QUEUE_ITEMS = Number.isInteger(configuredParallelItems) && configuredParallelItems >= 1
+  ? Math.min(configuredParallelItems, 100)
+  : 100;
 const QUEUE_RETENTION_MS = 21 * 24 * 60 * 60 * 1000;
 const QUEUE_LIST_RECENT_COMPLETED_LIMIT = 20;
 const QUEUE_LIST_RELATED_COMPLETED_LIMIT = 50;
@@ -359,6 +359,8 @@ let stateLoadedPromise: Promise<void> | null = null;
 let stateLoaded = false;
 let persistTail: Promise<void> = Promise.resolve();
 let pendingPersistWrites = 0;
+let persistFlushActive = false;
+let persistWaiters: Array<{ resolve: () => void; reject: (error: unknown) => void }> = [];
 let state: CodexQueueState = {
   items: [],
   sessionBindings: {},
@@ -1280,15 +1282,40 @@ async function writeStateSnapshot(snapshot: string): Promise<void> {
   }
 }
 
-async function persistState() {
-  const snapshot = JSON.stringify(state, null, 2);
+async function flushPersistWaiters(): Promise<void> {
+  // Let synchronous bursts of queue starts share one durable snapshot. Later
+  // mutations arriving during disk I/O receive a subsequent snapshot.
+  await Promise.resolve();
+  try {
+    while (persistWaiters.length > 0) {
+      const batch = persistWaiters;
+      persistWaiters = [];
+      try {
+        await writeStateSnapshot(JSON.stringify(state, null, 2));
+        for (const waiter of batch) waiter.resolve();
+      } catch (error) {
+        for (const waiter of batch) waiter.reject(error);
+      }
+    }
+  } finally {
+    persistFlushActive = false;
+  }
+}
+
+async function persistState(): Promise<void> {
   pendingPersistWrites += 1;
-  const operation = persistTail
-    .catch(() => undefined)
-    .then(() => writeStateSnapshot(snapshot))
-    .finally(() => { pendingPersistWrites -= 1; });
-  persistTail = operation;
-  await operation;
+  const operation = new Promise<void>((resolve, reject) => {
+    persistWaiters.push({ resolve, reject });
+    if (!persistFlushActive) {
+      persistFlushActive = true;
+      persistTail = flushPersistWaiters();
+    }
+  });
+  try {
+    await operation;
+  } finally {
+    pendingPersistWrites -= 1;
+  }
 }
 
 async function loadState() {
@@ -2029,6 +2056,14 @@ export async function scheduleCodexCapacityContinuation(itemId: string): Promise
 
 async function prepareCapacityContinuation(item: CodexQueueItem): Promise<boolean> {
   if (!item.capacityRetry || item.nativeSubmission) return true;
+  if (item.capacityRetry.attempt >= MAX_CAPACITY_FAILURES) {
+    item.status = 'cancelled';
+    item.completedAt = nowIso();
+    item.updatedAt = item.completedAt;
+    item.error = 'המשך אוטומטי בוטל לאחר שני כישלונות.';
+    await persistState();
+    return false;
+  }
   const source = state.items.find(row => row.id === item.capacityRetry!.sourceItemId);
   if (capacityContinuationObsolete(item, source, state.items)) {
     cancelPendingCapacityContinuations(item); await persistState(); return false;
