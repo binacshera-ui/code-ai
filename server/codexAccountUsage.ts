@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { readCodexStoredConnection } from './codexAccountConnection.js';
 
 const CHATGPT_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const CHATGPT_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits';
@@ -57,12 +58,15 @@ export interface CodexResetCreditsSnapshot {
 }
 
 export interface CodexAccountUsageSnapshot {
-  source: 'chatgpt-wham';
+  source: 'chatgpt-wham' | 'openai-api-key';
   fetchedAt: string;
   account: {
     authenticated: boolean;
     email: string | null;
     accountIdMasked: string | null;
+    type?: 'chatgpt' | 'apiKey' | null;
+    credentialId?: string | null;
+    credentialLabel?: string | null;
   };
   planType: string | null;
   rateLimitReachedType: string | null;
@@ -344,6 +348,17 @@ export async function loadCodexAccountUsage(
   }
 
   const fetchedAt = new Date(now()).toISOString();
+  const connection = await readCodexStoredConnection(profile);
+  if (connection.type === 'apiKey') {
+    const snapshot: CodexAccountUsageSnapshot = {
+      source: 'openai-api-key', fetchedAt,
+      account: { ...connection, email: null, accountIdMasked: null },
+      planType: null, rateLimitReachedType: null, quotaGroups: [],
+      billingCredits: null, resetCredits: null, error: null,
+    };
+    if (accountUsageEpochs.get(resolvedHome) === epoch) accountUsageCache.set(cacheKey, { expiresAt: now() + ACCOUNT_USAGE_CACHE_TTL_MS, snapshot });
+    return snapshot;
+  }
   let auth: Record<string, unknown> | null = null;
   try {
     auth = asRecord(JSON.parse(await fs.readFile(path.join(profile.codexHome, 'auth.json'), 'utf8')));
@@ -360,6 +375,7 @@ export async function loadCodexAccountUsage(
       fetchedAt,
       account: {
         authenticated: false,
+        type: null,
         email: null,
         accountIdMasked: maskCodexAccountId(authAccountId),
       },
@@ -400,6 +416,7 @@ export async function loadCodexAccountUsage(
     source: 'chatgpt-wham',
     fetchedAt,
     account: {
+      type: 'chatgpt',
       authenticated: true,
       email: usage.email,
       accountIdMasked: maskCodexAccountId(usage.accountId || authAccountId),

@@ -1,6 +1,7 @@
 import { resolveCodexExecutionSelection } from './codexExecutionSelection.js';
 import { sessionListLimit } from './sessionListLimit.js';
 import { readCodexRetryObservation } from './codexRetryObservation.mjs';
+import { readRecoveredQueueItems } from './codexQueueStore.mjs';
 import { isCodexInlineImage } from './codexAttachmentInputs.js';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'child_process';
 import { randomUUID } from 'crypto';
@@ -349,6 +350,7 @@ interface RecoveredQueueItem {
 
 interface RecoveredQueueSession {
   id: string;
+  sourcePath: string;
   profileId: string;
   cwd: string | null;
   createdAt: string | null;
@@ -545,6 +547,9 @@ export interface CodexRateLimitSnapshot {
     authenticated: boolean;
     email: string | null;
     accountIdMasked: string | null;
+    type?: 'chatgpt' | 'apiKey' | null;
+    credentialId?: string | null;
+    credentialLabel?: string | null;
   } | null;
   quotaGroups?: CodexAccountQuotaGroup[];
   billingCredits?: CodexBillingCredits | null;
@@ -1333,23 +1338,39 @@ function sanitizeRecoveredQueueItem(value: unknown): RecoveredQueueItem | null {
   };
 }
 
-async function loadRecoveredQueueSessions(profile: CodexProfile): Promise<Map<string, RecoveredQueueSession>> {
-  if (!(await pathExists(QUEUE_STATE_FILE))) {
-    return new Map();
+async function loadRecoveredQueueSessions(
+  profile: CodexProfile,
+  sessionId?: string,
+  summary = false,
+): Promise<Map<string, RecoveredQueueSession>> {
+  // An initialized incremental store is authoritative. In particular, never
+  // resurrect the frozen migration snapshot when SQLite is unreadable or when
+  // a different process is serving this read-only history projection.
+  let entries = await readRecoveredQueueItems({
+    queueRoot: CODEX_APP_CONFIG.queueRoot,
+    profileId: profile.id,
+    ...(sessionId ? { sessionId } : {}),
+    ...(summary ? { summary: true } : {}),
+  });
+  const sourcePath = entries === null
+    ? QUEUE_STATE_FILE
+    : path.join(CODEX_APP_CONFIG.queueRoot, 'queue.sqlite');
+  if (entries === null) {
+    if (!(await pathExists(QUEUE_STATE_FILE))) return new Map();
+    const raw = await fs.readFile(QUEUE_STATE_FILE, 'utf-8');
+    entries = safeJsonParse<PersistedRecoveredQueueState>(raw)?.items || [];
   }
-
-  const raw = await fs.readFile(QUEUE_STATE_FILE, 'utf-8');
-  const parsed = safeJsonParse<PersistedRecoveredQueueState>(raw);
   const recovered = new Map<string, RecoveredQueueSession>();
 
-  for (const entry of parsed?.items || []) {
+  for (const entry of entries) {
     const item = sanitizeRecoveredQueueItem(entry);
-    if (!item || item.profileId !== profile.id) {
+    if (!item || item.profileId !== profile.id || (sessionId && item.sessionId !== sessionId)) {
       continue;
     }
 
     const current = recovered.get(item.sessionId) || {
       id: item.sessionId,
+      sourcePath,
       profileId: item.profileId,
       cwd: item.cwd,
       createdAt: item.createdAt,
@@ -3665,7 +3686,7 @@ async function buildCodexSessionCatalog(profile: CodexProfile): Promise<CodexSes
   const indexMap = await loadSessionIndexMap(profile);
   const sessionFiles = await scanSessionFiles(profile, { force: true });
   const draftSessions = await listForkDraftSessions(profile.id);
-  const recoveredQueueSessions = await loadRecoveredQueueSessions(profile);
+  const recoveredQueueSessions = await loadRecoveredQueueSessions(profile, undefined, true);
 
   const normalizedQuery = '';
   const summaries: CodexSessionSummary[] = [];
@@ -3867,7 +3888,7 @@ async function buildCodexSessionCatalog(profile: CodexProfile): Promise<CodexSes
       preview,
       startPreview: parsed.messages[0]?.text ? trimPreview(parsed.messages[0].text) : parsed.title,
       endPreview: parsed.messages.at(-1)?.text ? trimPreview(parsed.messages.at(-1)!.text) : parsed.preview,
-      path: `${QUEUE_STATE_FILE}#${recovered.id}`,
+      path: `${recovered.sourcePath}#${recovered.id}`,
       source: 'queue-recovered',
       forkSourceSessionId: null,
       forkEntryId: null,
@@ -4376,7 +4397,7 @@ async function readCodexSessionDetail(
   if (!sessionFile) {
     const forkDraft = await getForkDraftSession(sessionId);
     if (!forkDraft || forkDraft.profileId !== profile.id) {
-      const recoveredQueueSessions = await loadRecoveredQueueSessions(profile);
+      const recoveredQueueSessions = await loadRecoveredQueueSessions(profile, sessionId);
       const recovered = recoveredQueueSessions.get(sessionId);
       if (!recovered) {
         throw new Error(`Session ${sessionId} was not found`);
@@ -4413,7 +4434,7 @@ async function readCodexSessionDetail(
         preview: parsed.preview,
         startPreview: parsed.messages[0]?.text ? trimPreview(parsed.messages[0].text) : parsed.title,
         endPreview: parsed.messages.at(-1)?.text ? trimPreview(parsed.messages.at(-1)!.text) : parsed.preview,
-        path: `${QUEUE_STATE_FILE}#${recovered.id}`,
+        path: `${recovered.sourcePath}#${recovered.id}`,
         source: 'queue-recovered',
         cwd: recovered.cwd || profile.workspaceCwd,
         forkSourceSessionId: forkMetadata?.sourceSessionId || null,
@@ -5086,14 +5107,15 @@ export async function getCodexRateLimitSnapshot(
   // Session context is read only when the caller selected that exact thread.
   const accountUsage = await loadCodexAccountUsage(profile, { forceRefresh: forceAccountRefresh });
   const standardQuota = accountUsage.quotaGroups[0] || null;
+  const apiKeyMode = accountUsage.account.type === 'apiKey';
   return {
     profileId: profile.id,
     sessionId: sessionId?.trim() || sessionSnapshot?.sessionId || null,
     updatedAt: sessionSnapshot?.updatedAt || accountUsage.fetchedAt,
-    planType: accountUsage.planType || sessionSnapshot?.planType || null,
-    rateLimitReachedType: accountUsage.rateLimitReachedType || sessionSnapshot?.rateLimitReachedType || null,
-    primary: standardQuota?.primary || sessionSnapshot?.primary || null,
-    secondary: standardQuota?.secondary || sessionSnapshot?.secondary || null,
+    planType: apiKeyMode ? null : accountUsage.planType || sessionSnapshot?.planType || null,
+    rateLimitReachedType: apiKeyMode ? null : accountUsage.rateLimitReachedType || sessionSnapshot?.rateLimitReachedType || null,
+    primary: apiKeyMode ? null : standardQuota?.primary || sessionSnapshot?.primary || null,
+    secondary: apiKeyMode ? null : standardQuota?.secondary || sessionSnapshot?.secondary || null,
     context: sessionSnapshot?.context || null,
     account: accountUsage.account,
     quotaGroups: accountUsage.quotaGroups,

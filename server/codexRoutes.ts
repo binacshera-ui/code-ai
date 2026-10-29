@@ -27,6 +27,11 @@ import {
   deleteAgentSession,
   disconnectAgentCodexAccount,
   getAgentCodexAccountAuthStatus,
+  getAgentCodexAccountConnection,
+  listAgentCodexApiCredentials,
+  saveAgentCodexApiCredential,
+  deleteAgentCodexApiCredential,
+  loginAgentCodexApiCredential,
   getAgentSessionChangeRecord,
   getAgentModelCatalog,
   getAgentMultiAgentSnapshot,
@@ -53,6 +58,7 @@ import {
   listCodexQueueItems,
   listCodexQueueCompletionTimes,
   listCodexQueueWorkspaceItems,
+  listCodexQueueHistory,
   resolveCodexQueueSessionId,
   retryCodexQueueItem,
   setCodexQueueItemStopSchedule,
@@ -1905,8 +1911,10 @@ router.post('/response-speed', requireCodexAccess, async (req, res) => {
 router.get('/account-auth', requireCodexAccess, async (req, res) => {
   try {
     const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
-    const auth = await getAgentCodexAccountAuthStatus(profileId);
-    res.json({ auth });
+    const [auth, connection] = await Promise.all([
+      getAgentCodexAccountAuthStatus(profileId), getAgentCodexAccountConnection(profileId),
+    ]);
+    res.json({ auth, connection });
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'לא ניתן לטעון את מצב ההתחברות ל־Codex.' });
   }
@@ -1945,6 +1953,49 @@ router.post('/account-auth/logout', requireCodexAccess, async (req, res) => {
     res.json({ disconnected: true, rateLimits });
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'ניתוק חשבון Codex נכשל.' });
+  }
+});
+
+router.get('/account-auth/credentials', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    res.json({ credentials: await listAgentCodexApiCredentials(profileId) });
+  } catch { res.status(400).json({ error: 'לא ניתן לטעון את המפתחות השמורים.' }); }
+});
+
+router.post('/account-auth/credentials', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    if (typeof req.body?.label !== 'string' || typeof req.body?.apiKey !== 'string') {
+      res.status(400).json({ error: 'נדרשים שם ומפתח API.' }); return;
+    }
+    const credential = await saveAgentCodexApiCredential(profileId, { label: req.body.label, apiKey: req.body.apiKey });
+    res.status(201).json({ credential });
+  } catch { res.status(400).json({ error: 'שמירת מפתח ה־API נכשלה. בדקו את השם ואת המפתח.' }); }
+});
+
+router.delete('/account-auth/credentials/:credentialId', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const credentialId = typeof req.params.credentialId === 'string' ? req.params.credentialId : '';
+    const deleted = await deleteAgentCodexApiCredential(profileId, credentialId);
+    res.json({ deleted });
+  } catch { res.status(400).json({ error: 'מחיקת המפתח השמור נכשלה.' }); }
+});
+
+router.post('/account-auth/api-key/login', requireCodexAccess, async (req, res) => {
+  try {
+    const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
+    const credentialId = typeof req.body?.credentialId === 'string' ? req.body.credentialId : '';
+    if (!credentialId || credentialId.length > 160) {
+      res.status(400).json({ error: 'יש לבחור מפתח API שמור.' }); return;
+    }
+    const connection = await loginAgentCodexApiCredential(profileId, credentialId);
+    const rateLimits = await getAgentRateLimitSnapshot(profileId, undefined, true);
+    res.json({ connection, rateLimits });
+  } catch (error: any) {
+    // Auth services expose only static, sanitized messages. Never include RPC payloads.
+    res.status(400).json({ error: error?.message || 'החיבור באמצעות API נכשל.' });
   }
 });
 
@@ -3616,9 +3667,22 @@ router.get('/queue/items', requireCodexAccess, async (req, res) => {
     const requestedQueueKey = typeof req.query.queueKey === 'string'
       ? req.query.queueKey.trim()
       : '';
-    res.json(await listCodexQueueWorkspaceItems(profileId, requestedQueueKey));
+    res.json(await listCodexQueueWorkspaceItems(profileId, requestedQueueKey, { compact: req.query.view === 'compact' }));
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load Codex queue' });
+  }
+});
+
+router.get('/queue/history', requireCodexAccess, async (req, res) => {
+  try {
+    res.json(await listCodexQueueHistory(typeof req.query.profile === 'string' ? req.query.profile : undefined, {
+      queueKey: typeof req.query.queueKey === 'string' ? req.query.queueKey : undefined,
+      cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+      limit: typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined,
+    }));
+  } catch (error: any) {
+    res.status(/cursor/i.test(error?.message || '') ? 400 : 500)
+      .json({ error: error.message || 'Failed to load queue history' });
   }
 });
 

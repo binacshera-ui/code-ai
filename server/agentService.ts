@@ -31,9 +31,15 @@ import {
   cancelCodexDeviceAuth,
   disconnectCodexAccount,
   getCodexDeviceAuthStatus,
+  loginCodexApiCredential,
   startCodexDeviceAuth,
   type CodexDeviceAuthSnapshot,
 } from './codexAccountAuth.js';
+import { readCodexAccountConnection } from './codexAccountConnection.js';
+import { listCodexApiCredentials, saveCodexApiCredential, deleteCodexApiCredential } from './codexApiCredentials.js';
+import { syncCodexAccountFiles } from './codexCredentialInheritance.js';
+import { clearCodexAccountUsageCache } from './codexAccountUsage.js';
+import { invalidateCanonicalOwnerHealth } from './codexRuntimeHealth.mjs';
 import {
   cancelClaudeRun,
   createClaudeForkSession,
@@ -462,6 +468,39 @@ export async function cancelAgentCodexDeviceAuth(
 export async function disconnectAgentCodexAccount(profileId?: string): Promise<void> {
   const profile = await resolvePreparedCodexAccountProfile(profileId);
   await disconnectCodexAccount(profile);
+  await refreshDerivedCodexAccountFiles(profile);
+}
+
+async function refreshDerivedCodexAccountFiles(profile: AgentProfile): Promise<void> {
+  for (const derived of CODEX_APP_CONFIG.profiles.filter(candidate => candidate.provider === 'codex' && candidate.sourceProfileId === profile.id)) {
+    await syncCodexAccountFiles(profile.codexHome, derived.codexHome);
+    clearCodexAccountUsageCache(derived);
+    invalidateCanonicalOwnerHealth(derived.codexHome);
+    invalidateCodexModelCatalogCache(derived.id);
+  }
+}
+
+export async function getAgentCodexAccountConnection(profileId?: string) {
+  return readCodexAccountConnection(await resolvePreparedCodexAccountProfile(profileId));
+}
+
+export async function listAgentCodexApiCredentials(profileId?: string) {
+  return listCodexApiCredentials(await resolvePreparedCodexAccountProfile(profileId));
+}
+
+export async function saveAgentCodexApiCredential(profileId: string | undefined, input: { label: string; apiKey: string }) {
+  return saveCodexApiCredential(await resolvePreparedCodexAccountProfile(profileId), input);
+}
+
+export async function deleteAgentCodexApiCredential(profileId: string | undefined, credentialId: string) {
+  return deleteCodexApiCredential(await resolvePreparedCodexAccountProfile(profileId), credentialId);
+}
+
+export async function loginAgentCodexApiCredential(profileId: string | undefined, credentialId: string) {
+  const profile = await resolvePreparedCodexAccountProfile(profileId);
+  const connection = await loginCodexApiCredential(profile, credentialId);
+  await refreshDerivedCodexAccountFiles(profile);
+  return connection;
 }
 
 // The ticket covers preparation and post-processing too: there must be no gap

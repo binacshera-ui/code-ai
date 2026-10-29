@@ -18,6 +18,8 @@ test('shared account actions select the owner adapter; other profiles retain CLI
     assert.deepEqual(command.args.slice(1), ['--home', '/test-home', 'login']);
     assert.deepEqual(getSharedAccountCommand({ ...profile, id: 'other' }, 'login', '/codex-cli', root),
       { bin: '/codex-cli', args: ['login', '--device-auth'] });
+    assert.deepEqual(getSharedAccountCommand({ ...profile, id: 'other' }, 'read', '/codex-cli', root),
+      { bin: '/codex-cli', args: ['login', 'status'] });
     assert.equal(getSharedAccountCommand(profile,'login','/codex-cli','/missing-program').args[0],command.args[0], 'current runtime wins over a stale configured root');
   } finally {
     if (previous === undefined) delete process.env.CODE_AI_CODEX_SHARED_OWNER_PROFILES;
@@ -25,7 +27,7 @@ test('shared account actions select the owner adapter; other profiles retain CLI
   }
 });
 
-async function fixture(t, handle, reportedHome) {
+async function fixture(t, handle, reportedHome, loadedThreads = []) {
   const home = await mkdtemp(path.join(os.tmpdir(), 'codex-account-test-'));
   const parent = path.join(home, 'code-ai-shared-owner');
   await mkdir(parent, { mode: 0o700 });
@@ -38,6 +40,7 @@ async function fixture(t, handle, reportedHome) {
     const reply = (result) => ws.send(JSON.stringify({ id: frame.id, result }));
     const notify = (params) => ws.send(JSON.stringify({ method: 'account/login/completed', params }));
     if (frame.method === 'initialize') reply({ codexHome: reportedHome || home });
+    else if (frame.method === 'thread/loaded/list') reply({ data: loadedThreads, nextCursor: null });
     else handle(frame, reply, notify, ws);
   }));
   await new Promise((resolve) => server.listen(path.join(parent, 'owner.sock'), resolve));
@@ -82,7 +85,7 @@ test('cancelling device login cancels its native login before disconnecting', as
 test('logout updates the persistent owner instead of only removing a cache file', async (t) => {
   const f = await fixture(t, (frame, reply) => { if(frame.method==='account/logout')reply({});else{assert.equal(frame.method,'account/read');reply({account:null});} });
   await runSharedAccountCommand(f.home, 'logout');
-  assert.deepEqual(f.requests.map((frame) => frame.method), ['initialize', 'account/logout', 'account/read']);
+  assert.deepEqual(f.requests.map((frame) => frame.method), ['initialize', 'thread/loaded/list', 'account/logout', 'account/read']);
 });
 
 test('a mismatched canonical home is refused before changing account state', async (t) => {
@@ -99,4 +102,58 @@ test('an interrupted owner connection reports failure without exposing native er
 test('logout ACK with an account still connected is not reported as disconnected',async t=>{
  const f=await fixture(t,(frame,reply)=>reply(frame.method==='account/read'?{account:{type:'chatgpt'}}:{}));
  await assert.rejects(runSharedAccountCommand(f.home,'logout'),/logout account verification failed/);
+});
+
+test('API login sends the selected credential to the same owner and verifies account mode without a device flow', async t => {
+  let connected = false;
+  const f = await fixture(t, (frame, reply) => {
+    if (frame.method === 'account/read') return reply({ account: connected ? { type: 'apiKey' } : null });
+    assert.equal(frame.method, 'account/login/start');
+    assert.deepEqual(frame.params, { type: 'apiKey', apiKey: ('sk-' + 'synthetic-api-account-a') });
+    connected = true;
+    reply({ type: 'apiKey' }); // No loginId or account/login/completed event.
+  });
+  assert.deepEqual(await runSharedAccountCommand(f.home, 'api-key', { apiKey: ('sk-' + 'synthetic-api-account-a') }), { type: 'apiKey' });
+  assert.deepEqual(f.requests.map(frame => frame.method), ['initialize', 'thread/loaded/list', 'account/read', 'account/login/start', 'account/read']);
+});
+
+test('API login requires explicit manual disconnection and never logs out an existing account', async t => {
+  const f = await fixture(t, (frame, reply) => {
+    assert.equal(frame.method, 'account/read'); reply({ account: { type: 'chatgpt' } });
+  });
+  await assert.rejects(runSharedAccountCommand(f.home, 'api-key', { apiKey: ('sk-' + 'synthetic-api-account-a') }), /Disconnect/);
+  assert.equal(f.requests.some(frame => frame.method === 'account/login/start' || frame.method === 'account/logout'), false);
+});
+
+test('native account status is sanitized and independent from ChatGPT usage', async t => {
+  const f = await fixture(t, (frame, reply) => reply({ account: { type: 'apiKey', unexpectedSecret: 'fixture-private' } }));
+  const status = await runSharedAccountCommand(f.home, 'read');
+  assert.deepEqual(status, { type: 'apiKey' });
+  assert.equal(JSON.stringify(status).includes('fixture-private'), false);
+});
+
+test('a successful API login ACK cannot mask a mismatched account type', async t => {
+  const f = await fixture(t, (frame, reply) => reply(frame.method === 'account/read' ? { account: null } : { type: 'apiKey' }));
+  await assert.rejects(runSharedAccountCommand(f.home, 'api-key', { apiKey: ('sk-' + 'synthetic-api-account-a') }), /verification failed/);
+});
+
+test('API native rejection never exposes echoed credentials or HTTP error context', async t => {
+  const secret = ('sk-' + 'synthetic-never-expose-me');
+  const f = await fixture(t, (frame, reply, notify, ws) => {
+    if (frame.method === 'account/read') return reply({ account: null });
+    ws.send(JSON.stringify({ id: frame.id, error: { code: -1, message: `Rejected ${secret}` } }));
+  });
+  await assert.rejects(runSharedAccountCommand(f.home, 'api-key', { apiKey: secret }), error => !error.message.includes(secret));
+});
+
+test('manual auth refuses active native work without interrupting or replaying it', async t => {
+  const f = await fixture(t, (frame, reply) => {
+    assert.equal(frame.method, 'thread/read');
+    assert.deepEqual(frame.params, { threadId: 'active-fixture', includeTurns: false });
+    reply({ thread: { status: { type: 'active', activeFlags: [] } } });
+  }, undefined, ['active-fixture']);
+  for (const action of ['logout', 'api-key', 'login']) {
+    await assert.rejects(runSharedAccountCommand(f.home, action, { apiKey: ('sk-' + 'synthetic-api-account-a') }), /active work/);
+  }
+  assert.equal(f.requests.some(frame => /^account\/(logout|login\/start)$/.test(frame.method)), false);
 });

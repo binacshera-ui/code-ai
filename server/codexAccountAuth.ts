@@ -6,6 +6,9 @@ import { getSharedAccountCommand } from './codexSharedAccountAuth.mjs';
 import { invalidateCanonicalOwnerHealth } from './codexRuntimeHealth.mjs';
 import { invalidateCodexModelCatalogCache } from './codexService.js';
 import { clearCodexAccountUsageCache, type CodexAccountUsageProfile } from './codexAccountUsage.js';
+import { clearCodexApiCredentialSelection, readCodexAccountConnection, rememberCodexApiCredential,
+  runCodexCredentialCommand, type CodexAccountConnection } from './codexAccountConnection.js';
+import { resolveCodexApiCredential } from './codexApiCredentials.js';
 import {
   getProviderProcessSpawnOptions,
   terminateProviderProcessTree,
@@ -51,6 +54,7 @@ interface ParsedDeviceAuthPrompt {
 
 const activeFlows = new Map<string, ActiveCodexDeviceAuthFlow>();
 const pendingLogouts = new Map<string, Promise<void>>();
+const pendingApiLogins = new Map<string, Promise<CodexAccountConnection>>();
 
 function stripAnsi(value: string): string {
   return value.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, '');
@@ -215,10 +219,14 @@ export function getCodexDeviceAuthStatus(profile: CodexAccountUsageProfile): Cod
 
 export async function startCodexDeviceAuth(profile: CodexAccountUsageProfile): Promise<CodexDeviceAuthSnapshot> {
   const codexHomeKey = getCodexHomeKey(profile);
+  await pendingApiLogins.get(codexHomeKey);
   await pendingLogouts.get(codexHomeKey);
   const existing = activeFlows.get(codexHomeKey);
   if (existing && (existing.state === 'starting' || existing.state === 'waiting')) {
     return publicSnapshot(existing);
+  }
+  if ((await readCodexAccountConnection(profile)).authenticated) {
+    throw new Error('יש להתנתק מהחיבור הקיים לפני כניסה לחשבון ChatGPT.');
   }
   if (existing) {
     clearFlowTimers(existing);
@@ -360,18 +368,45 @@ export async function disconnectCodexAccount(profile: CodexAccountUsageProfile):
   const existingLogout = pendingLogouts.get(key);
   if (existingLogout) return existingLogout;
   const operation = (async () => {
+    await pendingApiLogins.get(key);
     const child = activeFlows.get(key)?.child || null;
     cancelCodexDeviceAuth(profile);
     invalidateAccountState(profile);
     try {
       await waitForAuthChild(child);
       await runCodexLogout(profile);
+      await clearCodexApiCredentialSelection(profile);
       const existing = activeFlows.get(key);
       if (existing) { clearFlowTimers(existing); activeFlows.delete(key); }
     } finally { invalidateAccountState(profile); }
   })();
   pendingLogouts.set(key, operation);
   try { await operation; } finally { if (pendingLogouts.get(key) === operation) pendingLogouts.delete(key); }
+}
+
+export async function loginCodexApiCredential(profile: CodexAccountUsageProfile, credentialId: string): Promise<CodexAccountConnection> {
+  const key = getCodexHomeKey(profile);
+  if (pendingApiLogins.has(key)) throw new Error('חיבור API כבר מתבצע בפרופיל הזה.');
+  const operation = (async () => {
+    await pendingLogouts.get(key);
+    const flow = activeFlows.get(key);
+    if (flow?.state === 'starting' || flow?.state === 'waiting') {
+      throw new Error('יש לבטל תחילה את ההתחברות עם קוד מכשיר.');
+    }
+    const connection = await readCodexAccountConnection(profile);
+    if (connection.authenticated) throw new Error('יש להתנתק מהחיבור הקיים לפני בחירת מפתח API.');
+    const credential = await resolveCodexApiCredential(profile, credentialId);
+    try {
+      await runCodexCredentialCommand(profile, 'api-key', credential.apiKey);
+      const next = await readCodexAccountConnection(profile);
+      if (next.type !== 'apiKey') throw new Error('Codex לא אישר חיבור באמצעות API.');
+      await rememberCodexApiCredential(profile, credential, credential.apiKey);
+      return { ...next, credentialId: credential.id, credentialLabel: credential.label };
+    } finally { invalidateAccountState(profile); }
+  })();
+  pendingApiLogins.set(key, operation);
+  try { return await operation; }
+  finally { if (pendingApiLogins.get(key) === operation) pendingApiLogins.delete(key); }
 }
 
 process.once('exit', () => {

@@ -1,4 +1,7 @@
 import { randomUUID } from 'crypto';
+import { createCodexQueueStore, CODEX_QUEUE_SQLITE_FILENAME } from './codexQueueStore.mjs';
+import { createQueueStateTracker } from './codexQueueStoreTracking.mjs';
+import { selectQueueWorkspaceView, selectQueueHistoryPage, type QueueHistorySummary } from './queueWorkspaceSelection.js';
 import { normalizeCodexModelRetry, type CodexModelRetry } from '../shared/codexModelRetry.js';
 import { latestCompletionTimes, type SessionCompletion } from './codexSessionReadState.js';
 import { promises as fs } from 'fs';
@@ -240,6 +243,7 @@ export type CodexQueueListItem = Pick<CodexQueueItem,
 export interface CodexQueueWorkspaceList {
   items: CodexQueueListItem[];
   boundSessionId: string | null;
+  history?: QueueHistorySummary;
 }
 
 interface CodexQueueState {
@@ -345,7 +349,6 @@ const configuredParallelItems = Number(process.env.CODEX_QUEUE_MAX_PARALLEL_ITEM
 const MAX_PARALLEL_QUEUE_ITEMS = Number.isInteger(configuredParallelItems) && configuredParallelItems >= 1
   ? Math.min(configuredParallelItems, 100)
   : 100;
-const QUEUE_RETENTION_MS = 21 * 24 * 60 * 60 * 1000;
 const QUEUE_LIST_RECENT_COMPLETED_LIMIT = 20;
 const QUEUE_LIST_RELATED_COMPLETED_LIMIT = 50;
 const QUEUE_LIST_ERROR_LIMIT = 2_000;
@@ -361,6 +364,12 @@ let persistTail: Promise<void> = Promise.resolve();
 let pendingPersistWrites = 0;
 let persistFlushActive = false;
 let persistWaiters: Array<{ resolve: () => void; reject: (error: unknown) => void }> = [];
+let incrementalStore: ReturnType<typeof createCodexQueueStore> | null = null;
+let mutationTracker: ReturnType<typeof createQueueStateTracker> | null = null;
+// A rejected disk commit is not an accepted queue mutation. Stop dispatch until
+// a later durable flush succeeds; an idempotent retry must cross that barrier.
+let persistenceFailure: unknown = null;
+const pendingInputCommitIds = new Set<string>();
 let state: CodexQueueState = {
   items: [],
   sessionBindings: {},
@@ -1291,9 +1300,21 @@ async function flushPersistWaiters(): Promise<void> {
       const batch = persistWaiters;
       persistWaiters = [];
       try {
-        await writeStateSnapshot(JSON.stringify(state, null, 2));
+        if (incrementalStore && mutationTracker) {
+          const changes = mutationTracker.takeChanges();
+          try {
+            await incrementalStore.commit(changes);
+          } catch (error) {
+            mutationTracker.restoreChanges(changes);
+            throw error;
+          }
+        } else {
+          await writeStateSnapshot(JSON.stringify(state, null, 2));
+        }
+        persistenceFailure = null;
         for (const waiter of batch) waiter.resolve();
       } catch (error) {
+        persistenceFailure = error;
         for (const waiter of batch) waiter.reject(error);
       }
     }
@@ -1320,8 +1341,21 @@ async function persistState(): Promise<void> {
 
 async function loadState() {
   await ensureQueueRoot();
+  const sqliteExists = await fs.stat(path.join(QUEUE_ROOT, CODEX_QUEUE_SQLITE_FILENAME))
+    .then(() => true, (error: any) => { if (error?.code === 'ENOENT') return false; throw error; });
+  // An existing database is authoritative even if an operator forgets the
+  // original opt-in flag. Never silently resurrect its frozen JSON predecessor.
+  if (sqliteExists || process.env.CODEX_QUEUE_STORAGE === 'sqlite') {
+    incrementalStore = createCodexQueueStore({ queueRoot: QUEUE_ROOT });
+  }
+  const sqliteState = incrementalStore ? await incrementalStore.loadState() : null;
+  if (sqliteExists && !sqliteState) {
+    throw new Error('Codex SQLite queue migration is incomplete; refusing stale JSON recovery');
+  }
   let recoveredFromCorruption = false;
-  try {
+  if (sqliteState) {
+    state = sqliteState as CodexQueueState;
+  } else try {
     const raw = await fs.readFile(STATE_FILE, 'utf-8');
     try {
       state = parseQueueState(raw);
@@ -1376,16 +1410,9 @@ async function loadState() {
     reason: string;
   }> = [];
 
-  state.items = state.items
-    .filter((item) => {
-      if (!isTerminalStatus(item.status) || nativeSubmissionNeedsReconciliation(item.nativeSubmission)) {
-        return true;
-      }
-
-      const completedAt = item.completedAt || item.updatedAt || item.createdAt;
-      return now - new Date(completedAt).getTime() <= QUEUE_RETENTION_MS;
-    })
-    .map((item) => {
+  // History is archival data, not a timeout cache. Bound the polled view below
+  // instead of silently deleting old failures and completion evidence on boot.
+  state.items = state.items.map((item) => {
       const next: CodexQueueItem = {
         ...cloneQueueItem(item as CodexQueueItem),
         sourceProfileId: typeof item.sourceProfileId === 'string' && item.sourceProfileId.trim()
@@ -1539,7 +1566,18 @@ async function loadState() {
       return next;
     });
 
-  if (changed) {
+  if (incrementalStore) {
+    if (!sqliteState) {
+      await incrementalStore.initialize(state);
+    } else if (changed) {
+      // One startup-only recovery transaction. Normal runtime writes below send
+      // only tracked mutations and never serialize the historical collection.
+      await incrementalStore.commit({ upserts: state.items, deletedIds: [],
+        bindingUpserts: state.sessionBindings, bindingDeletes: [] });
+    }
+    mutationTracker = createQueueStateTracker(state);
+    state = mutationTracker.state as CodexQueueState;
+  } else if (changed) {
     await persistState();
   }
   for (const recovered of recoveredInterruptedItems) {
@@ -2096,7 +2134,7 @@ async function prepareCapacityContinuation(item: CodexQueueItem): Promise<boolea
 
 async function pickRunnableItems(limit: number): Promise<CodexQueueItem[]> {
   const holds = await listRationalHolds();
-  const eligible = state.items.filter(item => !holds.some(hold =>
+  const eligible = state.items.filter(item => !pendingInputCommitIds.has(item.id) && !holds.some(hold =>
     hold.profileId === (item.sourceProfileId || item.profileId)
     && [item.queueKey, item.sessionId, state.sessionBindings[item.queueKey]].includes(hold.sessionKey)
     // A detached original may still need exact-input reconciliation to stop it.
@@ -2806,7 +2844,7 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
 }
 
 async function tickWorker() {
-  if (!workerStarted || workerStopping || workerTickInFlight) {
+  if (!workerStarted || workerStopping || workerTickInFlight || persistenceFailure) {
     return;
   }
 
@@ -2899,6 +2937,7 @@ export async function shutdownCodexQueueWorker(): Promise<void> {
   }
 
   await persistTail.catch(() => undefined);
+  await incrementalStore?.close();
 }
 
 function readQueueItemUpdatedTime(item: CodexQueueItem): number {
@@ -3027,7 +3066,8 @@ function toCodexQueueListItem(
 
 export async function listCodexQueueWorkspaceItems(
   profileId: string | undefined,
-  requestedQueueKeyInput: string | null | undefined
+  requestedQueueKeyInput: string | null | undefined,
+  options: { compact?: boolean } = {},
 ): Promise<CodexQueueWorkspaceList> {
   await refreshQueueState();
 
@@ -3043,7 +3083,10 @@ export async function listCodexQueueWorkspaceItems(
   const profileItems = profileId
     ? state.items.filter((item) => item.profileId === profileId)
     : state.items;
-  const selectedItems = selectCodexQueueWorkspaceItems(
+  const compactView = options.compact
+    ? selectQueueWorkspaceView(profileItems, requestedQueueKey, resolvedSessionId)
+    : null;
+  const selectedItems = compactView?.items || selectCodexQueueWorkspaceItems(
     profileItems,
     requestedQueueKey,
     resolvedSessionId
@@ -3061,7 +3104,19 @@ export async function listCodexQueueWorkspaceItems(
       return toCodexQueueListItem(item, detailsIncluded);
     }),
     boundSessionId,
+    ...(compactView ? { history: compactView.history } : {}),
   };
+}
+
+export async function listCodexQueueHistory(profileId: string | undefined, options: {
+  queueKey?: string | null; limit?: number; cursor?: string | null;
+} = {}) {
+  await ensureStateLoaded();
+  const key = normalizeSessionBindingKey(options.queueKey);
+  const resolvedSessionId = key ? resolveSessionBindingFromState(key, { fallbackToSelf: true }) : null;
+  const page = selectQueueHistoryPage(profileId ? state.items.filter(item => item.profileId === profileId) : state.items,
+    { ...options, queueKey: key, resolvedSessionId });
+  return { ...page, items: page.items.map(item => toCodexQueueListItem(item, false)) };
 }
 
 export async function listCodexQueueItems(profileId?: string): Promise<CodexQueueItem[]> {
@@ -3119,6 +3174,10 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
     ));
 
     if (existingItem) {
+      // A parallel request may observe the in-memory item while the original
+      // request is still awaiting its commit. Dedupe is not a durability bypass.
+      await persistState();
+      pendingInputCommitIds.delete(existingItem.id);
       return cloneQueueItem(existingItem);
     }
   }
@@ -3226,7 +3285,9 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
   }
 
   state.items.push(item);
+  pendingInputCommitIds.add(item.id);
   await persistState();
+  pendingInputCommitIds.delete(item.id);
   if (!input.saveAsDraft) scheduleImmediateTick();
   return cloneQueueItem(item);
 }
@@ -3362,7 +3423,11 @@ export async function retryCodexQueueItem(
     // One explicit retry per terminal attempt. Repeated clicks and a response
     // lost during login/cutover return the same child, never another prompt.
     const existing = state.items.find((candidate) => candidate.retryOfItemId === item.id);
-    if (existing) return cloneQueueItem(existing);
+    if (existing) {
+      await persistState();
+      pendingInputCommitIds.delete(existing.id);
+      return cloneQueueItem(existing);
+    }
     const retry = cloneQueueItem(item);
     const at = nowIso();
     Object.assign(retry, {
@@ -3391,7 +3456,9 @@ export async function retryCodexQueueItem(
       }
     }
     state.items.push(retry);
+    pendingInputCommitIds.add(retry.id);
     await persistState();
+    pendingInputCommitIds.delete(retry.id);
     scheduleImmediateTick();
     return cloneQueueItem(retry);
   }

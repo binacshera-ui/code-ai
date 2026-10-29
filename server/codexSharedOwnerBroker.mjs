@@ -73,7 +73,7 @@ const SETTINGS = value => OBJECT(value) && Object.keys(value).length === 5
   && Object.keys(value).every(key => ['model', 'effort', 'cwd', 'approvalPolicy', 'sandboxPolicy'].includes(key))
   && MODEL(value.model) && (value.effort === null || EFFORTS.has(value.effort))
   && ABSOLUTE(value.cwd) && approvalPolicy(value.approvalPolicy) && sandboxPolicy(value.sandboxPolicy);
-const GLOBAL_WRITES = /^(config\/(value\/write|batchWrite|mcpServer\/reload)|experimentalFeature\/enablement\/set)$/;
+const GLOBAL_WRITES = /^(config\/(value\/write|batchWrite|mcpServer\/reload)|experimentalFeature\/enablement\/set|account\/(login\/start|logout))$/;
 function sameSetting(a, b, depth = 0) {
   if (depth > 20) return false;
   if (a === b) return true;
