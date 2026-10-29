@@ -82,7 +82,9 @@ deploymentDrain.registerParticipant('app-http-lifecycle', () => ({
   active: 0,
   reason: 'http_lifecycle_unqualified',
 }));
-const deploymentPassiveHttp = PASSIVE_HTTP_NODE ? createCodexDeploymentPassiveHttpAdmission(deploymentDrain) : null;
+const deploymentPassiveHttp = PASSIVE_HTTP_NODE ? createCodexDeploymentPassiveHttpAdmission(deploymentDrain, {
+  peerId: process.env.CODE_AI_HTTP_PEER_ID?.trim() || 'uploads',
+}) : null;
 const deploymentHttp = createCodexDeploymentHttpTracker(deploymentPassiveHttp || deploymentDrain);
 const STARTUP_CONFIGURATION_EXIT_CODE = 78;
 const configuredCorsOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')

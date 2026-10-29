@@ -1,4 +1,4 @@
-/** Keep managed ChatGPT login/logout inside the canonical persistent owner. */
+/** Keep account authentication inside the canonical persistent owner. */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
@@ -9,14 +9,15 @@ export function getSharedAccountCommand(profile, action, fallbackBin, appRoot = 
   const sharedProfiles = new Set((process.env.CODE_AI_CODEX_SHARED_OWNER_PROFILES || '')
     .split(',').map((value) => value.trim()).filter(Boolean));
   if (!sharedProfiles.has(profile.id)) {
-    return { bin: fallbackBin, args: action === 'login' ? ['login', '--device-auth'] : ['logout'] };
+    return { bin: fallbackBin, args: action === 'login' ? ['login', '--device-auth']
+      : action === 'api-key' ? ['login', '--with-api-key'] : action === 'read' ? ['login', 'status'] : ['logout'] };
   }
   const program = resolveCodexRuntimeProgram('accountAuth',{sourceRoot:appRoot});
   return { bin: process.execPath, args: [program, '--home', profile.codexHome, action] };
 }
 
-export async function runSharedAccountCommand(codexHome, action, { signal, onPrompt = () => {} } = {}) {
-  if (!['login', 'logout'].includes(action)) throw new Error('Unsupported account action');
+export async function runSharedAccountCommand(codexHome, action, { signal, onPrompt = () => {}, apiKey } = {}) {
+  if (!['login', 'logout', 'read', 'api-key'].includes(action)) throw new Error('Unsupported account action');
   const endpoint = await resolveCodexSharedSocket(codexHome, process.getuid(), true);
   const ws = new WebSocket(`ws+unix://${endpoint.socketPath}:/`, { handshakeTimeout: 5000, maxPayload: 1024 * 1024 });
   const pending = new Map(), completions = new Map();
@@ -61,11 +62,42 @@ export async function runSharedAccountCommand(codexHome, action, { signal, onPro
     if (initialized?.codexHome !== endpoint.codexHome) throw new Error('Shared Codex account owner mismatch');
     ws.send(JSON.stringify({ method: 'initialized', params: {} }));
     if (signal?.aborted) throw new Error('Shared Codex login cancelled');
+    if (action === 'read') {
+      const result = await call('account/read', { refreshToken: false });
+      const account = result?.account;
+      return { type: account?.type === 'apiKey' || account?.type === 'chatgpt' ? account.type : null };
+    }
+    // A manual account action is refused while native work is active. Nothing
+    // is interrupted, scheduled, retried, or resubmitted by this check.
+    let cursor = null, pageCount = 0;
+    do {
+      const loaded = await call('thread/loaded/list', { limit: 100, ...(cursor ? { cursor } : {}) });
+      if (!Array.isArray(loaded?.data) || ++pageCount > 100) throw new Error('Shared Codex active work status unavailable');
+      for (const threadId of loaded.data) {
+        if (typeof threadId !== 'string') throw new Error('Shared Codex active work status unavailable');
+        const result = await call('thread/read', { threadId, includeTurns: false });
+        if (result?.thread?.status?.type === 'active') throw new Error('Shared Codex account change failed: active work must finish first');
+      }
+      cursor = typeof loaded.nextCursor === 'string' ? loaded.nextCursor : null;
+    } while (cursor);
     if (action === 'logout') {
       await call('account/logout', {});
       const account = await call('account/read', {refreshToken:false});
       if (account.account != null) throw new Error('Shared Codex logout account verification failed');
       return;
+    }
+
+    if (action === 'api-key') {
+      if (typeof apiKey !== 'string' || !apiKey.trim() || apiKey.length > 16384) {
+        throw new Error('A saved API key is required');
+      }
+      const current = await call('account/read', { refreshToken: false });
+      if (current?.account != null) throw new Error('Disconnect the current Codex account before API login');
+      const result = await call('account/login/start', { type: 'apiKey', apiKey });
+      if (result?.type !== 'apiKey') throw new Error('Shared Codex API login unavailable');
+      const account = await call('account/read', { refreshToken: false });
+      if (account?.account?.type !== 'apiKey') throw new Error('Shared Codex API login account verification failed');
+      return { type: 'apiKey' };
     }
 
     const result = await call('account/login/start', { type: 'chatgptDeviceCode' });
@@ -112,12 +144,23 @@ if (process.argv[1] && path.basename(process.argv[1]) === 'codexSharedAccountAut
   process.once('SIGTERM', () => controller.abort());
   process.once('SIGINT', () => controller.abort());
   try {
-    await runSharedAccountCommand(home, action, { signal: controller.signal,
+    let apiKey;
+    if (action === 'api-key') {
+      let input = '';
+      for await (const chunk of process.stdin) {
+        input += chunk;
+        if (input.length > 16384) throw new Error('Invalid API credential');
+      }
+      apiKey = input.trim();
+    }
+    const result = await runSharedAccountCommand(home, action, { signal: controller.signal, apiKey,
       onPrompt: ({ verificationUrl, userCode }) => process.stdout.write(
         `Open ${verificationUrl}\nEnter this one-time code: ${userCode}\n`) });
-    process.stdout.write(action === 'login' ? 'Successfully logged in\n' : 'Successfully logged out\n');
-  } catch {
-    process.stderr.write('Shared Codex account authentication failed.\n');
-    process.exitCode = 1;
+    process.stdout.write(action === 'read' ? `${JSON.stringify(result)}\n`
+      : action === 'logout' ? 'Successfully logged out\n' : 'Successfully logged in\n');
+  } catch (error) {
+    const busy = error?.message === 'Shared Codex account change failed: active work must finish first';
+    process.stderr.write(busy ? 'Account change failed: active work must finish first.\n' : 'Shared Codex account authentication failed.\n');
+    process.exitCode = busy ? 2 : 1;
   }
 }

@@ -1,4 +1,5 @@
 import { promises as fs } from 'fs';
+import { syncCodexAccountFiles } from './codexCredentialInheritance.js';
 import path from 'path';
 import { CODEX_APP_CONFIG, type AppMode, type AppProvider } from './config.js';
 import type {
@@ -260,7 +261,7 @@ export async function prepareSupportProfileHome(profile: CodexProfile): Promise<
   }
 
   await Promise.all([
-    copyFileIfFresh(path.join(sourceProfile.codexHome, 'auth.json'), path.join(profile.codexHome, 'auth.json')),
+    syncCodexAccountFiles(sourceProfile.codexHome, profile.codexHome),
     copyFileIfFresh(path.join(sourceProfile.codexHome, 'config.toml'), path.join(profile.codexHome, 'config.toml')),
     copyFileIfFresh(path.join(sourceProfile.codexHome, 'installation_id'), path.join(profile.codexHome, 'installation_id')),
     copyFileIfFresh(path.join(sourceProfile.codexHome, 'models_cache.json'), path.join(profile.codexHome, 'models_cache.json')),

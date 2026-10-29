@@ -1,4 +1,5 @@
 import { promises as fs } from 'fs';
+import { syncCodexAccountFiles } from './codexCredentialInheritance.js';
 import path from 'path';
 import type { CodexProfile } from './codexService.js';
 import { CODEX_APP_CONFIG } from './config.js';
@@ -81,7 +82,7 @@ export async function prepareAgentSessionProfileHome(profile: CodexProfile): Pro
   }
 
   await Promise.all([
-    copyFileIfFresh(path.join(sourceProfile.codexHome, 'auth.json'), path.join(profile.codexHome, 'auth.json')),
+    syncCodexAccountFiles(sourceProfile.codexHome, profile.codexHome),
     copyFileIfFresh(path.join(sourceProfile.codexHome, 'config.toml'), path.join(profile.codexHome, 'config.toml')),
   ]);
   alignPathOwnershipToProfile(profile, profile.codexHome);

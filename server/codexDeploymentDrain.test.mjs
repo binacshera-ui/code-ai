@@ -18,7 +18,8 @@ const PASSIVE_PROCESS_FIXTURE = `
 import http from 'node:http';
 const { createCodexDeploymentDrain, createCodexDeploymentHttpTracker, createCodexDeploymentPassiveHttpAdmission } = await import(process.argv[1]);
 const authority = createCodexDeploymentDrain({ queueRoot: process.argv[2], executionEnabled: false });
-const client = createCodexDeploymentPassiveHttpAdmission(authority, { peerId: process.argv[3], reconnectMs: Number(process.argv[4]) });
+const client = createCodexDeploymentPassiveHttpAdmission(authority, {
+  peerId: process.env.CODE_AI_HTTP_PEER_ID?.trim() || 'uploads', reconnectMs: Number(process.argv[4]) });
 const tracker = createCodexDeploymentHttpTracker(client);
 const holds = new Map();
 const layer = { handle: async (req, res) => {
@@ -61,7 +62,7 @@ process.on('message', async input => {
 async function passiveFixture(t, owner, peerId = 'uploads', reconnectMs = 50) {
   const child = spawn(process.execPath, ['--input-type=module', '-e', PASSIVE_PROCESS_FIXTURE,
     new URL('./codexDeploymentDrain.mjs', import.meta.url).href, path.dirname(path.dirname(owner.controllerFile)), peerId, String(reconnectMs)],
-  { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+  { env: { ...process.env, CODE_AI_HTTP_PEER_ID: peerId }, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
   const events = [];
   const listeners = new Set();
   const wait = (predicate, timeoutMs = 5_000) => {
@@ -589,6 +590,24 @@ test('additional connected ingress is counted regardless of its role, and fake n
   assert.equal((await upload).status, 200);
   await eventually(() => authority.status().drained);
   assert.equal(operate('seal').httpIngressDrainProven, true);
+});
+
+test('uploads and account-auth passive peers admit protected reads without conflicting identities', async t => {
+  const { authority } = fixture(t, { requiredHttpPeers: ['uploads'] });
+  registerReadyParticipants(authority);
+  await authority.startController();
+  t.after(() => authority.stopController());
+  const uploads = await passiveFixture(t, authority);
+  const account = await passiveFixture(t, authority, 'account-auth');
+  const responses = await Promise.all([uploads, account].map(peer => fetch(peer.url + '/api/codex/account-auth')));
+  assert.deepEqual(responses.map(response => response.status), [200, 200]);
+  await Promise.all(responses.map(response => response.text()));
+  assert.equal(authority.status().coverageReady, true);
+  for (const peer of [uploads, account]) {
+    peer.child.send({ action: 'status' });
+    const status = await peer.wait(event => event.event === 'peer_status');
+    assert.equal(status.connected, true);
+  }
 });
 
 test('actual passive callback upload I/O remains admitted after abort until next settles it', async t => {

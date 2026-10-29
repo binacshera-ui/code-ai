@@ -53,6 +53,17 @@ function fixture(options = {}) {
 
 async function enqueue(f) { return f.broker.handle(f.channel, { method: 'thread/queue/add', params: params() }); }
 
+test('manual account changes are refused while owner work is reserved without changing or replaying that work', async () => {
+  const f = fixture(); await enqueue(f);
+  const before = f.calls.length;
+  for (const method of ['account/logout', 'account/login/start']) {
+    await assert.rejects(f.broker.handle(f.channel, { method, params: {} }),
+      error => error instanceof BrokerRefusal && error.reason === 'owner-settings-reserved');
+  }
+  assert.equal(f.calls.length, before);
+  assert.equal(f.queue.length, 1);
+});
+
 test('resumed browser thread with identical settings uses native snapshot mode without a settings event', async () => {
   const f = fixture(); f.broker.ownerModes.clear();
   const nativeCall = f.channel.call.bind(f.channel);
