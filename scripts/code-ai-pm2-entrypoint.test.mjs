@@ -71,7 +71,7 @@ test('waits for an occupied production port before importing the server', async 
   }
 });
 
-async function startupFixture(t, activationChanges, prepare) {
+async function startupFixture(t, activationChanges, prepare, additionalEnv = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'code-ai-pm2-activation-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const fallback = path.join(directory, 'fallback.mjs');
@@ -97,7 +97,8 @@ async function startupFixture(t, activationChanges, prepare) {
     cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, HOST: '127.0.0.1',
       PORT: String(port), CODE_AI_PM2_TARGET_MODULE: fallback,
       CODE_AI_PM2_ACTIVATION_FILE: activationFile, CODEX_STORAGE_ROOT: directory,
-      CODEX_QUEUE_ROOT: path.join(directory, 'queue') }, stdio: ['ignore', 'pipe', 'pipe'],
+      CODEX_QUEUE_ROOT: path.join(directory, 'queue'), CODE_AI_PM2_REQUIRE_ACTIVATION: '0',
+      ...additionalEnv }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
   child.stdout.on('data', chunk => { output += chunk; });
@@ -139,8 +140,18 @@ test('missing activation pointer cannot reopen a stale runtime after SQLite migr
     await unlink(activationFile);
     await mkdir(path.join(directory, 'queue'));
     await writeFile(path.join(directory, 'queue', 'queue.sqlite'), 'synthetic-presence-marker');
-  });
+  }, { CODE_AI_PM2_REQUIRE_ACTIVATION: '1' });
   assert.equal(result.exit, 1, result.output);
   assert.match(result.output, /SQLite queue requires its private runtime activation pointer/);
   assert.doesNotMatch(result.output, /fallback-imported|verified-successor-imported/);
+});
+
+test('portable SQLite installations can restart the configured bundle without a private activation pointer', async t => {
+  const result = await startupFixture(t, undefined, async ({ directory, activationFile }) => {
+    await unlink(activationFile);
+    await mkdir(path.join(directory, 'queue'));
+    await writeFile(path.join(directory, 'queue', 'queue.sqlite'), 'synthetic-presence-marker');
+  });
+  assert.equal(result.exit, 0, result.output);
+  assert.match(result.output, /fallback-imported/);
 });

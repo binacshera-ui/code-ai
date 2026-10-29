@@ -54,18 +54,21 @@ const activationFile = process.env.CODE_AI_PM2_ACTIVATION_FILE?.trim()
 
 // An already-running singleton can accept an in-owner repair without restarting
 // its accepted work. This private pointer makes the matching immutable successor
-// authoritative on the NEXT start too. A malformed/stale pointer fails closed;
-// falling back to the old JSON-only runtime could lose acknowledged SQLite work.
+// authoritative on the NEXT start too. A malformed/stale pointer fails closed.
+// Operators recovering an in-owner SQLite migration can explicitly require this
+// pointer; ordinary portable installs can start their SQLite-capable bundle.
 async function resolveTargetModuleUrl() {
   let metadata;
   try { metadata = await lstat(activationFile); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    try {
-      await lstat(path.join(process.env.CODEX_QUEUE_ROOT?.trim() || path.join(runtimeStorageRoot, 'queue'), 'queue.sqlite'));
-      throw new Error('SQLite queue requires its private runtime activation pointer; refusing stale runtime fallback');
-    } catch (queueError) {
-      if (queueError.code !== 'ENOENT') throw queueError;
+    if (process.env.CODE_AI_PM2_REQUIRE_ACTIVATION === '1') {
+      try {
+        await lstat(path.join(process.env.CODEX_QUEUE_ROOT?.trim() || path.join(runtimeStorageRoot, 'queue'), 'queue.sqlite'));
+        throw new Error('SQLite queue requires its private runtime activation pointer; refusing stale runtime fallback');
+      } catch (queueError) {
+        if (queueError.code !== 'ENOENT') throw queueError;
+      }
     }
     return configuredTarget ? pathToFileURL(path.resolve(configuredTarget)).href
       : new URL('../dist/server.js', import.meta.url).href;
