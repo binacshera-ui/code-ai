@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node scripts/test-question-images.mjs",
     "test:question-images": "node scripts/test-question-images.mjs",
+    "test:codex-subscriptions": "node --test --test-concurrency=1 server/codexSharedOwnerBroker.test.mjs server/codexSharedSubscriptions.test.mjs server/codexSharedSubscriptions.handoff.test.mjs",
     "test:session-storage": "node --test server/codexStoredHistory.test.mjs && session_storage_root=$(mktemp -d /tmp/code-ai-session-storage-XXXXXX) && esbuild server/codexSessionFiles.test.ts --bundle --platform=node --format=esm --outfile=$session_storage_root/test.mjs --external:node-pty && node --test $session_storage_root/test.mjs",
     "test:drafts": "draft_test_root=$(mktemp -d /tmp/code-ai-drafts-build-XXXXXX) && esbuild client/src/components/codex/sendPressGesture.test.ts server/codexQueue.drafts.test.ts --bundle --platform=node --format=esm --outdir=$draft_test_root --external:node-pty && node --test $draft_test_root/client/src/components/codex/sendPressGesture.test.js $draft_test_root/server/codexQueue.drafts.test.js",
     "test:uploads": "esbuild shared/uploadLimits.test.ts server/codexUploads.test.ts --bundle --platform=node --format=esm --outdir=.code-ai/tmp/upload-tests --external:express --external:multer && node --test .code-ai/tmp/upload-tests/shared/uploadLimits.test.js .code-ai/tmp/upload-tests/server/codexUploads.test.js",
