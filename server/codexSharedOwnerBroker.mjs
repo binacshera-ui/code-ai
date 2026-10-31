@@ -827,6 +827,36 @@ export async function startCodexSharedOwnerBroker({ socketPath, backendSocket, c
   };
 }
 
+/** Broker-only rollback keeps the predecessor's routing/admission core but
+ * needs a subscriber for its already-created protected descendants too.
+ * This connection lives in the SAME broker process and never unsubscribes.
+ */
+export async function retainCodexSharedOwnerSubscriptions({ backendSocket, codexHome }, predecessor) {
+  let subscriptions, recovery;
+  try {
+    const { home } = await assertPrivateNativeEndpoint(backendSocket, codexHome);
+    recovery = await connectNative(backendSocket, home, frame => {
+      if (['thread/started', 'turn/completed'].includes(frame.method)) subscriptions?.schedule();
+    });
+    await recovery.call('initialize', { clientInfo: { name: 'code-ai-broker-retention', version: '1' },
+      capabilities: { experimentalApi: true } });
+    recovery.send({ method: 'initialized', params: {} }); recovery.setSink(() => {});
+    subscriptions = new CodexSharedSubscriptions({ broker: predecessor.broker,
+      channels: new Set([recovery]), recovery, releaseIdle: false });
+    // Complete protection before the installed runner publishes readiness.
+    await subscriptions.sweep();
+    return { broker: predecessor.broker, async close() {
+      subscriptions.close(); recovery.ws.terminate(); await predecessor.close();
+    } };
+  } catch (error) {
+    subscriptions?.close(); recovery?.ws.terminate();
+    // Ownership transferred to this helper when the predecessor opened. A
+    // failed inspection must not leave its server keeping the adopter alive.
+    try { await predecessor.close(); } catch { /* Preserve the inspection failure. */ }
+    throw error;
+  }
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   startCodexSharedOwnerBroker({ socketPath: process.argv[2], backendSocket: process.argv[3],
     codexHome: process.env.CODEX_HOME, journalPath: process.argv[4] }).then(instance => {

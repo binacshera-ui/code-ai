@@ -125,18 +125,25 @@ test('existing runner adopts the same owner while active parent/child questions 
     const rejoined = await client(plan.frontendSocket, 'code-ai'); clients.push(rejoined);
     await rejoined.call('thread/resume', { threadId: 'own', excludeTurns: true });
     await rejoined.call('thread/resume', { threadId: 'child', excludeTurns: true });
-    await control.call('fixture/subscribeAll');
     await waitFor(() => rejoined.events.some(f => f.id === 'question-own') && rejoined.events.some(f => f.id === 'question-child'));
     for (const id of ['question-own', 'question-child']) rejoined.ws.send(JSON.stringify({ id, result: { answers: {} } }));
     await waitFor(async () => {
       const state = await control.call('fixture/state');
       return state.threads.orphan.status === 'notLoaded' && state.answers.length === 2;
     });
+    await waitFor(async () => {
+      const state = await control.call('fixture/state');
+      return ['idle-child', 'terminal-child'].every(id => state.threads[id].subscribers.includes('code-ai-broker-recovery'));
+    });
+    await control.call('fixture/advancePastIdleGrace');
     const state = await control.call('fixture/state');
     assert.equal(state.pid, nativePid); assert.equal(state.submissions, 0);
     assert.equal(state.threads.own.status, 'active'); assert.equal(state.threads.child.status, 'active');
     assert.equal(state.threads['idle-child'].status, 'idle');
-    for (const id of ['own', 'child', 'idle-child']) assert.ok(state.threads[id].subscribers.includes('code-ai-broker-recovery'));
+    assert.equal(state.threads['terminal-child'].status, 'idle');
+    assert.equal(state.terminalAlive, true); assert.doesNotThrow(() => process.kill(state.terminalPid, 0));
+    assert.equal(state.expiredGraceChecks, 1);
+    for (const id of ['own', 'child', 'idle-child', 'terminal-child']) assert.ok(state.threads[id].subscribers.includes('code-ai-broker-recovery'));
     assert.equal(state.threads.orphan.subscribers.length, 0);
     assert.equal(state.historyPreserved, true);
     assert.deepEqual((await readFile(path.join(ownerDirectory, 'fixture-started-pids'), 'utf8')).trim().split('\n'), [String(nativePid)]);

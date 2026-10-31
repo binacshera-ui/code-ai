@@ -53,6 +53,8 @@ and proves identical native PID/start identity, engine/lock inodes, zero input
 submissions, question reconnection, preservation of an active tree including
 idle children, and expiry of unrelated orphan subscriptions. Its accelerated
 expiry is a fixture behavior, not a claim about native's production timer.
+An idle child with a live synthetic background terminal is retained after an
+explicit simulated grace expiry, without a frontend resume of that child.
 
 The installed binary can independently qualify recovery and permission
 preservation against a loopback fake provider without real account data:
@@ -100,8 +102,20 @@ Before replacement:
    read-only tool call in the active conversation. Observe metadata-only
    resource and loaded-thread counts beyond native's actual grace period.
 
-Rollback must use the same adapter adoption contract and preserved predecessor
-broker closure, retaining the same native process. Do not fall back to a fresh
+Rollback must use the same adapter adoption contract, retaining the same native
+process. A bare predecessor does not automatically attach to already-created
+descendants. Preserve its original broker closure and wrap its unchanged
+admission/routing core with `retainCodexSharedOwnerSubscriptions`. This adds
+one protected-tree subscriber inside that same broker process; it never
+unsubscribes or supplies input, setting overrides or queued work. It completes
+its initial inspection before readiness and closes the opened predecessor if
+inspection fails. The same goal/queue guards apply to every attachment.
+
+Qualify both the exact forward artifact and this rollback artifact against the
+installed adoption runner, including a failed candidate and a failed initial
+retention inspection. Parent/child questions and a descendant's background
+terminal must survive simulated expiry without frontend reattachment of idle
+children. Do not fall back to a fresh
 owner, ordinary service restart, archive/unarchive or killing MCP children.
 Any ambiguous custody, failed active-client recovery, changed live source or
 unproven rollback blocks the live handoff. A passing isolated fixture is not

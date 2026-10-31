@@ -17,10 +17,11 @@ export function trackExplicitSubscription(channel, method, result) {
 export function changesSubscription(method) { return subscribedMethods.has(method); }
 
 export class CodexSharedSubscriptions {
-  constructor({ broker, channels, recovery, intervalMs = 300_000, debounceMs = 1_000 }) {
+  constructor({ broker, channels, recovery, intervalMs = 300_000, debounceMs = 1_000, releaseIdle = true }) {
     this.broker = broker;
     this.channels = channels;
     this.recovery = recovery;
+    this.releaseIdle = releaseIdle;
     this.debounceMs = debounceMs;
     this.closed = false;
     this.pending = null;
@@ -133,6 +134,7 @@ export class CodexSharedSubscriptions {
         await this.recovery.call('thread/resume', { threadId: row.threadId, excludeTurns: true });
       });
     }
+    if (!this.releaseIdle) return { unsubscribed: 0 };
     let unsubscribed = 0;
     for (const row of rows) {
       if (!row.safe || protectedRoots.has(row.root)) continue;

@@ -124,3 +124,13 @@ test('a goal activated after inspection is rechecked under admission before atta
   assert.equal(f.calls.some(call => call.method === 'thread/resume' && call.params.threadId === 'child'), false);
   assert.equal(f.calls.some(call => call.method === 'thread/unsubscribe'), false);
 });
+
+test('rollback retention mode attaches protected descendants without any unsubscription or new input', async t => {
+  const f = fixture(t, [{ id: 'own', status: 'active' }, { id: 'terminal', parent: 'own', terminals: true },
+    { id: 'orphan-root', status: 'notLoaded', loaded: false }, { id: 'orphan', parent: 'orphan-root' }]);
+  f.lifecycle.releaseIdle = false;
+  f.recovery.subscriptions.clear();
+  assert.deepEqual(await f.lifecycle.sweep(), { unsubscribed: 0 });
+  assert.ok(f.recovery.subscriptions.has('own')); assert.ok(f.recovery.subscriptions.has('terminal'));
+  assert.equal(f.calls.some(call => call.method === 'thread/unsubscribe' || call.method === 'turn/start' || call.method === 'thread/queue/add'), false);
+});
