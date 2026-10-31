@@ -25,8 +25,9 @@ Native keeps its own inactivity grace period and active-turn checks.
   prevents cleanup instead of affecting the turn outcome.
 - Reattach the still-loaded protected tree to recovery after a broker-only
   handoff. Resuming a root alone does not subscribe a replacement connection to
-  existing children. These metadata-only resumes carry no setting overrides or
-  input and do not replay a turn. A thread that is already unloaded is skipped.
+  existing children. These resumes carry no setting overrides or input.
+  Threads with active/unknown goals or pending inputs are excluded because a
+  native resume can continue an active goal. A thread already unloaded is skipped.
 
 Cleanup runs after startup and terminal/thread-created events, with a
 five-minute fallback interval. It does not expose a maintenance mutation RPC.

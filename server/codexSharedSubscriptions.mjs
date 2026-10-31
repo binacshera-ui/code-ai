@@ -95,29 +95,43 @@ export class CodexSharedSubscriptions {
       if (!chain) continue;
       const value = metadata.get(threadId), root = chain.at(-1);
       const rootStatus = metadata.get(root).status;
-      const row = { ...value, chain, root, safe: false };
+      const row = { ...value, chain, root, safe: false, mayResume: false };
       rows.push(row);
       if (value.status !== 'idle' || !value.persistent || !['idle', 'notLoaded'].includes(rootStatus)
           || chain.some(threadId => this.unresolved(threadId))) {
-        protectedRoots.add(root); continue;
+        protectedRoots.add(root);
       }
+      if (!value.persistent) continue;
       const queue = await this.recovery.call('thread/queue/list', { threadId, limit: 1 });
       const goal = await this.recovery.call('thread/goal/get', { threadId });
+      const emptyQueue = Array.isArray(queue?.data) && queue.data.length === 0 && !queue.nextCursor;
+      const inactiveGoal = Object.hasOwn(goal ?? {}, 'goal') && (!goal.goal || terminalGoals.has(goal.goal.status));
+      // Native resume can continue an active goal when a thread becomes idle.
+      // Never let subscription housekeeping wake a goal or pending input.
+      row.mayResume = ['active', 'idle'].includes(value.status) && emptyQueue && inactiveGoal;
+      if (!row.mayResume) protectedRoots.add(root);
+      if (value.status !== 'idle') continue;
       const terminals = await this.recovery.call('thread/backgroundTerminals/list', { threadId, limit: 1 });
-      row.safe = Array.isArray(queue?.data) && queue.data.length === 0 && !queue.nextCursor
-        && Object.hasOwn(goal ?? {}, 'goal') && (!goal.goal || terminalGoals.has(goal.goal.status))
+      row.safe = row.mayResume
         && Array.isArray(terminals?.data) && terminals.data.length === 0 && !terminals.nextCursor;
       if (!row.safe) protectedRoots.add(root);
     }
     // Rejoining a root does not subscribe a new connection to already-created
     // descendants. Reattach the still-loaded protected tree after broker-only
     // handoff so its idle children survive beyond native's grace period too.
-    // Resume supplies no overrides or input and never starts/replays a turn.
-    for (const row of rows) if (protectedRoots.has(row.root) && row.persistent) {
+    // Resume supplies no overrides/input; recheck goal/queue state under the
+    // public admission fence before using it to attach this connection.
+    for (const row of rows) if (protectedRoots.has(row.root) && row.mayResume) {
       if (this.closed) return { unsubscribed: 0 };
-      const current = await this.recovery.call('thread/read', { threadId: row.threadId, includeTurns: false });
-      if (current?.thread?.status?.type === 'notLoaded') continue;
-      await this.recovery.call('thread/resume', { threadId: row.threadId, excludeTurns: true });
+      await this.broker.serialize(row.threadId, async () => {
+        const current = await this.recovery.call('thread/read', { threadId: row.threadId, includeTurns: false });
+        if (!['active', 'idle'].includes(current?.thread?.status?.type)) return;
+        const goal = await this.recovery.call('thread/goal/get', { threadId: row.threadId });
+        const queue = await this.recovery.call('thread/queue/list', { threadId: row.threadId, limit: 1 });
+        if (!Object.hasOwn(goal ?? {}, 'goal') || goal.goal && !terminalGoals.has(goal.goal.status)
+            || !Array.isArray(queue?.data) || queue.data.length || queue.nextCursor) return;
+        await this.recovery.call('thread/resume', { threadId: row.threadId, excludeTurns: true });
+      });
     }
     let unsubscribed = 0;
     for (const row of rows) {

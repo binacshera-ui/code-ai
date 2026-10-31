@@ -65,6 +65,8 @@ test('queued inputs, goals, background terminals and active descendants protect 
     { id: 'idle-sibling', parent: 'child-root' },
   ]);
   assert.deepEqual(await f.lifecycle.sweep(), { unsubscribed: 0 });
+  for (const threadId of ['queued', 'goal']) assert.equal(f.calls.some(call =>
+    call.method === 'thread/resume' && call.params.threadId === threadId), false, 'Cleanup must not wake pending work or an active goal');
 });
 
 test('released reservation can lose the recovery subscription; an explicitly opened root and children remain with their frontend', async t => {
@@ -109,4 +111,16 @@ test('unsubscription is serialized with a late public resume and cleanup closes 
   assert.ok(f.web.subscriptions.has('other'));
   f.lifecycle.close();
   assert.deepEqual(await f.lifecycle.sweep(), { unsubscribed: 0 });
+});
+
+test('a goal activated after inspection is rechecked under admission before attaching recovery', async t => {
+  const f = fixture(t, [{ id: 'own', status: 'active' }, { id: 'child', parent: 'own' }]);
+  const serialize = f.broker.serialize.bind(f.broker);
+  f.broker.serialize = async (threadId, operation) => {
+    if (threadId === 'child') f.byId.get('child').goal = { status: 'active' };
+    return serialize(threadId, operation);
+  };
+  await f.lifecycle.sweep();
+  assert.equal(f.calls.some(call => call.method === 'thread/resume' && call.params.threadId === 'child'), false);
+  assert.equal(f.calls.some(call => call.method === 'thread/unsubscribe'), false);
 });
