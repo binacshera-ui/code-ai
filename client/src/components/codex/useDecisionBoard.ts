@@ -15,7 +15,10 @@ export function useDecisionBoard(scope: string, api: DecisionBoardApi | null, op
   useEffect(() => {
     if (!current) return;
     const refresh = () => { if (document.visibilityState !== 'hidden') void current.refresh(); };
-    refresh();
+    // Load the small initial snapshot even in a background tab. Otherwise an
+    // initially hidden conversation has neither a badge nor an enabled-mode
+    // state and may never subscribe to visibility changes until opened.
+    void current.refresh();
     if (!tracking) return;
     const timer = setInterval(refresh, open ? 5_000 : 20_000);
     document.addEventListener('visibilitychange', refresh);
