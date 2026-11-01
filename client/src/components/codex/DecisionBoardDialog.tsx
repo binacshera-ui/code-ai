@@ -101,7 +101,7 @@ export function DecisionBoardView({ state, onChange, onSave, onSubmit, onEnabled
         <button type="button" className="dd-action" role="switch" aria-checked={board?.enabled || false} disabled={!board || busy || locked} onClick={() => void onEnabled(!board?.enabled)}>{board?.enabled ? 'מצב החלטות פעיל' : 'הפעל החלטות בשיחה'}</button>
         {board && <span className="dd-muted text-xs">{progress.answered}/{progress.total} נבחרו</span>}
       </div>
-      <button type="button" className="dd-action" disabled={busy || state.loading} onClick={onRefresh} aria-label="רענן החלטות"><RefreshCw aria-hidden="true" className="h-4 w-4" /></button>
+      <button type="button" className="dd-action" disabled={busy || state.loading} onClick={onRefresh} aria-label="רענן את ההחלטות"><RefreshCw aria-hidden="true" className="h-4 w-4" /></button>
       {progress.total > 0 && <div role="progressbar" aria-label="החלטות שנבחרו" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.answered} className="h-1.5 w-full overflow-hidden rounded-full" style={{ background: 'var(--dd-soft)' }}><div className="h-full rounded-full" style={{ width: `${progress.answered / progress.total * 100}%`, background: 'var(--dd-muted)' }} /></div>}
     </div>
     <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
