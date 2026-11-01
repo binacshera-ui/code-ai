@@ -227,6 +227,8 @@ import {
   rebindSessionFlowMode,
   setSessionFlowMode,
 } from './codexFlowMode.js';
+import { buildSessionDecisionBoardPromptAdditions, ingestSessionDecisionBoardFromText,
+  rebindSessionDecisionBoard } from './sessionDecisionBoard.js';
 import {
   BrowserModeDisabledError,
   closeSessionBrowserViewer,
@@ -305,10 +307,24 @@ import {
 } from './personalChromeBridge.js';
 import { createWorkModeRouter } from './codexWorkModeRoutes.js';
 import { createServerStatusRouter } from './serverStatusRoutes.js';
+import { createSessionDecisionBoardRouter } from './sessionDecisionBoardRoutes.js';
 
 const router = Router();
 router.use(createServerStatusRouter(requireCodexAccess));
 router.use(createWorkModeRouter(requireCodexAccess, resolveCodexQueueSessionId));
+router.use(createSessionDecisionBoardRouter({
+  requireAccess: requireCodexAccess,
+  findProfile: findConfiguredProfile,
+  resolveSessionKey: resolveCodexQueueSessionId,
+  enqueue: async (input) => {
+    const sourceProfileId = input.profileId;
+    const sessionId = input.sessionId ? await resolveEffectiveSessionId(input.sessionId) : undefined;
+    const profileId = sessionId
+      ? await resolveEffectiveProfileIdForSession(sourceProfileId, sessionId)
+      : sourceProfileId;
+    return enqueueCodexQueueItem({ ...input, profileId, sourceProfileId, sessionId });
+  },
+}));
 router.use((req, res, next) => {
   if (['/auth/status','/device-unlock','/logout','/account-auth','/models','/rate-limits','/remote-agent/health']
       .some(prefix => req.path === prefix || req.path.startsWith(prefix + '/'))) {
@@ -6631,7 +6647,8 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           envelope: supportEnvelope,
         });
       }
-      const result = await runAgentPrompt(effectivePrompt, sessionId, profileId, attachments, {
+      const decisionBoardPrompt = await buildSessionDecisionBoardPromptAdditions(visibleProfileId, supportSessionKey);
+      const result = await runAgentPrompt([effectivePrompt, decisionBoardPrompt].filter(Boolean).join('\n\n'), sessionId, profileId, attachments, {
         cwd,
         injectDirectoryContext: !sessionId,
         executionConfig,
@@ -6680,6 +6697,8 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         await rebindSessionProjectMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionConversationSearchMode(visibleProfileId, sessionId, result.sessionId);
         await rebindSessionFlowMode(visibleProfileId, sessionId, result.sessionId);
+        await rebindSessionDecisionBoard(visibleProfileId, sessionId, result.sessionId)
+          .catch((error) => console.warn('[decisions] Board rebind preserved prior data:', error?.message || error));
         await rebindSessionFinalNotificationPreference(visibleProfileId, sessionId, result.sessionId);
       }
       if (!sessionId && supportSessionKey !== result.sessionId) {
@@ -6694,6 +6713,8 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
         await rebindSessionProjectMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionConversationSearchMode(visibleProfileId, supportSessionKey, result.sessionId);
         await rebindSessionFlowMode(visibleProfileId, supportSessionKey, result.sessionId);
+        await rebindSessionDecisionBoard(visibleProfileId, supportSessionKey, result.sessionId)
+          .catch((error) => console.warn('[decisions] Board rebind preserved prior data:', error?.message || error));
         await rebindSessionFinalNotificationPreference(visibleProfileId, supportSessionKey, result.sessionId);
       }
       if (supportEnvelope && supportSessionKey !== result.sessionId) {
@@ -6722,6 +6743,8 @@ router.post('/ask', requireCodexAccess, async (req, res) => {
           ? { mapId: flowModeAtRun.activeMapId, mapRevision: flowModeAtRun.mapRevision }
           : undefined,
       );
+      await ingestSessionDecisionBoardFromText(visibleProfileId, result.sessionId, result.finalMessage || '')
+        .catch((error) => console.warn('[decisions] Board output was not applied:', error?.message || error));
       await deleteSessionContextSelection(visibleProfileId, supportSessionKey);
       const session = await decorateSessionDetailForClient(
         visibleProfileId,

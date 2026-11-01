@@ -41,6 +41,8 @@ import { ActiveTaskChips } from './ActiveTaskChips';
 import { SendPromptButton } from './SendPromptButton';
 import { UserInputQuestionCard } from './UserInputQuestionCard';
 import { useCodexUserInput, type CodexUserInputApi } from './useCodexUserInput';
+import { useDecisionBoard } from './useDecisionBoard';
+import { decisionBoardProgress, decisionAnswerError, isDecisionBoardCode, type DecisionBoardApi } from './decisionBoardClient';
 import { interleaveUserInput } from './userInputTimeline';
 import { fetchWithDeploymentRetry } from './deploymentRetry';
 import type { ServerStatusSnapshot } from '../../../../shared/serverStatus';
@@ -67,6 +69,7 @@ import {
   Bot,
   CalendarClock,
   Check,
+  CheckCheck,
   Chrome,
   ChevronDown,
   ChevronLeft,
@@ -195,6 +198,10 @@ const ServerStatusDialog = lazy(async () => {
 const FlowModeDialog = lazy(async () => {
   const module = await import('./FlowModeDialog');
   return { default: module.FlowModeDialog };
+});
+const DecisionBoardDialog = lazy(async () => {
+  const module = await import('./DecisionBoardDialog');
+  return { default: module.DecisionBoardDialog };
 });
 import {
   installCodexGlobalCrashHandlers,
@@ -6267,6 +6274,10 @@ const MessageMarkdown = memo(function MessageMarkdown({
                     <span>מפת הזרימה נשמרה בקנבס החזותי של השיחה.</span>
                   </div>
                 );
+              }
+
+              if (isDecisionBoardCode(languageMatch?.[1], blockCode)) {
+                return <div className="my-3 flex items-center gap-2 rounded-2xl border px-4 py-3 text-xs font-medium" dir="rtl" style={{ background: 'var(--code-ai-soft-bg)', borderColor: 'var(--code-ai-panel-border)', color: 'var(--code-ai-canvas-text)' }}><CheckCheck aria-hidden="true" className="h-4 w-4 shrink-0" /><span>ההחלטות מוצגות בלוח ההחלטות של השיחה.</span></div>;
               }
 
               return (
@@ -13237,6 +13248,8 @@ function ModePickerDialog({
   onOpenProjectMode,
   onOpenConversationSearchMode,
   onOpenFlowMode,
+  onOpenDecisions,
+  decisionsEnabled,
   onOpenDesignMode,
   onOpenUxMode,
   onOpenConversationShare,
@@ -13274,6 +13287,8 @@ function ModePickerDialog({
   onOpenProjectMode: () => void;
   onOpenConversationSearchMode: () => void;
   onOpenFlowMode: () => void;
+  onOpenDecisions: () => void;
+  decisionsEnabled: boolean;
   onOpenDesignMode: () => void;
   onOpenUxMode: () => void;
   onOpenConversationShare: () => void;
@@ -13381,6 +13396,10 @@ function ModePickerDialog({
             <div className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-full', selectedConversationSearchMode.enabled ? 'bg-blue-100 text-blue-700' : 'bg-white text-blue-500')}>
               <ScanSearch className="h-4 w-4" />
             </div>
+          </button>
+
+          <button type="button" onClick={onOpenDecisions} className="flex min-h-11 w-full items-start justify-between gap-3 rounded-[1.25rem] border px-4 py-4 text-right transition" style={{ background: 'var(--code-ai-soft-bg)', borderColor: 'var(--code-ai-panel-border)', color: 'var(--code-ai-canvas-text)' }}>
+            <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><div className="text-sm font-semibold">החלטות</div>{decisionsEnabled && <span className="rounded-full border px-2 py-0.5 text-[10px]">פעיל</span>}</div><div className="mt-1 text-xs leading-6" style={{ color: 'var(--code-ai-text-muted)' }}>אישור, דחייה ובחירת אפשרויות בשיחה · הבחירות נשלחות לסוכן רק באישורך.</div></div><CheckCheck aria-hidden="true" className="mt-1 h-5 w-5 shrink-0" />
           </button>
 
           <button
@@ -15481,6 +15500,7 @@ export function CodexMobileApp() {
   const [isProjectModeDialogOpen, setIsProjectModeDialogOpen] = useState(false);
   const [isConversationSearchModeDialogOpen, setIsConversationSearchModeDialogOpen] = useState(false);
   const [isFlowModeDialogOpen, setIsFlowModeDialogOpen] = useState(false);
+  const [isDecisionBoardOpen, setIsDecisionBoardOpen] = useState(false);
   const [isPersonalChromeModeDialogOpen, setIsPersonalChromeModeDialogOpen] = useState(false);
   const [isPhoneModeDialogOpen, setIsPhoneModeDialogOpen] = useState(false);
   const [isAgentSessionDialogOpen, setIsAgentSessionDialogOpen] = useState(false);
@@ -15917,6 +15937,32 @@ export function CodexMobileApp() {
     };
   }, [serverId, profileId, selectedSessionId, currentProfile?.provider, authStatus?.authenticated, authStatus?.deviceUnlocked]);
   const userInput = useCodexUserInput(userInputScope, userInputApi, Boolean(selectedSessionId && activeSessionIds.has(selectedSessionId)));
+  const decisionBoardScope = JSON.stringify([serverId, profileId, currentQueueKey]);
+  const activeDecisionBoardScopeRef = useRef(decisionBoardScope);
+  activeDecisionBoardScopeRef.current = decisionBoardScope;
+  const decisionBoardApi = useMemo<DecisionBoardApi | null>(() => {
+    if (!profileId || !currentQueueKey || !authStatus?.authenticated || authStatus.deviceUnlocked === false) return null;
+    const route = '/api/codex/session-decisions';
+    const context = { profileId, sessionKey: currentQueueKey };
+    return {
+      read: () => fetchJsonForServer(serverId, `${route}?${new URLSearchParams(context)}`),
+      save: mutation => fetchJsonForServer(serverId, route, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...context, ...mutation }) }),
+      submit: input => fetchJsonForServer(serverId, `${route}/submit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...context, ...input }) }),
+    };
+  }, [serverId, profileId, currentQueueKey, authStatus?.authenticated, authStatus?.deviceUnlocked]);
+  const nativeDecisionPending = userInput.requests.filter(request => request.status === 'pending').length;
+  const decisionBoard = useDecisionBoard(decisionBoardScope, decisionBoardApi, isDecisionBoardOpen, buildQueueId, nativeDecisionPending > 0);
+  const decisionProgress = decisionBoardProgress(decisionBoard.state.board, decisionBoard.state.drafts);
+  useEffect(() => setIsDecisionBoardOpen(false), [decisionBoardScope]);
+  function openDecisionBoard() { setIsModePickerDialogOpen(false); setIsDecisionBoardOpen(true); }
+  function closeDecisionBoard() {
+    const snapshot = decisionBoard.state;
+    // Closing may save valid choices, never enqueue them. Invalid or failed
+    // drafts remain in this conversation's controller for the next opening.
+    if (decisionProgress.dirty && !snapshot.saving && !snapshot.submitting && !snapshot.uncertain && !snapshot.board?.pendingDelivery
+      && !snapshot.board?.items.some(item => snapshot.drafts[item.id] && decisionAnswerError(item, snapshot.drafts[item.id]))) void decisionBoard.client?.save();
+    setIsDecisionBoardOpen(false);
+  }
   const liveSessionActivity = useMemo(() => collectSessionActivity(queueItems, profileId), [queueItems, profileId]);
   const isFilePreviewOpen = isFilePreviewLoading
     || Boolean(activeFilePreview)
@@ -22631,6 +22677,7 @@ export function CodexMobileApp() {
     [agentSessions, sessionContextSelection.agentSessionDraftId]
   );
   const activeModeNames = [...workModeNames,
+    ...(decisionBoard.state.board?.enabled ? ['החלטות'] : []),
     ...(isProfessionalModeSelected ? ['מקצועי'] : []), ...(isAnnotationsModeSelected ? ['ביאורים'] : []),
     ...(isGoalModeSelected ? ['מטרה'] : []), ...(selectedAgentSessionDraft ? ['סוכנים'] : []),
     ...(sessionBrowserMode.enabled ? ['דפדפן'] : []), ...(sessionPersonalChromeMode.enabled ? ['Chrome אישי'] : []),
@@ -23843,7 +23890,7 @@ export function CodexMobileApp() {
               </div>
             )}
 
-            {(workModeNames.length > 0 || selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionProjectMode.enabled || sessionConversationSearchMode.enabled || sessionFlowMode.enabled || sessionDesignMode.enabled || sessionUxMode.enabled || sessionPersonalChromeMode.enabled || sessionPhoneMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionProjectModeLoading || isSessionConversationSearchModeLoading || isSessionFlowModeLoading || isSessionDesignModeLoading || isSessionUxModeLoading || isSessionPersonalChromeModeLoading || isSessionPhoneModeLoading) && (
+            {(profileId || workModeNames.length > 0 || selectedAnchorSummaries.length > 0 || selectedSkillSummaries.length > 0 || selectedReminderSummaries.length > 0 || selectedAgentSessionDraft || selectedActionRestriction || sessionBrowserMode.enabled || sessionProjectMode.enabled || sessionConversationSearchMode.enabled || sessionFlowMode.enabled || sessionDesignMode.enabled || sessionUxMode.enabled || sessionPersonalChromeMode.enabled || sessionPhoneMode.enabled || isProfessionalModeSelected || isAnnotationsModeSelected || isGoalModeSelected || isSessionContextSelectionSaving || isSessionProjectModeLoading || isSessionConversationSearchModeLoading || isSessionFlowModeLoading || isSessionDesignModeLoading || isSessionUxModeLoading || isSessionPersonalChromeModeLoading || isSessionPhoneModeLoading) && (
               <div dir="rtl" className="mb-3 flex flex-wrap items-center gap-2">
                 {workModeNames.length > 0 && <WorkModeBadges mode={workModes.mode} onOpen={openWorkModeDialog} />}
                 {isProfessionalModeSelected && (
@@ -23936,6 +23983,9 @@ export function CodexMobileApp() {
                     <span className="truncate">זרימה · {sessionFlowMode.maps.length > 0 ? `${sessionFlowMode.maps.length} מפות · ${sessionFlowMode.document?.title || 'ללא מפה פעילה'}` : 'ממתין למפה'}</span>
                   </button>
                 )}
+                <button type="button" data-testid="decision-board-launcher" onClick={openDecisionBoard} className="inline-flex min-h-11 max-w-full items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium transition" style={{ background: 'var(--code-ai-panel-bg)', borderColor: 'var(--code-ai-panel-border)', color: 'var(--code-ai-canvas-text)' }} title={decisionBoard.state.error ? 'עדכון או שמירת ההחלטות נכשלו; פתח לניסיון נוסף' : 'החלטות ובחירות בשיחה'}>
+                  <CheckCheck aria-hidden="true" className="h-4 w-4 shrink-0" /><span>החלטות</span>{decisionProgress.pending + nativeDecisionPending > 0 && <span className="rounded-full px-2 py-0.5 tabular-nums" style={{ background: 'var(--code-ai-soft-bg)' }}>{decisionProgress.pending + nativeDecisionPending}</span>}{decisionProgress.dirty > 0 && <span>לא נשמר</span>}{decisionBoard.state.error && <span aria-label="העדכון נכשל">!</span>}
+                </button>
                 {sessionDesignMode.enabled && (
                   <button
                     type="button"
@@ -25436,6 +25486,8 @@ export function CodexMobileApp() {
         onOpenProjectMode={openProjectModeDialog}
         onOpenConversationSearchMode={openConversationSearchModeDialog}
         onOpenFlowMode={openFlowModeDialog}
+        onOpenDecisions={openDecisionBoard}
+        decisionsEnabled={decisionBoard.state.board?.enabled || false}
         onOpenDesignMode={openDesignModeDialog}
         onOpenUxMode={openUxModeDialog}
         onOpenConversationShare={openConversationShareDialog}
@@ -25491,6 +25543,17 @@ export function CodexMobileApp() {
         onSave={saveConversationSearchModeDraft}
         onDisable={disableConversationSearchMode}
       />
+
+      {isDecisionBoardOpen && decisionBoard.client && (
+        <Suspense fallback={<div role="status" className="fixed inset-0 z-[140] flex items-center justify-center bg-black/30" dir="rtl"><span className="rounded-2xl px-4 py-3 text-sm" style={{ background: 'var(--code-ai-panel-bg)', color: 'var(--code-ai-canvas-text)' }}>טוען החלטות…</span></div>}>
+          <DecisionBoardDialog key={decisionBoardScope} scope={decisionBoardScope} themeClassName={themeClassName} themePresetId={themePresetId} state={decisionBoard.state} onChange={decisionBoard.client.change} onSave={decisionBoard.client.save} onEnabled={decisionBoard.client.setEnabled} onRefresh={() => void decisionBoard.client?.refresh()} onClose={closeDecisionBoard} native={{ requests: userInput.requests, submittingId: userInput.submittingId, error: userInput.error, answer: userInput.answer }} onSubmit={async () => {
+            const submittedScope = decisionBoardScope;
+            const accepted = await decisionBoard.client!.submit();
+            if (accepted && activeDecisionBoardScopeRef.current === submittedScope) void loadQueueItems(profileId, { silent: true });
+            return accepted;
+          }} />
+        </Suspense>
+      )}
 
       {isFlowModeDialogOpen && (
         <Suspense fallback={(

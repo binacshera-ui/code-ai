@@ -65,6 +65,11 @@ import {
   ingestSessionFlowDocumentFromText,
   rebindSessionFlowMode,
 } from './codexFlowMode.js';
+import {
+  buildSessionDecisionBoardPromptAdditions,
+  ingestSessionDecisionBoardFromText,
+  rebindSessionDecisionBoard,
+} from './sessionDecisionBoard.js';
 import { listHiddenSessionIds, setSessionHidden } from './codexSessionVisibility.js';
 import { getSessionTopicMap, setSessionTopic } from './codexSessionTopics.js';
 import { getSessionTitleMap, setSessionCustomTitle } from './codexSessionTitles.js';
@@ -2378,6 +2383,10 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
     item.sourceProfileId || item.profileId,
     resolvedSessionId || item.queueKey,
   );
+  const decisionBoardPrompt = await buildSessionDecisionBoardPromptAdditions(
+    item.sourceProfileId || item.profileId,
+    resolvedSessionId || item.queueKey,
+  );
   const effectiveRunPrompt = [
     runPrompt,
     restrictionPrompt?.trim() || null,
@@ -2387,6 +2396,7 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
     designModePrompt?.trim() || null,
     uxModePrompt?.trim() || null,
     flowModePrompt?.trim() || null,
+    decisionBoardPrompt?.trim() || null,
   ]
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     .join('\n\n');
@@ -2512,6 +2522,10 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
         },
         onSessionStarted: async (startedSessionId) => {
           await bindCodexQueueItemToStartedSession(item.id, startedSessionId);
+          await rebindSessionDecisionBoard(item.sourceProfileId || item.profileId,
+            resolvedSessionId || item.queueKey, startedSessionId).catch((error) => {
+            console.warn('[decisions] Could not rebind the conversation board:', error?.message || error);
+          });
           if (item.workModeRunId) await rebindRationalRun(item.workModeRunId, startedSessionId);
           await rebindSessionFocusMode(item.sourceProfileId || item.profileId, resolvedSessionId || item.queueKey, startedSessionId);
           await rebindSessionFinalNotificationPreference(
@@ -2543,6 +2557,8 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
       await rebindSessionProjectMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionConversationSearchMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
       await rebindSessionFlowMode(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId);
+      await rebindSessionDecisionBoard(item.sourceProfileId || item.profileId, resolvedSessionId, result.sessionId)
+        .catch((error) => console.warn('[decisions] Board rebind preserved prior data:', error?.message || error));
     }
 
     await rebindSessionFinalNotificationPreference(
@@ -2559,6 +2575,8 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
     await rebindSessionProjectMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionConversationSearchMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
     await rebindSessionFlowMode(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId);
+    await rebindSessionDecisionBoard(item.sourceProfileId || item.profileId, item.queueKey, result.sessionId)
+      .catch((error) => console.warn('[decisions] Board rebind preserved prior data:', error?.message || error));
     for (const previous of new Set([resolvedSessionId || item.queueKey, item.queueKey])) {
       for (const server of ['personal_chrome', 'browser_mode', 'phone_mode', 'design_mode', 'ux_mode'] as const) {
         await refreshCodexSharedModeContextAfterRebind(item.profileId, result.sessionId,
@@ -2588,6 +2606,11 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
         ? { mapId: flowModeAtRun.activeMapId, mapRevision: flowModeAtRun.mapRevision }
         : undefined,
     );
+    // An invalid UI document must not turn an already completed model turn into
+    // a failed task. Operator-owned answers remain untouched on conflicts.
+    await ingestSessionDecisionBoardFromText(item.sourceProfileId || item.profileId,
+      result.sessionId, result.finalMessage || '')
+      .catch((error) => console.warn('[decisions] Board output was not applied:', error?.message || error));
 
     if (isRecurringItem(item) && item.stopPolicy?.status === 'stopping') {
       markQueueItemStopped(item);
