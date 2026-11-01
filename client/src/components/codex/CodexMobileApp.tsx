@@ -241,6 +241,8 @@ import {
   type TranscriptScrollMode,
 } from './transcriptScrollPolicy';
 import { resolveUsagePanelPlacement, type UsagePanelPlacement } from './usagePanelPosition';
+import { CodexApiKeyLogin } from './CodexApiKeyLogin';
+import { accountAuthenticationPresentation, supportsCodexApiLogin, type CodexAccountConnection, type CodexApiCredential } from './accountAuthenticationPresentation';
 
 const IS_WORKBENCH_EMBED = typeof window !== 'undefined'
   && window.parent !== window
@@ -929,6 +931,9 @@ interface CodexRateLimitSnapshotResponse {
     authenticated: boolean;
     email: string | null;
     accountIdMasked: string | null;
+    type?: 'chatgpt' | 'apiKey' | null;
+    credentialId?: string | null;
+    credentialLabel?: string | null;
   } | null;
   quotaGroups?: CodexAccountQuotaGroupResponse[];
   billingCredits?: CodexBillingCreditsResponse | null;
@@ -2112,6 +2117,7 @@ function formatApproximateMessageRange(value: [number, number] | null): string |
 
 function CodexUsagePopover({
   snapshot,
+  serverId,
   profileId,
   profileLabel,
   canManageCodexAccount,
@@ -2126,6 +2132,7 @@ function CodexUsagePopover({
   onClose,
 }: {
   snapshot: CodexRateLimitSnapshotResponse | null;
+  serverId: string;
   profileId: string;
   profileLabel: string | null;
   canManageCodexAccount: boolean;
@@ -2144,11 +2151,34 @@ function CodexUsagePopover({
   const [isConsumingReset, setIsConsumingReset] = useState(false);
   const [resetActionNotice, setResetActionNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
   const [accountAuth, setAccountAuth] = useState<CodexDeviceAuthSnapshotResponse | null>(null);
-  const [isAccountActionPending, setIsAccountActionPending] = useState(false);
+  const [connection, setConnection] = useState<CodexAccountConnection | null>(null);
+  const [supportsApiLogin, setSupportsApiLogin] = useState<boolean | null>(null);
+  const [showApiKeyLogin, setShowApiKeyLogin] = useState(false);
+  const [credentials, setCredentials] = useState<CodexApiCredential[]>([]);
+  const [selectedCredentialId, setSelectedCredentialId] = useState('');
+  const [isCredentialsLoading, setIsCredentialsLoading] = useState(false);
+  const [isAccountActionPending, setIsAccountActionPendingState] = useState(false);
+  const accountActionPendingRef = useRef(false);
+  const setIsAccountActionPending = (pending: boolean) => {
+    accountActionPendingRef.current = pending;
+    setIsAccountActionPendingState(pending);
+  };
   const [isLogoutConfirming, setIsLogoutConfirming] = useState(false);
   const [accountActionNotice, setAccountActionNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
   const handledAuthenticatedFlowRef = useRef<string | null>(null);
   const accountAuthEpochRef = useRef(0);
+  const mountedRef = useRef(true);
+  const accountPresentation = accountAuthenticationPresentation(snapshot?.account, connection, profileLabel);
+  const isAccountAuthenticated = accountPresentation.authenticated;
+  const isApiKeyConnection = accountPresentation.isApiKey;
+  const showChatgptUsage = accountPresentation.showChatgptUsage;
+  const isDeviceAuthInProgress = accountAuth?.state === 'starting' || accountAuth?.state === 'waiting';
+  const isCurrentAccountScope = () => mountedRef.current && serverId === activeCodeAiServerId;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useLayoutEffect(() => {
     if (!anchorElement) {
@@ -2193,6 +2223,11 @@ function CodexUsagePopover({
   useEffect(() => {
     handledAuthenticatedFlowRef.current = null;
     setAccountAuth(null);
+    setConnection(null);
+    setSupportsApiLogin(null);
+    setShowApiKeyLogin(false);
+    setCredentials([]);
+    setSelectedCredentialId('');
     setAccountActionNotice(null);
     setIsLogoutConfirming(false);
     if (!canManageCodexAccount || !profileId) {
@@ -2205,9 +2240,13 @@ function CodexUsagePopover({
       const poll = ++latestAuthPoll;
       const epoch = accountAuthEpochRef.current;
       try {
-        const next = await fetchCodexAccountAuthStatus(profileId);
+        const next = await fetchCodexAccountAuthStatus(profileId, serverId);
         if (!disposed && epoch === accountAuthEpochRef.current && poll === latestAuthPoll) {
-          setAccountAuth(next);
+          setAccountAuth(next.auth);
+          setConnection(next.connection || null);
+          const apiLoginSupported = supportsCodexApiLogin(next);
+          setSupportsApiLogin(apiLoginSupported);
+          if (!apiLoginSupported) setShowApiKeyLogin(false);
         }
       } catch (authError: any) {
         if (!disposed && epoch === accountAuthEpochRef.current && poll === latestAuthPoll) {
@@ -2225,19 +2264,38 @@ function CodexUsagePopover({
       disposed = true;
       window.clearInterval(intervalId);
     };
-  }, [canManageCodexAccount, profileId]);
+  }, [canManageCodexAccount, profileId, serverId]);
+
+  useEffect(() => {
+    if (!showApiKeyLogin || isAccountAuthenticated || !canManageCodexAccount || supportsApiLogin !== true) return;
+    let disposed = false;
+    setIsCredentialsLoading(true);
+    setAccountActionNotice(null);
+    void fetchCodexApiCredentialsRequest(profileId, serverId).then((next) => {
+      if (disposed) return;
+      setCredentials(next);
+      setSelectedCredentialId((current) => next.some((credential) => credential.id === current) ? current : next[0]?.id || '');
+    }).catch((credentialsError: any) => {
+      if (!disposed) setAccountActionNotice({ tone: 'error', text: credentialsError?.message || 'לא ניתן לטעון מפתחות API שמורים.' });
+    }).finally(() => {
+      if (!disposed) setIsCredentialsLoading(false);
+    });
+    return () => { disposed = true; };
+  }, [showApiKeyLogin, isAccountAuthenticated, canManageCodexAccount, supportsApiLogin, profileId, serverId]);
 
   useEffect(() => {
     if (
       accountAuth?.state !== 'authenticated'
       || !accountAuth.flowId
       || handledAuthenticatedFlowRef.current === accountAuth.flowId
+      || !isCurrentAccountScope()
     ) {
       return;
     }
     handledAuthenticatedFlowRef.current = accountAuth.flowId;
     setAccountActionNotice({ tone: 'success', text: 'החשבון חובר בהצלחה. נתוני המכסה מתרעננים…' });
     void Promise.resolve(onAccountChanged()).catch((authRefreshError: any) => {
+      if (!isCurrentAccountScope()) return;
       setAccountActionNotice({
         tone: 'error',
         text: authRefreshError?.message || 'החשבון חובר, אך רענון נתוני המכסה נכשל.',
@@ -2245,7 +2303,7 @@ function CodexUsagePopover({
     });
   }, [accountAuth?.flowId, accountAuth?.state, onAccountChanged]);
 
-  const quotaGroups = snapshot?.quotaGroups?.length
+  const quotaGroups = !showChatgptUsage ? [] : snapshot?.quotaGroups?.length
     ? snapshot.quotaGroups
     : snapshot?.primary || snapshot?.secondary
       ? [{
@@ -2259,8 +2317,8 @@ function CodexUsagePopover({
           secondary: snapshot.secondary,
         }]
       : [];
-  const resetCredits = snapshot?.resetCredits || null;
-  const billingCredits = snapshot?.billingCredits || null;
+  const resetCredits = showChatgptUsage ? snapshot?.resetCredits || null : null;
+  const billingCredits = showChatgptUsage ? snapshot?.billingCredits || null : null;
   const localMessageRange = formatApproximateMessageRange(billingCredits?.approximateLocalMessages || null);
   const cloudMessageRange = formatApproximateMessageRange(billingCredits?.approximateCloudMessages || null);
 
@@ -2300,18 +2358,21 @@ function CodexUsagePopover({
   };
 
   const beginDeviceAuth = async () => {
-    if (isAccountActionPending) {
+    if (accountActionPendingRef.current || isAccountAuthenticated || supportsApiLogin === null || !isCurrentAccountScope()) {
       return;
     }
+    setShowApiKeyLogin(false);
     setIsAccountActionPending(true);
     setIsLogoutConfirming(false);
     setAccountActionNotice(null);
     try {
       accountAuthEpochRef.current += 1;
-      const next = await startCodexDeviceAuthRequest(profileId);
+      const next = await startCodexDeviceAuthRequest(profileId, serverId);
+      if (!isCurrentAccountScope()) return;
       accountAuthEpochRef.current += 1;
       setAccountAuth(next);
     } catch (authError: any) {
+      if (!isCurrentAccountScope()) return;
       setAccountActionNotice({
         tone: 'error',
         text: authError?.message || 'לא ניתן להתחיל התחברות עם קוד מכשיר.',
@@ -2322,18 +2383,20 @@ function CodexUsagePopover({
   };
 
   const cancelDeviceAuth = async () => {
-    if (isAccountActionPending) {
+    if (accountActionPendingRef.current || supportsApiLogin === null || !isCurrentAccountScope()) {
       return;
     }
     setIsAccountActionPending(true);
     setAccountActionNotice(null);
     try {
       accountAuthEpochRef.current += 1;
-      const next = await cancelCodexDeviceAuthRequest(profileId, accountAuth?.flowId || null);
+      const next = await cancelCodexDeviceAuthRequest(profileId, accountAuth?.flowId || null, serverId);
+      if (!isCurrentAccountScope()) return;
       accountAuthEpochRef.current += 1;
       setAccountAuth(next);
       setAccountActionNotice({ tone: 'success', text: 'ניסיון ההתחברות בוטל.' });
     } catch (authError: any) {
+      if (!isCurrentAccountScope()) return;
       setAccountActionNotice({
         tone: 'error',
         text: authError?.message || 'לא ניתן לבטל את ניסיון ההתחברות.',
@@ -2356,25 +2419,105 @@ function CodexUsagePopover({
   };
 
   const confirmAccountDisconnect = async () => {
-    if (isAccountActionPending) {
+    if (accountActionPendingRef.current || supportsApiLogin === null || !isCurrentAccountScope()) {
       return;
     }
     setIsAccountActionPending(true);
     setAccountActionNotice(null);
     try {
       accountAuthEpochRef.current += 1;
-      const nextSnapshot = await disconnectCodexAccountRequest(profileId);
+      const nextSnapshot = await disconnectCodexAccountRequest(profileId, serverId);
+      if (!isCurrentAccountScope()) return;
       accountAuthEpochRef.current += 1;
       setAccountAuth(null);
+      setConnection(supportsApiLogin ? { authenticated: false, type: null, credentialId: null, credentialLabel: null, configured: false } : null);
+      setShowApiKeyLogin(false);
       setIsLogoutConfirming(false);
       await onAccountChanged(nextSnapshot);
-      setAccountActionNotice({ tone: 'success', text: 'חשבון Codex נותק מהמכשיר הזה.' });
+      if (isCurrentAccountScope()) setAccountActionNotice({ tone: 'success', text: 'חשבון Codex נותק מהמכשיר הזה.' });
     } catch (authError: any) {
+      if (!isCurrentAccountScope()) return;
       setAccountActionNotice({
         tone: 'error',
         text: authError?.message || 'ניתוק חשבון Codex נכשל.',
       });
     } finally {
+      setIsAccountActionPending(false);
+    }
+  };
+
+  const saveApiCredential = async (label: string, apiKey: string): Promise<boolean> => {
+    if (accountActionPendingRef.current || supportsApiLogin !== true || !isCurrentAccountScope()) return false;
+    setIsAccountActionPending(true);
+    setAccountActionNotice(null);
+    try {
+      const credential = await saveCodexApiCredentialRequest(profileId, label, apiKey, serverId);
+      if (!isCurrentAccountScope()) return false;
+      setCredentials((current) => [...current.filter((item) => item.id !== credential.id), credential]);
+      setSelectedCredentialId(credential.id);
+      setAccountActionNotice({ tone: 'success', text: 'המפתח נשמר. לחץ על התחבר כדי להשתמש בו.' });
+      return true;
+    } catch (credentialError: any) {
+      if (isCurrentAccountScope()) setAccountActionNotice({ tone: 'error', text: credentialError?.message || 'שמירת המפתח נכשלה.' });
+      return false;
+    } finally {
+      setIsAccountActionPending(false);
+    }
+  };
+
+  const deleteApiCredential = async (credentialId: string): Promise<void> => {
+    if (accountActionPendingRef.current || supportsApiLogin !== true || !isCurrentAccountScope()) return;
+    setIsAccountActionPending(true);
+    setAccountActionNotice(null);
+    try {
+      await deleteCodexApiCredentialRequest(profileId, credentialId, serverId);
+      if (!isCurrentAccountScope()) return;
+      setCredentials((current) => current.filter((credential) => credential.id !== credentialId));
+      setSelectedCredentialId((current) => current === credentialId ? '' : current);
+      setAccountActionNotice({ tone: 'success', text: 'המפתח הוסר מהרשימה.' });
+    } catch (credentialError: any) {
+      if (isCurrentAccountScope()) setAccountActionNotice({ tone: 'error', text: credentialError?.message || 'מחיקת המפתח נכשלה.' });
+    } finally {
+      setIsAccountActionPending(false);
+    }
+  };
+
+  const connectApiCredential = async (): Promise<void> => {
+    if (accountActionPendingRef.current || supportsApiLogin !== true || isCredentialsLoading || !selectedCredentialId || isAccountAuthenticated || !connection || isDeviceAuthInProgress || !isCurrentAccountScope()) return;
+    setIsAccountActionPending(true);
+    setAccountActionNotice(null);
+    accountAuthEpochRef.current += 1;
+    try {
+      const result = await connectCodexApiCredentialRequest(profileId, selectedCredentialId, serverId);
+      if (!isCurrentAccountScope()) return;
+      accountAuthEpochRef.current += 1;
+      setConnection(result.connection);
+      setAccountAuth(null);
+      setShowApiKeyLogin(false);
+      await onAccountChanged(result.rateLimits);
+      if (isCurrentAccountScope()) setAccountActionNotice({ tone: 'success', text: 'Codex מחובר באמצעות API. יתרת הקרדיטים והגישה למודלים לא נבדקו.' });
+    } catch (credentialError: any) {
+      if (!isCurrentAccountScope()) return;
+      setAccountActionNotice({ tone: 'error', text: credentialError?.message || 'החיבור באמצעות המפתח שנבחר נכשל.' });
+      // A missing response does not prove native login failed. Read its actual state.
+      try {
+        const status = await fetchCodexAccountAuthStatus(profileId, serverId);
+        if (!isCurrentAccountScope()) return;
+        setConnection(status.connection || null);
+        setSupportsApiLogin(supportsCodexApiLogin(status));
+        setAccountAuth(status.auth);
+        if (status.connection?.authenticated) {
+          await onAccountChanged();
+          if (isCurrentAccountScope()) setAccountActionNotice({
+            tone: 'success',
+            text: status.connection.type === 'apiKey'
+              ? 'החיבור באמצעות API פעיל. יתרת הקרדיטים והגישה למודלים לא נבדקו.'
+              : 'חשבון ChatGPT מחובר. יש להתנתק לפני בחירת חיבור אחר.',
+          });
+        }
+      } catch { /* The next status poll can recover the actual connection state. */ }
+    } finally {
+      accountAuthEpochRef.current += 1;
       setIsAccountActionPending(false);
     }
   };
@@ -2404,7 +2547,7 @@ function CodexUsagePopover({
           <div className="min-w-0 flex-1">
             <div className="text-[12px] font-semibold text-slate-800">חשבון, מכסות ושימוש</div>
             <div className="mt-0.5 text-[9px] leading-4 text-slate-500">
-              מד השימוש מציג את המכסות החיות של החשבון, חלונות האיפוס, הקונטקסט וקרדיטי Full Reset.
+              {isApiKeyConnection ? 'Codex מחובר עם מפתח API. ניתן לצפות בקונטקסט השיחה ולנהל את החיבור.' : 'מד השימוש מציג את המכסות החיות של החשבון, חלונות האיפוס, הקונטקסט וקרדיטי Full Reset.'}
             </div>
           </div>
           <button
@@ -2434,19 +2577,16 @@ function CodexUsagePopover({
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 text-[10px] font-semibold text-slate-700">
                 <User className="h-3.5 w-3.5 text-sky-500" />
-                {snapshot?.account?.authenticated ? 'חשבון מחובר' : 'חשבון Codex'}
+                {isApiKeyConnection ? 'מחובר באמצעות API' : isAccountAuthenticated ? 'חשבון מחובר' : 'חשבון Codex'}
                 <span className={cn(
                   'h-1.5 w-1.5 rounded-full',
-                  snapshot?.account?.authenticated ? 'bg-emerald-400' : 'bg-slate-300'
+                  isAccountAuthenticated ? 'bg-emerald-400' : 'bg-slate-300'
                 )} />
               </div>
               <div className="mt-1 truncate text-[11px] font-medium text-slate-800" dir="ltr">
-                {snapshot?.account?.email
-                  || snapshot?.account?.accountIdMasked
-                  || (snapshot?.account?.authenticated ? profileLabel : null)
-                  || 'לא מחובר'}
+                {accountPresentation.label}
               </div>
-              {snapshot?.account?.email && snapshot.account.accountIdMasked && (
+              {!isApiKeyConnection && isAccountAuthenticated && snapshot?.account?.email && snapshot.account.accountIdMasked && (
                 <div className="mt-0.5 flex items-center gap-1 text-[8px] text-slate-400">
                   <span>מזהה חשבון:</span>
                   <span className="truncate" dir="ltr">{snapshot.account.accountIdMasked}</span>
@@ -2456,11 +2596,11 @@ function CodexUsagePopover({
             <div className="shrink-0 text-left">
               <div className={cn(
                 'rounded-full border bg-white px-2 py-1 text-[9px] font-semibold uppercase',
-                snapshot?.account?.authenticated
+                isAccountAuthenticated
                   ? 'border-emerald-100 text-emerald-700'
                   : 'border-slate-200 text-slate-500'
               )}>
-                {snapshot?.account?.authenticated ? snapshot?.planType || 'מחובר' : 'מנותק'}
+                {isApiKeyConnection ? 'API' : isAccountAuthenticated ? snapshot?.planType || 'מחובר' : 'מנותק'}
               </div>
               <div className="mt-1 text-[8px] text-slate-400">{profileLabel || 'Codex'}</div>
             </div>
@@ -2472,19 +2612,44 @@ function CodexUsagePopover({
 
           {canManageCodexAccount && (
             <div className="mt-2 border-t border-slate-100 pt-2">
-              {!snapshot?.account?.authenticated && accountAuth?.state !== 'starting' && accountAuth?.state !== 'waiting' && (
-                <button
-                  type="button"
-                  onClick={() => void beginDeviceAuth()}
-                  disabled={isAccountActionPending || (loading && !snapshot)}
-                  className="flex w-full items-center justify-center gap-1.5 rounded-[0.65rem] border border-sky-200 bg-sky-50 px-2 py-1.5 text-[9px] font-semibold text-sky-700 transition hover:bg-sky-100 disabled:cursor-wait disabled:opacity-50"
-                >
-                  {isAccountActionPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <LogIn className="h-3 w-3" />}
-                  התחבר עם קוד מכשיר
-                </button>
+              {!isAccountAuthenticated && !isDeviceAuthInProgress && !showApiKeyLogin && (
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={() => void beginDeviceAuth()}
+                    disabled={isAccountActionPending || supportsApiLogin === null}
+                    className="flex w-full items-center justify-center gap-1.5 rounded-[0.65rem] border border-sky-200 bg-sky-50 px-2 py-1.5 text-[9px] font-semibold text-sky-700 transition hover:bg-sky-100 disabled:cursor-wait disabled:opacity-50"
+                  >
+                    {isAccountActionPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <LogIn className="h-3 w-3" />}
+                    כניסה עם חשבון ChatGPT
+                  </button>
+                  {supportsApiLogin === true && <button
+                    type="button"
+                    onClick={() => { setAccountActionNotice(null); setShowApiKeyLogin(true); }}
+                    disabled={isAccountActionPending}
+                    className="flex w-full items-center justify-center gap-1.5 rounded-[0.65rem] border border-slate-200 bg-white px-2 py-1.5 text-[9px] font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    <KeyRound className="h-3 w-3" />
+                    כניסה עם מפתח API
+                  </button>}
+                </div>
               )}
 
-              {!snapshot?.account?.authenticated && (accountAuth?.state === 'starting' || accountAuth?.state === 'waiting') && (
+              {supportsApiLogin === true && !isAccountAuthenticated && !isDeviceAuthInProgress && showApiKeyLogin && (
+                <CodexApiKeyLogin
+                  credentials={credentials}
+                  selectedId={selectedCredentialId}
+                  loading={isCredentialsLoading}
+                  pending={isAccountActionPending}
+                  onSelect={setSelectedCredentialId}
+                  onSave={saveApiCredential}
+                  onDelete={deleteApiCredential}
+                  onConnect={() => void connectApiCredential()}
+                  onClose={() => setShowApiKeyLogin(false)}
+                />
+              )}
+
+              {!isAccountAuthenticated && (accountAuth?.state === 'starting' || accountAuth?.state === 'waiting') && (
                 <div className="rounded-[0.75rem] border border-sky-200 bg-gradient-to-br from-sky-50 to-indigo-50/70 p-2.5">
                   <div className="flex items-center gap-1.5 text-[9px] font-semibold text-sky-800">
                     <KeyRound className="h-3.5 w-3.5" />
@@ -2543,14 +2708,14 @@ function CodexUsagePopover({
                 </div>
               )}
 
-              {snapshot?.account?.authenticated && !isLogoutConfirming && (
+              {isAccountAuthenticated && !isLogoutConfirming && (
                 <button
                   type="button"
                   onClick={() => {
                     setAccountActionNotice(null);
                     setIsLogoutConfirming(true);
                   }}
-                  disabled={isAccountActionPending}
+                  disabled={isAccountActionPending || supportsApiLogin === null}
                   className="flex w-full items-center justify-center gap-1.5 rounded-[0.65rem] border border-rose-100 bg-white px-2 py-1.5 text-[9px] font-semibold text-rose-600 transition hover:bg-rose-50 disabled:opacity-50"
                 >
                   <LogOut className="h-3 w-3" />
@@ -2558,10 +2723,10 @@ function CodexUsagePopover({
                 </button>
               )}
 
-              {snapshot?.account?.authenticated && isLogoutConfirming && (
+              {isAccountAuthenticated && isLogoutConfirming && (
                 <div className="rounded-[0.7rem] border border-rose-200 bg-rose-50 px-2 py-2">
                   <div className="text-[8px] font-medium leading-4 text-rose-800">
-                    הניתוק מסיר מהמכשיר הזה את אישורי Codex של הפרופיל. השיחות והקבצים לא יימחקו.
+                    הניתוק מסיר מהמכשיר הזה את חיבור Codex של הפרופיל. השיחות, הקבצים והמפתחות השמורים לא יימחקו.
                   </div>
                   <div className="mt-2 flex gap-1.5">
                     <button
@@ -2575,7 +2740,7 @@ function CodexUsagePopover({
                     <button
                       type="button"
                       onClick={() => void confirmAccountDisconnect()}
-                      disabled={isAccountActionPending}
+                      disabled={isAccountActionPending || supportsApiLogin === null}
                       className="flex flex-[1.7] items-center justify-center gap-1 rounded-[0.55rem] bg-rose-600 px-2 py-1.5 text-[8px] font-semibold text-white transition hover:bg-rose-700 disabled:cursor-wait disabled:opacity-60"
                     >
                       {isAccountActionPending && <Loader2 className="h-3 w-3 animate-spin" />}
@@ -2604,6 +2769,13 @@ function CodexUsagePopover({
           )}
         </section>
 
+        {isApiKeyConnection && (
+          <section className="rounded-[0.9rem] border border-sky-100 bg-sky-50/40 px-3 py-2.5 text-[9px] leading-4 text-slate-600">
+            השימוש מחויב בחשבון OpenAI של המפתח שנבחר. יתרת הקרדיטים והמגבלות של חשבון ה־API אינן זמינות כאן.
+          </section>
+        )}
+
+        {showChatgptUsage && <>
         <section>
           <div className="mb-1.5 flex items-center justify-between px-1">
             <span className="text-[10px] font-semibold text-slate-700">כל מכסות Codex</span>
@@ -2806,6 +2978,8 @@ function CodexUsagePopover({
           </section>
         )}
 
+        </>}
+
         <section className="rounded-[0.9rem] border border-amber-100/80 bg-amber-50/35 px-3 py-2.5">
           <div className="flex items-center justify-between gap-2">
             <span className="text-[10px] font-semibold text-slate-700">קונטקסט השיחה</span>
@@ -2833,12 +3007,12 @@ function CodexUsagePopover({
           )}
         </section>
 
-        {(requestError || (snapshot?.account?.authenticated ? snapshot?.accountUsageError : null)) && (
+        {(requestError || (showChatgptUsage && isAccountAuthenticated ? snapshot?.accountUsageError : null)) && (
           <div className="rounded-[0.85rem] border border-rose-100 bg-rose-50/70 px-3 py-2 text-[9px] leading-4 text-rose-600">
-            {requestError || (snapshot?.account?.authenticated ? snapshot?.accountUsageError : null)}
+            {requestError || (showChatgptUsage && isAccountAuthenticated ? snapshot?.accountUsageError : null)}
           </div>
         )}
-        {snapshot?.rateLimitReachedType && (
+        {showChatgptUsage && snapshot?.rateLimitReachedType && (
           <div className="rounded-[0.85rem] border border-rose-100 bg-rose-50/70 px-3 py-2 text-[9px] text-rose-600">
             הושגה מגבלה: {snapshot.rateLimitReachedType}
           </div>
@@ -4422,19 +4596,19 @@ async function consumeCodexFullResetRequest(
 }
 
 async function fetchCodexAccountAuthStatus(
-  profileId: string
-): Promise<CodexDeviceAuthSnapshotResponse> {
+  profileId: string,
+  serverId: string,
+): Promise<{ auth: CodexDeviceAuthSnapshotResponse; connection?: CodexAccountConnection | null }> {
   const query = new URLSearchParams({ profile: profileId });
-  const data = await fetchJson<{ auth: CodexDeviceAuthSnapshotResponse }>(
-    `/api/codex/account-auth?${query.toString()}`
-  );
-  return data.auth;
+  return fetchJsonForServer(serverId, `/api/codex/account-auth?${query.toString()}`);
 }
 
 async function startCodexDeviceAuthRequest(
-  profileId: string
+  profileId: string,
+  serverId: string,
 ): Promise<CodexDeviceAuthSnapshotResponse> {
-  const data = await fetchJson<{ auth: CodexDeviceAuthSnapshotResponse }>(
+  const data = await fetchJsonForServer<{ auth: CodexDeviceAuthSnapshotResponse }>(
+    serverId,
     '/api/codex/account-auth/device/start',
     {
       method: 'POST',
@@ -4447,9 +4621,11 @@ async function startCodexDeviceAuthRequest(
 
 async function cancelCodexDeviceAuthRequest(
   profileId: string,
-  flowId: string | null
+  flowId: string | null,
+  serverId: string,
 ): Promise<CodexDeviceAuthSnapshotResponse> {
-  const data = await fetchJson<{ auth: CodexDeviceAuthSnapshotResponse }>(
+  const data = await fetchJsonForServer<{ auth: CodexDeviceAuthSnapshotResponse }>(
+    serverId,
     '/api/codex/account-auth/device/cancel',
     {
       method: 'POST',
@@ -4461,12 +4637,13 @@ async function cancelCodexDeviceAuthRequest(
 }
 
 async function disconnectCodexAccountRequest(
-  profileId: string
+  profileId: string,
+  serverId: string,
 ): Promise<CodexRateLimitSnapshotResponse | null> {
-  const data = await fetchJson<{
+  const data = await fetchJsonForServer<{
     disconnected: boolean;
     rateLimits: CodexRateLimitSnapshotResponse | null;
-  }>('/api/codex/account-auth/logout', {
+  }>(serverId, '/api/codex/account-auth/logout', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -4475,6 +4652,37 @@ async function disconnectCodexAccountRequest(
     }),
   });
   return data.rateLimits || null;
+}
+
+async function fetchCodexApiCredentialsRequest(profileId: string, serverId: string): Promise<CodexApiCredential[]> {
+  const query = new URLSearchParams({ profile: profileId });
+  const data = await fetchJsonForServer<{ credentials: CodexApiCredential[] }>(serverId, `/api/codex/account-auth/credentials?${query.toString()}`);
+  return data.credentials;
+}
+
+async function saveCodexApiCredentialRequest(profileId: string, label: string, apiKey: string, serverId: string): Promise<CodexApiCredential> {
+  const data = await fetchJsonForServer<{ credential: CodexApiCredential }>(serverId, '/api/codex/account-auth/credentials', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profileId, label, apiKey }),
+  });
+  return data.credential;
+}
+
+async function deleteCodexApiCredentialRequest(profileId: string, credentialId: string, serverId: string): Promise<void> {
+  const query = new URLSearchParams({ profile: profileId });
+  await fetchJsonForServer(serverId, `/api/codex/account-auth/credentials/${encodeURIComponent(credentialId)}?${query.toString()}`, { method: 'DELETE' });
+}
+
+async function connectCodexApiCredentialRequest(profileId: string, credentialId: string, serverId: string): Promise<{
+  connection: CodexAccountConnection;
+  rateLimits: CodexRateLimitSnapshotResponse | null;
+}> {
+  return fetchJsonForServer(serverId, '/api/codex/account-auth/api-key/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profileId, credentialId }),
+  });
 }
 
 async function fetchSessionChangeRecord(
@@ -24871,7 +25079,9 @@ export function CodexMobileApp() {
 
                   {isRateLimitOpen && (
                     <CodexUsagePopover
+                      key={`${serverId}:${profileId || ''}`}
                       snapshot={rateLimitSnapshot}
+                      serverId={serverId}
                       profileId={profileId || ''}
                       profileLabel={currentProfile?.label || null}
                       canManageCodexAccount={currentProfile?.provider === 'codex'}
