@@ -135,6 +135,13 @@ That route is the only one configured for Chrome-extension framing; normal
 CODE-AI pages retain their usual frame protection. The panel waits for a
 verified ready message from that route before it posts context or status.
 
+If the bridge reports connected but the embedded application is blank, compare
+the HTML served by `/extension-panel` with `/`. On a split static/API deployment
+both must reference the same qualified asset set; an older API process must not
+serve the panel's shell. Run `node scripts/check-ui-entrypoints.mjs <origin>`
+and follow `docs/static-ui-release.md`. Do not disable MIME checks or reset a
+trusted device to work around a missing JavaScript/CSS bundle.
+
 When a packaged extension is updated to a different control origin, it revokes
 the old device credential on a best-effort basis, never forwards that credential
 to the new origin, and asks for the normal device password once. This also

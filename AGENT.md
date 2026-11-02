@@ -304,6 +304,27 @@ npx pm2 restart code-ai-app
 
 PM2 reads its app name and port from `.env`; ambient shell variables do not override them.
 
+## Split static-UI deployment gate
+
+When NGINX serves a qualified UI separately from the long-running API, keep
+`/extension-panel` in that same versioned UI include as `/` and `/assets/`.
+Do not proxy the panel shell to an older API process while serving assets from
+a newer release. Use `withStaticExtensionPanel` from
+`deploy/code-ai/static-ui-locations.mjs` when preparing the static include;
+remove any previous dedicated panel location in the enclosing server block.
+Keep its extension-only framing policy without relaxing ordinary pages.
+
+Before declaring any static UI release complete, run:
+
+```bash
+node scripts/check-ui-entrypoints.mjs https://your-code-ai-origin.example
+```
+
+This read-only gate compares all UI entry points and verifies the actual
+JavaScript/CSS responses, cache policy and framing headers. A working homepage
+alone does not prove the Chrome Side Panel works. See
+`docs/static-ui-release.md` for the isolated NGINX preflight.
+
 ## Export Workflow
 
 ```bash
