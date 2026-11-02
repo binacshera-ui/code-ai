@@ -8,9 +8,17 @@ const maxBytes = 8 * 1024 * 1024;
 const timeoutMs = 360000;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 export function modeError(code) { return Object.assign(new Error(code), { code }); }
+const browserFailureMessages = Object.freeze({
+  CHROME_STORE_RESTRICTED: 'Chrome blocks extension scripting and debugger access to the Chrome Web Store domain. Use a supported native browser interface for this page.',
+  DEBUGGER_BUSY: 'Another debugger is attached to the target tab. Detach that debugger before using debugger tools here.',
+  DEBUGGER_POLICY_BLOCKED: 'Chrome policy blocks debugger access. Check the effective browser policies.',
+  DEBUGGER_ATTACH_FAILED: 'Chrome could not attach the debugger to this target. Check the target restrictions and browser diagnostics.',
+});
 export function modeFailure(error) {
   const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code) ? error.code : 'MODE_TOOL_FAILED';
-  return { isError: true, content: [{ type: 'text', text: code }], structuredContent: { error_code: code } };
+  const message = browserFailureMessages[code];
+  return { isError: true, content: [{ type: 'text', text: message ? `${code}: ${message}` : code }],
+    structuredContent: { error_code: code, ...(message ? { message } : {}) } };
 }
 export function nativeModeCall(server, params) {
   if (!modeServers.includes(server) || !object(params) || typeof params.name !== 'string'

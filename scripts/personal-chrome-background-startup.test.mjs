@@ -171,6 +171,22 @@ function syntheticModeResponse(sessionKey) {
     json:async()=>({personalChromeMode:{enabled:true,deviceId:'synthetic-device',bindingId:`binding-${sessionKey}`}}) };
 }
 
+test('full worker reports protected Store pages before attempting page scripts or debugger tools', async () => {
+  const worker = await fullWorker();
+  await worker.ready;
+  const tab = await worker.chrome.tabs.get(12);
+  tab.url = 'https://chrome.google.com/webstore/devconsole/example/edit';
+  worker.chrome.tabs.group = async () => 10;
+  worker.chrome.tabGroups = { update: async () => ({}) };
+  const session = { profileId: 'synthetic-profile', sessionKey: 'synthetic-thread', bindingId: 'synthetic-binding' };
+  await worker.dispatch('browser_workspace', { action: 'attach', tabId: 12 }, session);
+  for (const tool of ['browser_snapshot', 'browser_screenshot', 'browser_evaluate']) {
+    await assert.rejects(worker.dispatch(tool, { tabId: 12, expression: 'document.title' }, session), { code: 'CHROME_STORE_RESTRICTED' });
+  }
+  // The fixture intentionally has no scripting or debugger command methods;
+  // reaching either API would fail with a different error.
+});
+
 test('background connects before slow tab reconciliation and recreates its wakeup alarm', async () => {
   SyntheticSocket.instances=[];
   const gate=deferred();

@@ -3,6 +3,7 @@ import { openTabPanel } from './panelOpen.js';
 import { createBridgeTransport } from './bridgeTransport.js';
 import { normalizeProfileIdentity } from './profileIdentity.js';
 import { profileRevision, profileSnapshot, receiveProfile } from './profileSync.js';
+import { assertAutomationPage, debuggerAttachFailure } from './pageAccess.js';
 
 const PROTOCOL_VERSION = 1;
 const STORAGE_KEY = 'codeAiPersonalChromeSettings';
@@ -824,9 +825,7 @@ async function resolveTargetTab(args = {}, session, options = {}) {
 }
 
 function assertScriptable(tab) {
-  if (!tab?.id || !tab.url || /^(chrome|edge|about|chrome-extension):/i.test(tab.url)) {
-    throw errorWithCode('Chrome internal pages cannot be automated by extensions.', 'UNSUPPORTED_PAGE');
-  }
+  assertAutomationPage(tab);
 }
 
 async function execute(tabId, func, args = []) {
@@ -836,6 +835,7 @@ async function execute(tabId, func, args = []) {
 }
 
 async function debuggerCommand(tabId, method, params = {}) {
+  assertScriptable(await chrome.tabs.get(tabId));
   if (!attachedTabs.has(tabId)) {
     try {
       await chrome.debugger.attach({ tabId }, '1.3');
@@ -844,7 +844,7 @@ async function debuggerCommand(tabId, method, params = {}) {
       await chrome.debugger.sendCommand({ tabId }, 'Log.enable');
       await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxTotalBufferSize: 20_000_000, maxResourceBufferSize: 2_000_000 });
     } catch (error) {
-      throw errorWithCode(`Could not attach Chrome DevTools to tab ${tabId}: ${error.message || error}`, 'DEBUGGER_BUSY');
+      throw debuggerAttachFailure(error);
     }
   }
   return chrome.debugger.sendCommand({ tabId }, method, params);

@@ -210,14 +210,14 @@ test('a failed opening preserves the existing panel owner and the next click rec
 test('Chrome extension package is generic, complete, and load-unpacked compatible', async () => {
   const manifest = JSON.parse(await fs.readFile(path.join(extensionRoot, 'manifest.json'), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.5.2');
+  assert.equal(manifest.version, '1.5.3');
   assert.equal(manifest.minimum_chrome_version, '120');
   assert.equal(manifest.background.service_worker, 'background.js');
   assert.equal(manifest.side_panel, undefined, 'no global fallback may open on unrelated tabs');
   for (const permission of ['clipboardWrite', 'debugger', 'declarativeNetRequest', 'scripting', 'sidePanel', 'tabGroups', 'tabs']) {
     assert.ok(manifest.permissions.includes(permission), `missing ${permission}`);
   }
-  for (const file of ['background.js', 'bridgeTransport.js', 'profileIdentity.js', 'profileSync.js', 'panelPairing.js', 'selectionAccess.js', 'panelOpen.js', 'contentScript.js', 'panel.html', 'panel.css', 'panel.js', 'icon-128.png', 'README.md']) {
+  for (const file of ['background.js', 'bridgeTransport.js', 'pageAccess.js', 'profileIdentity.js', 'profileSync.js', 'panelPairing.js', 'selectionAccess.js', 'panelOpen.js', 'contentScript.js', 'panel.html', 'panel.css', 'panel.js', 'icon-128.png', 'README.md']) {
     const metadata = await fs.stat(path.join(extensionRoot, file));
     assert.ok(metadata.size > 0, `${file} is empty`);
   }

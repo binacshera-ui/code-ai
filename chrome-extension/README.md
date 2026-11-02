@@ -67,6 +67,21 @@ names/pictures do not change authorization, session bindings or tab ownership.
 
 ## Load the extension
 
+### Chrome access diagnostics (1.5.3)
+
+Chrome blocks extension scripting and debugger access to the Web Store hosts,
+including the developer console on `chrome.google.com`. These targets now report
+`CHROME_STORE_RESTRICTED` before an action is attempted. A native browser or OS
+interface is needed for that page; adding extension permissions does not remove
+Chrome's restriction.
+
+Debugger attachment failures distinguish a real competing debugger
+(`DEBUGGER_BUSY`), browser policy (`DEBUGGER_POLICY_BLOCKED`) and other target
+failures (`DEBUGGER_ATTACH_FAILED`). Native mode results explain these known
+codes without echoing arbitrary error text, URLs or credentials. This change
+does not weaken Chrome protections, detach another debugger, activate a tab,
+retry a browser action or claim to fix a screenshot that timed out.
+
 ### New computer / reinstallation (1.5.1)
 
 Free access is a policy for an already paired browser, not approval of a new
