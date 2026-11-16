@@ -205,7 +205,13 @@ export function renderMarkdown(r) {
     `| מודל | מהירות | קלט רגיל | קלט ממטמון | פלט כולל חשיבה | מקטעי כיול | אומדן למיליון טוקנים בתמהיל שנמדד |\n|---|---|---:|---:|---:|---:|---|\n` +
     r.byModel.map(m => `| ${safe(m.model)} | ${safe(m.speed)} | ${fmt(m.uncached_input_tokens)} | ${fmt(m.cached_input_tokens)} | ${fmt(m.output_tokens)} | ${m.calibrationSegments} | ${m.calibration.allocatedUsdPerMillionObservedTokens ? '$' + fmt(m.calibration.allocatedUsdPerMillionObservedTokens.central) + ' (טווח עיגול בלבד $' + fmt(m.calibration.allocatedUsdPerMillionObservedTokens.low) + '–$' + fmt(m.calibration.allocatedUsdPerMillionObservedTokens.high) + ')' : 'אין די נתונים'} |`).join('\n') +
     `\n\nסך טוקנים שנצפו: ${fmt(r.observedTokens.total_tokens)}; פערי כיסוי: ${r.coverageGaps}.\n\n` +
-    `מקטעים מעורבים שלא יוחסו למודל יחיד: ${r.excludedSegments.length}.\n\n` +
+    `מקטעים שלא שימשו לכיול: ${r.excludedSegments.length}.\n\n` +
+    (r.preliminary ? `## יחס ראשוני מאוד — לא כיול מאומת\n\n` +
+      `במודל ${safe(r.preliminary.model)} נצפו ${fmt(r.preliminary.observedTokens)} טוקנים מול עלייה של ${fmt(r.preliminary.quotaPercentagePoints)} נקודות אחוז שבועיות: ` +
+      `כ־${fmt(r.preliminary.tokensPerWeeklyPercentagePoint)} טוקנים לנקודת אחוז, או כ־$${fmt(r.preliminary.allocatedUsdPerMillionObservedTokens)} למיליון טוקנים בתמהיל שנצפה. ` +
+      `כ־${fmt((r.preliminary.cachedShareOfInput || 0)*100)}% מהקלט הגיעו מהמטמון. ` +
+      `טווח עיגול בלבד: $${fmt(r.preliminary.roundingEnvelopeOnlyUsdPerMillion.low)}–$${fmt(r.preliminary.roundingEnvelopeOnlyUsdPerMillion.high)} למיליון; אינו כולל השהיית ספק או שימוש חיצוני. ` +
+      `פערי כיסוי היסטוריים: ${r.preliminary.historicalCoverageGaps}. אין מכאן מחיר עצמאי לקלט או לפלט.\n\n` : '') +
     `הכיול זקוק למקטע של לפחות ${r.pending?.minimumQuotaDelta ?? 5} נקודות אחוז ו־${r.pending?.minimumSegmentSeconds ?? 300} שניות. ` +
     `אין כאן מחיר עצמאי לקלט או לפלט: דרוש מדגם שמאפשר להפריד ביניהם. ` +
     `טוקני המטמון כלולים בקלט; טוקני החשיבה כלולים בפלט ואינם נספרים פעם נוספת. ` +

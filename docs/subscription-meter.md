@@ -74,6 +74,12 @@ atomically to `stateDir/report.json` and `stateDir/report.md`.
 - Initial discovery baselines existing files at EOF. Newly discovered threads
   can include only post-start, post-creation usage. The native index is read
   read-only; no recursive scans of all conversation history every minute.
+- The line framer reads bounded 64 KiB chunks, with a 32 MiB scan budget per
+  thread/sample. Large response/tool payloads are identified by their parsed
+  envelope and streamed past without buffering the body. Discard continuations
+  persist only offsets and classification, never conversation text. Partial
+  accounting rows/backlog hold calibration until caught up; limits never jump
+  to EOF. Oversized accounting metadata remains an explicit coverage gap.
 - Quota observations belong to an account, plan and reset epoch. Resets,
   account changes, plan changes, saturation at 100%, telemetry gaps and mixed
   model/speed segments cannot calibrate a single model.
@@ -86,6 +92,12 @@ atomically to `stateDir/report.json` and `stateDir/report.md`.
   ratio. Report their observed counts separately. Do not claim a universal
   per-input or per-output price, fit mixed models by arbitrary proportions,
   interpolate official fractional quota, or report missing usage as zero.
+- A separate `preliminary` observation can be shown before the five-point gate:
+  whole-campaign single-model tokens divided by the observed quota change,
+  with a very-low-confidence label and +/-2-point rounding envelope. It includes
+  historical coverage warnings and is not a qualified calibration or a separate
+  input/output rate. Reader upgrades start a fresh clean calibration segment;
+  previous measurements and historical warnings remain intact.
 - Allocation is `monthlyUsd * 7 / billingCycleDays`, if supplied; otherwise
   `monthlyUsd * 12 * 7 / 365.2425` (annualized average). At $500 this is about
   $114.99/week and $1.15 per weekly percentage point. It assumes the whole fee

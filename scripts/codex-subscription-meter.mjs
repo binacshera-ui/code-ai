@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { allocation, buildReport, consumeRow, COUNTERS, initialCursor, renderMarkdown, sameQuotaEpoch, weeklyQuota } from './subscription-meter/core.mjs';
 
 const MAX_BYTES = 4 * 1024 * 1024;
+const SCAN_BYTES = 32 * 1024 * 1024;
+const CHUNK_BYTES = 64 * 1024;
+const SAMPLER_VERSION = 2;
 
 export function validateConfig(c) {
   if (!c || !/^[a-zA-Z0-9_-]+$/.test(c.profileId || '') || !path.isAbsolute(c.codexHome || '')
@@ -89,30 +92,80 @@ export function discover(c, sinceSeconds) {
   } finally { db.close(); }
 }
 
-/** Read complete lines with bounded memory. Partial final rows are retried later. */
-export function readRows(filename, start, { tail = false } = {}) {
+/** Identify only envelopes the accounting consumer already ignores. The JSON
+ * header is parsed, not searched inside message content. Never buffer huge
+ * response/tool payloads simply to throw them away after JSON.parse. */
+function irrelevantEnvelope(prefix) {
+  const text = prefix.toString('utf8');
+  const marker = /,\s*"payload"\s*:/.exec(text);
+  if (!marker) return false;
+  try {
+    const header = JSON.parse(text.slice(0,marker.index)+'}');
+    if (typeof header.type !== 'string') return false;
+    if (!['event_msg','turn_context','token_usage_record'].includes(header.type)) return true;
+    if (header.type !== 'event_msg') return false;
+    const kind = /^\s*\{\s*"type"\s*:\s*("(?:[^"\\]|\\.)*")\s*[,}]/.exec(text.slice(marker.index+marker[0].length));
+    return Boolean(kind && !['token_count','thread_settings_applied','model_reroute','token_usage_record'].includes(JSON.parse(kind[1])));
+  } catch { return false; }
+}
+
+/** Incremental framing across bounded chunks and samples. A continuation stores
+ * offsets/classification only, never conversation text. No EOF jumps on limits. */
+export function readRows(filename, start, { tail = false, readerState = null, maxBytes = SCAN_BYTES } = {}) {
   const fd = fs.openSync(filename, 'r');
   try {
     const st = fs.fstatSync(fd);
-    const requested = tail ? Math.max(0, st.size - MAX_BYTES) : start;
-    const size = Math.min(MAX_BYTES, Math.max(0, st.size - requested));
-    const buffer = Buffer.alloc(size);
-    fs.readSync(fd, buffer, 0, size, requested);
-    const last = buffer.lastIndexOf(10);
-    if (last < 0) return { rows: [], offset: requested, size: st.size, identity: `${st.dev}:${st.ino}`,
-      gap: size === MAX_BYTES ? 'oversize-line' : null };
-    let position = 0;
-    if (tail && requested > 0) position = buffer.indexOf(10) + 1;
-    const rows = []; let invalidRows = 0;
-    while (position <= last) {
-      const end = buffer.indexOf(10, position);
-      if (end < 0) break;
-      const lineOffset = requested + position;
-      try { rows.push({ row: JSON.parse(buffer.subarray(position,end).toString('utf8')), offset: lineOffset }); }
-      catch { invalidRows++; }
-      position = end + 1;
+    let position = readerState?.position ?? (tail ? Math.max(0,st.size-MAX_BYTES) : start);
+    let lineStart = readerState?.lineStart ?? position;
+    let discard = readerState?.discard || null;
+    let gap = null, invalidRows = 0, skippedIrrelevantLines = 0;
+    if (!readerState && position > 0) {
+      const previous = Buffer.alloc(1); fs.readSync(fd,previous,0,1,position-1);
+      if (previous[0] !== 10) {
+        discard = tail ? 'bootstrap-prefix' : 'unverified-prefix';
+        if (!tail) gap = 'old-reader-midline-resume';
+      }
     }
-    return { rows, offset: requested + last + 1, size: st.size, identity: `${st.dev}:${st.ino}`, gap: null, invalidRows };
+    const endPosition = Math.min(st.size,position+maxBytes), rows = [];
+    let pieces = [], length = 0;
+    while (position < endPosition) {
+      const chunk = Buffer.alloc(Math.min(CHUNK_BYTES,endPosition-position));
+      const read = fs.readSync(fd,chunk,0,chunk.length,position);
+      if (!read) break;
+      let partStart = 0;
+      while (partStart < read) {
+        const newline = chunk.indexOf(10,partStart);
+        const end = newline < 0 || newline >= read ? read : newline;
+        const part = chunk.subarray(partStart,end);
+        if (!discard) {
+          pieces.push(part); length += part.length;
+          if (length > 16384 && irrelevantEnvelope(Buffer.concat(pieces,Math.min(length,8192)))) {
+            discard = 'irrelevant'; pieces = []; length = 0;
+          } else if (length > MAX_BYTES) {
+            discard = 'oversize-telemetry'; pieces = []; length = 0; gap = 'oversize-telemetry-row';
+          }
+        }
+        if (end < read) {
+          if (discard === 'irrelevant') skippedIrrelevantLines++;
+          else if (!discard && length) {
+            const bytes = Buffer.concat(pieces,length);
+            if (irrelevantEnvelope(bytes.subarray(0,8192))) skippedIrrelevantLines++;
+            else try { rows.push({row:JSON.parse(bytes.toString('utf8')),offset:lineStart}); } catch { invalidRows++; }
+          }
+          lineStart = position+end+1; pieces = []; length = 0; discard = null;
+          partStart = end+1;
+        } else partStart = read;
+      }
+      position += read;
+    }
+    // Small unfinished telemetry rows restart at their first byte next sample.
+    // Large discarded payloads continue from the scanned position, avoiding an
+    // unbounded buffer and an endless reread of the same first four megabytes.
+    const unfinished = lineStart < position;
+    const continuation = unfinished && discard ? {lineStart,position,discard} : null;
+    const pendingTelemetry = position < st.size || (unfinished && !['irrelevant','bootstrap-prefix'].includes(discard));
+    return {rows,offset:continuation ? position : lineStart,readerState:continuation,
+      size:st.size,identity:`${st.dev}:${st.ino}`,gap,invalidRows,skippedIrrelevantLines,pendingTelemetry};
   } finally { fs.closeSync(fd); }
 }
 
@@ -128,6 +181,8 @@ function validRollout(c, filename) {
 
 export async function collect(db, c, { quotaReader = readQuota, discoverThreads = discover } = {}) {
   const observation = await quotaReader(c);
+  observation.samplerVersion = SAMPLER_VERSION;
+  observation.telemetryPending = false;
   const current = campaign(db);
   if (!current) throw new Error('Run begin before collect');
   if (JSON.stringify(current.config) !== JSON.stringify(c)) throw new Error('Configuration changed; begin a new measurement');
@@ -169,16 +224,12 @@ export async function collect(db, c, { quotaReader = readQuota, discoverThreads 
           cursor.baseline = { input_tokens:0,cached_input_tokens:0,output_tokens:0,reasoning_output_tokens:0,total_tokens:0 };
           cursor.recordBaseline = { ...cursor.baseline };
         }
-        const result = readRows(filename, cursor.offset, { tail: bootstrap });
+        const result = readRows(filename, cursor.offset, { tail: bootstrap, readerState:cursor.readerState });
         cursor.identity = result.identity; cursor.accountKey = observation.accountKey || null;
         if (result.invalidRows && !bootstrap) gap('invalid-json-row', thread.id);
-        if (result.offset < result.size) gap('unread-tail-or-partial-row', thread.id);
-        if (result.gap) {
-          gap(result.gap, thread.id);
-          // Fail closed without rereading one huge line forever. Rebaseline
-          // after the skipped bytes rather than inventing a token delta.
-          cursor.offset = result.size; cursor.baseline = null;
-        } else {
+        if (result.gap) gap(result.gap,thread.id);
+        observation.telemetryPending ||= result.pendingTelemetry;
+        {
           for (const entry of result.rows) {
             const value = consumeRow(cursor, entry.row, { bootstrap, measurementStartedAt: current.started_at, offset: entry.offset });
             if (value.gap && !bootstrap) gap(value.gap, thread.id);
@@ -191,6 +242,7 @@ export async function collect(db, c, { quotaReader = readQuota, discoverThreads 
             }
           }
           cursor.offset = result.offset;
+          cursor.readerState = result.readerState;
         }
         if (bootstrap) baselineFiles++;
         db.prepare('INSERT INTO cursors VALUES(?,?) ON CONFLICT(thread_id) DO UPDATE SET state=excluded.state').run(thread.id, JSON.stringify(cursor));
@@ -223,9 +275,10 @@ function advanceCalibration(db, current, c, observation) {
   const prior = priorRow ? JSON.parse(priorRow.body) : null;
   let anchor = old;
   if (!sameQuotaEpoch(old,observation) || !sameQuotaEpoch(prior,observation)
+      || prior.samplerVersion !== observation.samplerVersion
       || observation.quota.usedPercent < prior.quota.usedPercent
       || Date.parse(observation.timestamp)-Date.parse(prior.timestamp)>180000) anchor = observation;
-  else if (observation.quota.usedPercent-anchor.quota.usedPercent >= (c.minimumQuotaDelta ?? 5)
+  else if (!observation.telemetryPending && observation.quota.usedPercent-anchor.quota.usedPercent >= (c.minimumQuotaDelta ?? 5)
       && Date.parse(observation.timestamp)-Date.parse(anchor.timestamp) >= (c.minimumSegmentSeconds ?? 300)*1000) {
     const read = table => db.prepare(`SELECT timestamp,body FROM ${table} WHERE campaign=? AND timestamp>=? AND timestamp<=? ORDER BY timestamp`)
       .all(current.id,anchor.timestamp,observation.timestamp).map(row=>({...JSON.parse(row.body),timestamp:row.timestamp}));
@@ -251,6 +304,21 @@ export function reportFromStore(db, c) {
       minimumSegmentSeconds:c.minimumSegmentSeconds ?? 300 } : null,
     config: current.config, startedAt: current.started_at });
   report.coverageGaps = db.prepare('SELECT count(*) n FROM gaps WHERE campaign=?').get(current.id).n;
+  const firstRow = db.prepare('SELECT body FROM snapshots WHERE campaign=? ORDER BY id LIMIT 1').get(current.id);
+  const first = firstRow ? JSON.parse(firstRow.body) : null;
+  const delta = first?.quota && latestValue?.quota ? latestValue.quota.usedPercent-first.quota.usedPercent : 0;
+  const n = report.observedTokens.total_tokens;
+  report.preliminary = sameQuotaEpoch(first,latestValue) && !latestValue.telemetryPending && delta > 0 && n > 0 && report.byModel.length === 1
+    && latestValue.quota.usedPercent < 100 ? {
+      status:'very-low-confidence-observation-not-calibration', model:report.byModel[0].model,
+      start:first.timestamp,end:latestValue.timestamp,quotaPercentagePoints:delta,observedTokens:n,
+      tokensPerWeeklyPercentagePoint:n/delta,
+      allocatedUsdPerMillionObservedTokens:delta*report.money.usdPerWeeklyPercentagePoint*1e6/n,
+      roundingEnvelopeOnlyUsdPerMillion:{low:Math.max(0,delta-2)*report.money.usdPerWeeklyPercentagePoint*1e6/n,
+        high:(delta+2)*report.money.usdPerWeeklyPercentagePoint*1e6/n},
+      cachedShareOfInput:report.observedTokens.input_tokens ? report.observedTokens.cached_input_tokens/report.observedTokens.input_tokens : null,
+      historicalCoverageGaps:report.coverageGaps,externalUsageVerified:false,separateInputOutputPrices:null
+    } : null;
   return { ...report, measurementId: current.id };
 }
 

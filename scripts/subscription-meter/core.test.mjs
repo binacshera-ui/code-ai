@@ -171,6 +171,57 @@ test('partial final row waits for newline',t=>{
   assert.equal(readRows(f.filename,offset).offset,offset);
   fs.appendFileSync(f.filename,'"test"}\n');assert.equal(readRows(f.filename,offset).rows.length,1);
 });
+test('large tool payload is streamed past without losing following usage',t=>{
+  const f=fixture(t),offset=fs.statSync(f.filename).size;
+  fs.appendFileSync(f.filename,JSON.stringify({timestamp:start,type:'response_item',payload:{type:'function_call_output',output:'x'.repeat(10*1024*1024)}})+'\n'+JSON.stringify(tokenRow(count(200,100,30,10)))+'\n');
+  const r=readRows(f.filename,offset);
+  assert.equal(r.gap,null);assert.equal(r.invalidRows,0);assert.equal(r.pendingTelemetry,false);
+  assert.equal(r.skippedIrrelevantLines,1);assert.equal(r.rows.length,1);
+  assert.equal(r.rows[0].row.payload.info.total_token_usage.total_tokens,230);
+  assert.equal(r.offset,fs.statSync(f.filename).size);
+});
+test('large payload continuation crosses sampling budgets and a restart',t=>{
+  const f=fixture(t),offset=fs.statSync(f.filename).size;
+  fs.appendFileSync(f.filename,JSON.stringify({timestamp:start,type:'response_item',payload:{output:'x'.repeat(300000)}})+'\n'+JSON.stringify(tokenRow(count()))+'\n');
+  let r=readRows(f.filename,offset,{maxBytes:65536}),loops=1;assert.ok(r.readerState);assert.equal(r.pendingTelemetry,true);
+  let rows=[...r.rows];
+  while(r.pendingTelemetry && loops<10){r=readRows(f.filename,r.offset,{maxBytes:65536,readerState:JSON.parse(JSON.stringify(r.readerState))});rows.push(...r.rows);loops++}
+  assert.equal(r.pendingTelemetry,false);assert.equal(r.gap,null);assert.equal(rows.length,1);assert.ok(loops>1);
+});
+test('incomplete irrelevant payload is safe and finishes on later append',t=>{
+  const f=fixture(t),offset=fs.statSync(f.filename).size;
+  fs.appendFileSync(f.filename,'{"timestamp":"'+start+'","type":"response_item","payload":{"output":"'+'x'.repeat(50000));
+  const a=readRows(f.filename,offset);assert.equal(a.pendingTelemetry,false);assert.ok(a.readerState);
+  fs.appendFileSync(f.filename,'"}}\n'+JSON.stringify(tokenRow(count()))+'\n');
+  const b=readRows(f.filename,a.offset,{readerState:a.readerState});assert.equal(b.rows.length,1);assert.equal(b.gap,null);
+});
+test('oversized accounting metadata is an explicit gap, not a silent EOF jump',t=>{
+  const f=fixture(t),offset=fs.statSync(f.filename).size;
+  fs.appendFileSync(f.filename,JSON.stringify({timestamp:start,type:'turn_context',payload:{model:'a',extra:'x'.repeat(5*1024*1024)}})+'\n'+JSON.stringify(tokenRow(count()))+'\n');
+  const r=readRows(f.filename,offset);assert.equal(r.gap,'oversize-telemetry-row');assert.equal(r.rows.length,1);
+});
+test('large response between samples causes no artificial historical gap',async t=>{
+  const f=fixture(t);await f.sample();
+  fs.appendFileSync(f.filename,JSON.stringify({timestamp:f.started,type:'response_item',payload:{output:'x'.repeat(6*1024*1024)}})+'\n');
+  f.append();await f.sample();const r=reportFromStore(f.db,f.c);
+  assert.equal(r.coverageGaps,0);assert.equal(r.observedTokens.total_tokens,30);assert.equal(r.latestQuota.telemetryPending,false);
+});
+test('preliminary ratio is separate from calibration and preserves uncertainty',async t=>{
+  const f=fixture(t);await f.sample();f.append(200);f.setPercent(12);await f.sample();
+  const r=reportFromStore(f.db,f.c);assert.equal(r.preliminary.quotaPercentagePoints,2);
+  assert.equal(r.preliminary.status,'very-low-confidence-observation-not-calibration');
+  assert.equal(r.preliminary.roundingEnvelopeOnlyUsdPerMillion.low,0);
+  assert.equal(r.byModel[0].calibration.status,'insufficient-observations');
+});
+test('incomplete accounting rows hold calibration until their counters arrive',async t=>{
+  const f=fixture(t);await f.sample();
+  for(let i=1;i<=4;i++){f.append(100+i*10,(i+1)*60-15);f.setPercent(10+i);await f.sample()}
+  const late={...tokenRow(count(150,60,30,10)),timestamp:new Date(Date.parse(f.started)+345000).toISOString()};
+  fs.appendFileSync(f.filename,JSON.stringify(late));f.setPercent(15);await f.sample();
+  let r=reportFromStore(f.db,f.c);assert.equal(r.latestQuota.telemetryPending,true);assert.equal(r.calibrationSegments.length,0);assert.equal(r.preliminary,null);
+  fs.appendFileSync(f.filename,'\n');await f.sample();r=reportFromStore(f.db,f.c);
+  assert.equal(r.latestQuota.telemetryPending,false);assert.equal(r.calibrationSegments.length,1);assert.equal(r.coverageGaps,0);
+});
 test('subscription GET uses credentials in memory and never returns them',async t=>{
   const f=fixture(t);fs.writeFileSync(path.join(f.c.codexHome,'auth.json'),JSON.stringify({tokens:{access_token:'synthetic-secret',account_id:'synthetic-id'}}));
   const r=await readQuota(f.c,async(url,init)=>{assert.equal(init.method,'GET');assert.equal(init.headers.Authorization,'Bearer synthetic-secret');
