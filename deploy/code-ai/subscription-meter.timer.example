@@ -1,0 +1,11 @@
+[Unit]
+Description=Sample CODE AI subscription quota every minute
+
+[Timer]
+OnBootSec=15
+OnUnitActiveSec=60
+AccuracySec=1
+Unit=code-ai-subscription-meter.service
+
+[Install]
+WantedBy=timers.target

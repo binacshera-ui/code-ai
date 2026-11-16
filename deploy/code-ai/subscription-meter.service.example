@@ -1,0 +1,16 @@
+[Unit]
+Description=CODE AI passive subscription quota sampler
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Replace paths with an immutable, tested release and a private configuration.
+ExecStart=/usr/bin/node /absolute/release/scripts/codex-subscription-meter.mjs collect --config /private/config.json
+UMask=0077
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=50
+MemoryMax=256M
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/private/meter-state
