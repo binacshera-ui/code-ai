@@ -1,63 +1,68 @@
-# Gemini inside the Codex harness
+# Gemini models inside Code AI's Codex harness
 
-This optional installation runs the existing Codex binary against Gemini through
-the LiteLLM Responses API. It uses its own `CODEX_HOME`, gateway credential and
-session storage. The active OpenAI installation and its authentication are not
-modified. Gemini CLI's `.env` remains the source of the upstream API key; the
-launcher loads it directly into the gateway process, never into Codex's tools.
+Gemini is a model family in the existing Codex model picker. It is not a Gemini
+CLI conversation or a copied Codex home. GPT and Gemini share the native thread
+ID, transcript, shell/patch/MCP tools, approvals, resume and local compaction.
+Switching the picker affects the next submitted message, never a running turn.
 
-Install LiteLLM into a dedicated virtual environment, then provision the separate
-home (all paths below are operator choices, not repository requirements):
+## Transport
+
+Codex's `code_ai` Responses provider connects to the loopback inference router.
+GPT requests retain their normal account authentication and go to the OpenAI
+Codex endpoint. The four registered Gemini 4 models go to the loopback LiteLLM
+adapter, which uses the existing Gemini CLI API key. OpenAI credentials and
+account headers are never forwarded to Google. Gemini API usage is billed
+separately from the ChatGPT subscription.
+
+The router translates transport only; Codex remains the agent runtime. Opaque
+OpenAI reasoning is omitted from Gemini-bound input. Long Gemini thought-signature
+tool IDs are mapped consistently for OpenAI's ID limit when switching back. The
+native transcript is not rewritten. OpenAI-hosted search and OpenAI speed tiers
+are not Gemini capabilities; authorized MCP tools remain available.
+
+## Provision
+
+Choose private runtime paths outside source control. Install Node.js, Python, uv
+and the existing Codex binary, then:
 
 ```bash
-uv venv --python python3 /home/example/.local/share/code-ai/codex-gemini/venv
-uv pip install --python /home/example/.local/share/code-ai/codex-gemini/venv/bin/python 'litellm[proxy]==1.110.1'
-node deploy/code-ai/codex-gemini/setup.mjs \
-  --runtime-root /home/example/.local/share/code-ai/codex-gemini \
-  --source-home /home/example/.codex \
-  --key-file /home/example/.gemini/.env \
-  --codex-bin /usr/local/bin/codex
-node deploy/code-ai/codex-gemini/run.mjs --gateway-only
-node deploy/code-ai/codex-gemini/run.mjs --status
-node deploy/code-ai/codex-gemini/run.mjs -C /path/to/workspace
-node deploy/code-ai/codex-gemini/run.mjs exec --json -C /path/to/workspace 'Your task'
-node deploy/code-ai/codex-gemini/run.mjs exec resume SESSION_ID 'Continue'
-node deploy/code-ai/codex-gemini/verify.mjs
-node deploy/code-ai/codex-gemini/verify-app-server.mjs /absolute/path/to/pilot-receipt.json
+uv venv --python python3 /srv/code-ai-inference/venv
+uv pip install --python /srv/code-ai-inference/venv/bin/python 'litellm[proxy]==1.110.1'
+node deploy/code-ai/inference/install.mjs \
+  --runtime-root /srv/code-ai-inference \
+  --codex-home /home/example/.codex \
+  --key-file /home/example/.gemini/.env
+node deploy/code-ai/inference/serve-adapter.mjs /srv/code-ai-inference
+node server/codexInferenceRouter.mjs /srv/code-ai-inference/settings.json
 ```
 
-The gateway listens on loopback only and requires a generated local key. It has
-one explicit model route and no provider fallback. Codex executes the tools,
-stores sessions and manages context. LiteLLM translates model requests, responses
-and custom tool calls; it does not own the agent loop. Paid cache creation and
-gateway response caching are disabled. Provider-reported automatic cache usage
-must be verified on representative turns.
+Run the last two programs as supervised services. Both bind loopback only.
+Use repeated `--codex-home` arguments for multiple normal Codex profiles. Install
+preserves configuration backups, writes a combined native model catalog, and
+selects the shared `code_ai` transport without changing the selected GPT model
+or its authentication. Ports default to 4188 (router) and 4189 (adapter).
 
-The isolated profile uses native workspace-write permissions and approvals.
-The model catalog reuses the installed Codex instructions and defines Gemini's
-context limit and reasoning levels. OpenAI-hosted web search is disabled; expose
-browser or search capabilities through ordinary authorized MCP tools if needed.
-Existing session-specific browser bindings are not copied into this installation.
+Existing native owners must reload configuration when idle. A loaded thread's
+provider cannot be changed by a turn settings update. Do not cancel active work
+to reload: the one-time `restart-idle-owners.mjs` operator accepts private JSON
+with `owners: [{service, socket}]` and a `receipt` path. It checks native active
+turns and queued inputs before restart and verifies the transport/catalog after.
+Resume unloaded historical threads with `modelProvider: "code_ai"`, keeping the
+original thread ID. Recovery of already accepted inputs must not change settings
+or submit the original input again.
 
-Runtime state, logs, credentials, verification transcripts and installed packages
-must remain outside source control. Qualification must include streamed text,
-shell and patch tools, MCP tools, follow-ups, process restart/resume, cancellation,
-native compaction and provider usage. A model-list response alone is insufficient.
+## Qualification and accounting
 
-The operator can put an executable symlink to `deploy/code-ai/codex-gemini/run.mjs` on PATH
-as `codex-gemini`. That launcher starts only the isolated gateway when needed and
-passes all ordinary Codex CLI or app-server arguments to the existing binary.
-`codex-gemini --status` also compares the original Codex configuration and
-authentication hashes with the setup baseline. This optional installation does
-not register a profile in the production Code AI web application.
-The private installation record under the user's XDG configuration directory
-locates the runtime; `CODE_AI_GEMINI_RUNTIME` can select another isolated runtime.
+Run focused router tests with `node --test server/codexInferenceRouter.test.mjs`.
+`deploy/code-ai/inference/verify.mjs HOME WORKSPACE RECEIPT` qualifies a disposable
+test thread: original GPT, all four Gemini models with real native shell tools,
+return to GPT, process restart/resume and native compaction. It makes real API
+calls. Verify the actual Code AI queue/model picker separately after deployment.
 
-Only the OpenAI-specific `prompt_cache_key` parameter is explicitly removed by
-the adapter. Other unsupported parameters fail visibly. Gemini's automatic
-prompt caching remains enabled; no explicit cache objects are created. Numeric
-usage is written by `usage_callback.py` to private `evidence/usage.jsonl`, including
-provider-reported cached input. Gateway cost fields are estimates from LiteLLM's
-price catalog, not a provider billing reconciliation. Codex resume can report
-cumulative usage; use the per-request gateway records rather than adding those
-cumulative totals.
+Keep credentials, transcripts, receipts, runtime state and installed packages
+private. `usage.jsonl` contains numeric provider usage, including automatic cache
+usage. No paid cache objects or explicit response cache are created. Adapter cost
+estimates are not a provider billing reconciliation. Do not sum cumulative native
+resume counters as if they were independent requests.
+
+The previous isolated `codex-gemini` launcher/home is retired; do not install it.

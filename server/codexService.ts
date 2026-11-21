@@ -1,4 +1,5 @@
 import { resolveCodexExecutionSelection } from './codexExecutionSelection.js';
+import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
 import { sessionListLimit } from './sessionListLimit.js';
 import { readCodexRetryObservation } from './codexRetryObservation.mjs';
 import { isCodexInlineImage } from './codexAttachmentInputs.js';
@@ -596,6 +597,7 @@ interface RawSessionMetaPayload {
 }
 
 interface CodexConfigDefaults {
+  modelProvider?: string | null;
   model: string | null;
   reasoningEffort: string | null;
   serviceTier: string | null;
@@ -4736,6 +4738,7 @@ async function readCodexExecutionDefaults(profile: CodexProfile): Promise<CodexC
     await normalizeLegacyCodexServiceTierConfig(profile, configPath);
     const raw = await fs.readFile(configPath, 'utf-8');
     return {
+      modelProvider: normalizeExecutionSettingValue(readRootTomlString(raw, 'model_provider')),
       model: normalizeExecutionSettingValue(readRootTomlString(raw, 'model')),
       reasoningEffort: normalizeExecutionSettingValue(readRootTomlString(raw, 'model_reasoning_effort')),
       serviceTier: normalizeCodexServiceTierValue(readRootTomlString(raw, 'service_tier')),
@@ -4878,7 +4881,7 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
         description: normalizeExecutionSettingValue(entry?.description),
         defaultReasoningLevel: normalizeExecutionSettingValue(entry?.default_reasoning_level),
         supportedReasoningLevels,
-        availableResponseSpeedIds: Array.from(new Set(
+        availableResponseSpeedIds: isGeminiCodexModel(slug) ? [] : Array.from(new Set(
           [
             'flex',
             ...(Array.isArray(entry?.additional_speed_tiers) ? entry.additional_speed_tiers : []),
@@ -4923,6 +4926,10 @@ function buildCodexResponseSpeedSnapshot(
   selectedModelOption: CodexAvailableModel | null,
   defaults: CodexConfigDefaults
 ): CodexResponseSpeedSnapshot {
+  if (isGeminiCodexModel(selectedModelOption?.slug)) return {
+    selectedModeId: null, selectedLabel: 'Gemini API', configurable: false,
+    note: 'המודל פועל ברתמת Codex דרך Gemini API. רמת החשיבה נבחרת בנפרד.', availableModes: [],
+  };
   if (!selectedModelOption) {
     return {
       selectedModeId: null,
@@ -5250,6 +5257,7 @@ export async function runCodexPrompt(
     : promptText;
   const queueKey = buildProviderRunQueueKey(profile.id, sessionId, options.runId);
   const executionConfig = await resolveCodexExecutionConfig(profile, options.executionConfig);
+  const { modelProvider } = await readCodexExecutionDefaults(profile);
 
   return queueBySessionKey(queueKey, async () => {
     const previousSession = sessionId ? await resolveSessionRecord(profile, sessionId) : null;
@@ -5412,6 +5420,7 @@ export async function runCodexPrompt(
         profileId: profile.id, runId: activeRunId, sessionId, prompt: effectivePromptText, imagePaths,
         threadOptions: {
           model: executionConfig.model,
+          ...(modelProvider === 'code_ai' ? { modelProvider } : {}),
           approvalPolicy: sandbox === 'danger-full-access' ? 'never' : 'on-request',
           sandbox,
         },
@@ -5449,6 +5458,7 @@ export async function runCodexPrompt(
           managedOwner: true,
           expectedOwnerSettings: {
             model: executionConfig.model!, cwd: runCwd, approvalPolicy: 'never' as const,
+            ...(modelProvider === 'code_ai' && isGeminiCodexModel(executionConfig.model) ? { modelProvider } : {}),
             sandbox: { type: 'dangerFullAccess' }, reasoningEffort: executionConfig.reasoningEffort || null,
           },
           onSubmissionChanged: options.onNativeSubmissionChanged,

@@ -932,6 +932,8 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
       ? options.sharedTransport.expectedOwnerSettings : null;
     const threadResult = await request(sessionId ? 'thread/resume' : 'thread/start', {
       ...(!options.sharedTransport ? options.threadOptions : {}), cwd: options.cwd,
+      ...(options.sharedTransport && !options.sharedTransport.resumeSubmission && options.threadOptions?.modelProvider
+        ? { modelProvider: options.threadOptions.modelProvider } : {}),
       ...(initialSharedSettings ? {
         model: initialSharedSettings.model,
         ...(initialSharedSettings.reasoningEffort ? { config: {
@@ -950,6 +952,11 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
         || !threadResult.thread.id.trim()) throw new Error('Codex app-server did not return a thread ID');
     sessionId = threadResult.thread.id;
     threadPath = typeof threadResult.thread.path === 'string' ? threadResult.thread.path : null;
+    if (options.sharedTransport?.expectedOwnerSettings?.modelProvider
+        && !options.sharedTransport.resumeSubmission
+        && threadResult.modelProvider !== options.sharedTransport.expectedOwnerSettings.modelProvider) {
+      throw new CodexSharedOwnerSettingsMismatchError();
+    }
     await options.onSessionStarted?.(sessionId);
     if (options.sharedTransport?.expectedOwnerSettings && !options.sharedTransport.managedOwner && !options.sharedTransport.resumeSubmission
         && !ownerSettingsMatch(options.sharedTransport.expectedOwnerSettings, threadResult)) {

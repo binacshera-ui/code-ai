@@ -15890,6 +15890,7 @@ export function CodexMobileApp() {
   const [stopScheduleTarget, setStopScheduleTarget] = useState<CodexQueueServerItem | null>(null);
   const [isStopScheduleSaving, setIsStopScheduleSaving] = useState(false);
   const [availableModels, setAvailableModels] = useState<CodexModelOption[]>([]);
+  const [modelFamilyFilter, setModelFamilyFilter] = useState<'gpt' | 'gemini' | null>(null);
   const [modelPermissionSnapshot, setModelPermissionSnapshot] = useState<CodexPermissionSnapshotResponse | null>(null);
   const [modelResponseSpeedSnapshot, setModelResponseSpeedSnapshot] = useState<CodexResponseSpeedSnapshotResponse | null>(null);
   const [modelMultiAgentSnapshot, setModelMultiAgentSnapshot] = useState<CodexMultiAgentSnapshotResponse | null>(null);
@@ -24891,12 +24892,31 @@ export function CodexMobileApp() {
                           </button>
                           {activeModelPanelSection === 'models' && (
                             <div className="space-y-1 border-t border-slate-100 px-2.5 py-2">
+                              {currentProfile?.provider === 'codex' && availableModels.some(model => model.slug.startsWith('gemini-')) && (
+                                <div className="mb-2 space-y-1.5">
+                                  <div className="flex gap-1 rounded-full bg-slate-100 p-1" role="group" aria-label="משפחת מודלים ברתמת Codex">
+                                    {(['gpt', 'gemini'] as const).map(family => (
+                                      <button key={family} type="button"
+                                        aria-pressed={(modelFamilyFilter || (selectedModelSlug?.startsWith('gemini-') ? 'gemini' : 'gpt')) === family}
+                                        onClick={() => setModelFamilyFilter(family)}
+                                        className={cn('flex-1 rounded-full px-3 py-1.5 text-[11px] font-semibold transition',
+                                          (modelFamilyFilter || (selectedModelSlug?.startsWith('gemini-') ? 'gemini' : 'gpt')) === family
+                                            ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}>
+                                        {family === 'gpt' ? 'GPT' : 'Gemini'}
+                                      </button>
+                                    ))}
+                                  </div>
+                                  <div className="px-1 text-[9px] text-slate-500">רתמת Codex · הבחירה תחול על ההודעה הבאה באותה שיחה</div>
+                                </div>
+                              )}
                               {availableModels.length === 0 ? (
                                 <div className="rounded-[0.85rem] border border-slate-100 bg-slate-50/75 px-2.5 py-3 text-right text-[11px] text-slate-500">
                                   {isModelCatalogLoading ? 'טוען מודלים...' : 'לא נמצאו מודלים זמינים לפרופיל הזה.'}
                                 </div>
                               ) : (
-                                availableModels.map((model) => (
+                                availableModels.filter(model => currentProfile?.provider !== 'codex'
+                                  || (modelFamilyFilter || (selectedModelSlug?.startsWith('gemini-') ? 'gemini' : 'gpt'))
+                                    === (model.slug.startsWith('gemini-') ? 'gemini' : 'gpt')).map((model) => (
                                   <button
                                     key={model.slug}
                                     type="button"
@@ -24911,6 +24931,7 @@ export function CodexMobileApp() {
                                         || null
                                       );
                                       void handleModelSelectionChange(model.slug, nextReasoningEffort);
+                                      setModelFamilyFilter(null);
                                       setActiveModelPanelSection('reasoning');
                                       setIsAdditionsMenuOpen(false);
                                       setIsReasoningPickerOpen(false);
