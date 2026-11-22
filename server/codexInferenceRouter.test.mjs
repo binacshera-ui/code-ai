@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -86,4 +86,76 @@ test('one native conversation routes exact GPT bytes and Gemini tool history wit
   assert.equal((await fetch(endpoint, { method: 'POST', headers: compressedHeaders, body: crossProvider })).status, 200);
   assert.equal(calls[4].headers['content-encoding'], undefined);
   assert.ok(JSON.parse(calls[4].body).input[0].call_id.length <= 64);
+});
+
+test('native image generation and multipart editing retain bytes, account auth and provider errors', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-image-router-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const auth = path.join(root, 'auth.json');
+  await writeFile(auth, JSON.stringify({ tokens: { access_token: 'fixture-image-token' } }));
+  const calls = [], events = [];
+  const upstream = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    calls.push({ url: req.url, headers: req.headers, raw: Buffer.concat(chunks) });
+    if (req.url.includes('failure')) {
+      res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '5' });
+      res.end('{"error":{"code":"rate_limit_exceeded"}}');
+    } else {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{"data":[');
+      setImmediate(() => res.end('{"b64_json":"fixture"}]}'));
+    }
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  t.after(() => upstream.close());
+  const base = `http://127.0.0.1:${upstream.address().port}`;
+  const server = createInferenceRouter({ authFiles: [auth], geminiGatewayKey: 'fixture-google-secret',
+    geminiBaseUrl: `${base}/gemini/v1`, openaiBaseUrl: `${base}/backend-api/codex` },
+  { logger: event => events.push(event) });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1/images`;
+  const headers = { Authorization: 'Bearer fixture-image-token', 'ChatGPT-Account-ID': 'fixture-account' };
+  assert.equal((await fetch(`${endpoint}/generations`, { method: 'POST', body: '{}' })).status, 401);
+  assert.equal((await fetch(`${endpoint}/edits`, { headers })).status, 405);
+  assert.equal((await fetch(`${endpoint}/unknown`, { method: 'POST', headers })).status, 404);
+  assert.equal(calls.length, 0);
+
+  // Image models never select the Gemini chat adapter, even if the body names
+  // one. OpenAI owns validation of this opaque native image request.
+  const generated = zlib.gzipSync(Buffer.from('{ "model":"gemini-4-neon", "prompt":"private fixture prompt" }'));
+  const generation = await fetch(`${endpoint}/generations?quality=high`, { method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' }, body: generated });
+  assert.deepEqual(await generation.json(), { data: [{ b64_json: 'fixture' }] });
+  assert.equal(calls[0].url, '/backend-api/codex/images/generations?quality=high');
+  assert.equal(calls[0].headers['content-encoding'], 'gzip');
+  assert.deepEqual(calls[0].raw, generated);
+
+  const boundary = 'fixture-native-image-boundary';
+  const edited = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="source.png"\r\nContent-Type: image/png\r\n\r\n`),
+    Buffer.from([137, 80, 78, 71, 0, 255, 128, 13, 10]), Buffer.from(`\r\n--${boundary}--\r\n`)]);
+  const edit = await fetch(`${endpoint}/edits`, { method: 'POST',
+    headers: { ...headers, 'Content-Type': `multipart/form-data; boundary=${boundary}` }, body: edited });
+  assert.equal(edit.status, 200);
+  await edit.arrayBuffer();
+  assert.equal(calls[1].url, '/backend-api/codex/images/edits');
+  assert.equal(calls[1].headers['content-type'], `multipart/form-data; boundary=${boundary}`);
+  assert.deepEqual(calls[1].raw, edited);
+  for (const call of calls) {
+    assert.equal(call.headers.authorization, headers.Authorization);
+    assert.equal(call.headers['chatgpt-account-id'], 'fixture-account');
+    assert.equal(Number(call.headers['content-length']), call.raw.length);
+  }
+
+  const failed = await fetch(`${endpoint}/generations?failure=1`, { method: 'POST', headers, body: '{}' });
+  assert.equal(failed.status, 429);
+  assert.equal(failed.headers.get('retry-after'), '5');
+  assert.deepEqual(await failed.json(), { error: { code: 'rate_limit_exceeded' } });
+  assert.equal(calls.length, 3, 'paid image submissions must never be retried by the router');
+  assert.equal(events.filter(event => event.event === 'inference.image.started').length, 3);
+  const finished = events.filter(event => event.event === 'inference.image.finished');
+  assert.deepEqual(finished.map(event => event.status), [200, 200, 429]);
+  assert.ok(finished.every(event => event.completed && event.durationMs >= 0));
+  for (const event of finished) assert.ok(events.some(start => start.event === 'inference.image.started' && start.requestId === event.requestId));
+  assert.doesNotMatch(JSON.stringify(events), /private fixture prompt|fixture-image-token|fixture-google-secret|source\.png/);
 });

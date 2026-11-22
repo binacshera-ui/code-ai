@@ -2,7 +2,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import { readFile } from 'node:fs/promises';
-import { timingSafeEqual, createHash } from 'node:crypto';
+import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
 import { promisify } from 'node:util';
 import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
@@ -54,7 +54,7 @@ function equal(a, b) {
   return left.length > 0 && left.length === right.length && timingSafeEqual(left, right);
 }
 
-export function createInferenceRouter(settings) {
+export function createInferenceRouter(settings, { logger = event => console.log(JSON.stringify(event)) } = {}) {
   async function authorized(header) {
     if (!header?.startsWith('Bearer ')) return false;
     const token = header.slice(7);
@@ -67,6 +67,7 @@ export function createInferenceRouter(settings) {
     return false;
   }
   const server = http.createServer(async (req, res) => {
+    let imageMetadata = null;
     const fail = (status, message) => {
       if (res.headersSent) { res.destroy(); return; }
       res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -78,10 +79,27 @@ export function createInferenceRouter(settings) {
         res.end(JSON.stringify({ ready: true, component: 'code-ai-inference' })); return;
       }
       const url = new URL(req.url, 'http://localhost');
-      if (!/^\/v1\/(responses(?:\/compact)?|models)$/.test(url.pathname)) {
+      const imageRequest = /^\/v1\/images\/(generations|edits)$/.test(url.pathname);
+      if (!imageRequest && !/^\/v1\/(responses(?:\/compact)?|models)$/.test(url.pathname)) {
         fail(404, 'Unknown inference route'); return;
       }
       if (!await authorized(req.headers.authorization)) { fail(401, 'Code AI account authentication required'); return; }
+      if (imageRequest) {
+        if (req.method !== 'POST') { fail(405, 'Image requests require POST'); return; }
+        const requestId = randomUUID(), started = performance.now();
+        let completed = false;
+        imageMetadata = { requestId, method: req.method, route: url.pathname, provider: 'openai' };
+        logger({ event: 'inference.image.started', ...imageMetadata });
+        const finish = () => {
+          if (completed) return;
+          completed = true;
+          logger({ event: 'inference.image.finished', ...imageMetadata,
+            durationMs: Math.round(performance.now() - started), status: res.statusCode,
+            completed: res.writableFinished });
+        };
+        res.once('finish', finish);
+        res.once('close', finish);
+      }
       let length = 0;
       const chunks = [];
       for await (const chunk of req) {
@@ -95,12 +113,15 @@ export function createInferenceRouter(settings) {
       // GPT bytes unless a cross-provider tool-ID conversion is necessary.
       const encoding = req.headers['content-encoding']?.trim().toLowerCase();
       let decoded = bytes;
-      if (bytes.length && encoding && encoding !== 'identity') {
+      if (!imageRequest && bytes.length && encoding && encoding !== 'identity') {
         const decoder = { zstd: zlib.zstdDecompress, gzip: zlib.gunzip, deflate: zlib.inflate, br: zlib.brotliDecompress }[encoding];
         if (!decoder) { fail(415, 'Unsupported model request encoding'); return; }
         decoded = await promisify(decoder)(bytes, { maxOutputLength: MAX_BODY });
       }
-      const body = decoded.length ? JSON.parse(decoded.toString('utf8')) : null;
+      // Native image editing sends multipart files. Image requests belong to
+      // OpenAI and pass through byte-for-byte, including boundaries/encoding;
+      // only Responses JSON needs model routing and tool-history conversion.
+      const body = !imageRequest && decoded.length ? JSON.parse(decoded.toString('utf8')) : null;
       const gemini = isGeminiCodexModel(body?.model);
       if (body?.model?.startsWith('gemini-') && !gemini) { fail(400, 'Gemini model is not registered'); return; }
       const target = new URL(url.pathname.slice('/v1'.length) + url.search, (gemini ? settings.geminiBaseUrl : settings.openaiBaseUrl) + '/');
@@ -135,7 +156,11 @@ export function createInferenceRouter(settings) {
         incoming.on('error', () => res.destroy());
       });
       upstream.setTimeout(360000, () => upstream.destroy());
-      upstream.on('error', () => fail(502, 'Model provider transport unavailable'));
+      upstream.on('error', error => {
+        if (imageMetadata) logger({ event: 'inference.image.transport_failed', ...imageMetadata,
+          code: error.code || error.name, stage: 'provider' });
+        fail(502, 'Model provider transport unavailable');
+      });
       res.on('close', () => { if (!res.writableEnded) upstream.destroy(); });
       upstream.end(bytes);
     } catch { fail(400, 'Invalid model request'); }
@@ -147,5 +172,8 @@ export function createInferenceRouter(settings) {
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   const settings = JSON.parse(await readFile(process.argv[2], 'utf8'));
   settings.geminiGatewayKey = (await readFile(settings.gatewayKeyFile, 'utf8')).trim();
-  createInferenceRouter(settings).listen(settings.port, '127.0.0.1', () => console.log('Code AI inference router ready'));
+  const server = createInferenceRouter(settings);
+  server.listen(settings.port, '127.0.0.1', () => console.log('Code AI inference router ready'));
+  // Stop accepting requests while existing model/image streams complete.
+  for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => server.close());
 }
