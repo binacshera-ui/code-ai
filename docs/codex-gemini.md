@@ -2,7 +2,8 @@
 
 Gemini is a model family in the existing Codex model picker. It is not a Gemini
 CLI conversation or a copied Codex home. GPT and Gemini share the native thread
-ID, transcript, shell/patch/MCP tools, approvals, resume and local compaction.
+ID, transcript, shell/patch/MCP tools, approvals, resume and local compaction
+for threads created with the `code_ai` provider.
 Switching the picker affects the next submitted message, never a running turn.
 
 ## Transport
@@ -47,9 +48,23 @@ provider cannot be changed by a turn settings update. Do not cancel active work
 to reload: the one-time `restart-idle-owners.mjs` operator accepts private JSON
 with `owners: [{service, socket}]` and a `receipt` path. It checks native active
 turns and queued inputs before restart and verifies the transport/catalog after.
-Resume unloaded historical threads with `modelProvider: "code_ai"`, keeping the
-original thread ID. Recovery of already accepted inputs must not change settings
-or submit the original input again.
+Resume historical threads without overriding `modelProvider`, keeping both the
+original provider identity and thread ID. Codex 0.171 rejects provider changes on
+resume and reserved built-in provider definitions. Legacy `openai` threads retain
+their existing GPT route; new threads use `code_ai`. Do not enable a global
+`openai_base_url` override to claim full Gemini compatibility: Codex 0.171's
+built-in OpenAI provider uses remote V2 compaction (`compaction_trigger` and
+opaque encrypted checkpoints), which the Gemini adapter does not implement.
+Model switching and tools passed in a disposable legacy thread, but remote
+compaction did not. No transcript rewrite, custom compactor or experimental
+context reset is used to hide that limitation. Recovery of already accepted
+inputs must not change settings or submit the input again.
+
+The router accepts native zstd-compressed requests as well as ordinary JSON. It
+preserves compressed GPT bytes unless translating tool IDs, and sends decoded
+JSON to the Gemini adapter. Use Node.js 22.15+ for native zstd support. Build
+preflight verifies the release's pinned monitoring dependency; missing runtime
+dependencies must fail packaging rather than yield an all-empty dashboard.
 
 ## Qualification and accounting
 
@@ -58,6 +73,10 @@ Run focused router tests with `node --test server/codexInferenceRouter.test.mjs`
 test thread: original GPT, all four Gemini models with real native shell tools,
 return to GPT, process restart/resume and native compaction. It makes real API
 calls. Verify the actual Code AI queue/model picker separately after deployment.
+The default qualification creates a `code_ai` thread. `--legacy-openai` is an
+explicit diagnostic for a disposable legacy thread with separately prepared
+routing; it currently fails at remote compaction and is not a production gate
+claiming legacy Gemini support.
 
 Keep credentials, transcripts, receipts, runtime state and installed packages
 private. `usage.jsonl` contains numeric provider usage, including automatic cache

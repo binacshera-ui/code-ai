@@ -49,8 +49,8 @@ for (const home of homes) {
   const backup = path.join(runtimeRoot, `config-${path.basename(path.dirname(home))}.before.toml`);
   try { await writeFile(backup, before, { mode: 0o600, flag: 'wx' }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
-  // One catalog and transport for both model families. Existing threads resume
-  // with an explicit provider override while retaining their native thread ID.
+  // Preserve historical OpenAI routing. Its remote compaction protocol is not
+  // interchangeable with custom providers' native local compaction.
   let after = before.replace(/^(model_catalog_json|model_provider)\s*=.*\r?\n/gm, '')
     .replace(/\n?# BEGIN CODE AI INFERENCE\n[\s\S]*?# END CODE AI INFERENCE\n?/g, '\n');
   if (/^\[model_providers\.openai\]/m.test(after)) throw new Error('Existing OpenAI provider override requires explicit merging');

@@ -55,11 +55,12 @@ function fixture(mode: string): string {
         if(mode==='shared-managed' && (m.params.model!=='synthetic-requested-model'
           ||m.params.config?.model_reasoning_effort!=='xhigh'
           ||'approvalPolicy' in m.params||'sandbox' in m.params||'permissions' in m.params))process.exit(36);
-        if(mode==='shared-managed-resume' && ('model' in m.params||'config' in m.params
+        if(mode==='shared-managed-resume' && ('modelProvider' in m.params||'model' in m.params||'config' in m.params
           ||'approvalPolicy' in m.params||'sandbox' in m.params||'permissions' in m.params))process.exit(37);
 
         if((mode==='resume'||mode==='shared-managed-resume'||mode.includes('recover')) && (m.method!=='thread/resume'||m.params.threadId!=='parent-thread')) process.exit(16);
         if(mode!=='resume'&&mode!=='shared-managed-resume'&&!mode.includes('recover') && (m.method!=='thread/start'||m.params.ephemeral!==false)) process.exit(17);
+        if(mode==='resume'&&'modelProvider' in m.params)process.exit(44);
         send({id:m.id,result:{thread:{id:'parent-thread',path:'/synthetic/session.jsonl',status:{type:mode==='shared-busy'?'active':'idle'}},
           ...(mode==='shared-settings-missing'?{}:{model:'synthetic-model',modelProvider:'synthetic-provider',serviceTier:null,
             cwd:process.cwd(),approvalPolicy:'never',sandbox:{type:'workspaceWrite',writableRoots:['/synthetic/workspace'],
@@ -292,6 +293,7 @@ for (const mode of ['blocking', 'async', 'child', 'resume', 'denials']) {
     let sessionCallbackFinished = false;
     const denied: string[] = [];
     const run = runCodexAppServerTurn({ ...options(mode, registry),
+      ...(mode === 'resume' ? { threadOptions: { modelProvider: 'must-not-override-saved-provider' } } : {}),
       onSessionStarted: async sessionId => {
         assert.equal(sessionId, 'parent-thread');
         await new Promise(resolve => setTimeout(resolve, 20));
@@ -954,7 +956,7 @@ test('resuming managed native threads never overwrites existing settings or perm
   const expected: CodexSharedOwnerSettings = { model: 'synthetic-requested-model', reasoningEffort: 'xhigh',
     cwd: process.cwd(), approvalPolicy: 'never', sandbox: { type: 'dangerFullAccess' } };
   const run = runCodexAppServerTurn({ ...options('shared-managed-resume', registry), sessionId: 'parent-thread',
-    threadOptions: { model: 'must-not-override', config: { model_reasoning_effort: 'low' }, approvalPolicy: 'never', sandbox: 'danger-full-access' },
+    threadOptions: { modelProvider: 'must-not-override', model: 'must-not-override', config: { model_reasoning_effort: 'low' }, approvalPolicy: 'never', sandbox: 'danger-full-access' },
     sharedTransport: { bridgePath, socketPath: '/synthetic/not-installed', managedOwner: true,
       expectedOwnerSettings: expected } });
   await waitFor(() => registry.list('codex-test', 'parent-thread').pendingCount === 1);

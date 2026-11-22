@@ -930,10 +930,14 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
     // permissions and every existing thread's settings unchanged.
     const initialSharedSettings = !sessionId && options.sharedTransport?.managedOwner
       ? options.sharedTransport.expectedOwnerSettings : null;
+    // Provider identity belongs to the saved thread. Codex 0.171 rejects
+    // changing it on resume; model selection still belongs to each new turn.
+    const { modelProvider: requestedProvider, ...threadOptions } = options.threadOptions || {};
     const threadResult = await request(sessionId ? 'thread/resume' : 'thread/start', {
-      ...(!options.sharedTransport ? options.threadOptions : {}), cwd: options.cwd,
-      ...(options.sharedTransport && !options.sharedTransport.resumeSubmission && options.threadOptions?.modelProvider
-        ? { modelProvider: options.threadOptions.modelProvider } : {}),
+      ...(!options.sharedTransport ? threadOptions : {}), cwd: options.cwd,
+      ...(!sessionId && requestedProvider
+        && (!options.sharedTransport || !options.sharedTransport.resumeSubmission)
+        ? { modelProvider: requestedProvider } : {}),
       ...(initialSharedSettings ? {
         model: initialSharedSettings.model,
         ...(initialSharedSettings.reasoningEffort ? { config: {

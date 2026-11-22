@@ -3,6 +3,7 @@ import { cp, mkdir, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { verifyRuntimeDependencies } from './verify-runtime-dependencies.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const directories = ['personal-chrome', 'browser-mode', 'phone-mode', 'design-mode',
@@ -25,3 +26,4 @@ await build({ absWorkingDir: appRoot, entryPoints: ['scripts/codex-shared-stdio.
   outfile: path.join(appRoot, 'dist/codex-shared-stdio.mjs'), bundle: true,
   platform: 'node', format: 'esm', packages: 'external', logLevel: 'warning' });
 await import('./verify-runtime-programs.mjs');
+console.log(JSON.stringify(await verifyRuntimeDependencies(path.join(appRoot, 'dist/server.js'))));

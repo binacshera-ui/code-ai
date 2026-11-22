@@ -4,7 +4,21 @@ import http from 'node:http';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createInferenceRouter, openaiRequest } from './codexInferenceRouter.mjs';
+import zlib from 'node:zlib';
+import { createInferenceRouter, openaiRequest, geminiRequest } from './codexInferenceRouter.mjs';
+
+test('native historical tool declarations merge once without losing namespace members or current definitions', () => {
+  const old = { type: 'function', name: 'followup_task', parameters: { old: true } };
+  const current = { type: 'function', name: 'followup_task', parameters: { current: true } };
+  const input = [{ type: 'additional_tools', tools: [{ type: 'namespace', name: 'collaboration', tools: [old,
+    { type: 'function', name: 'list_agents' }] }] }, { role: 'user', content: 'continue' }];
+  const value = geminiRequest({ input, tools: [{ type: 'namespace', name: 'collaboration', tools: [current] }] });
+  assert.deepEqual(value.input, [input[1]]);
+  assert.equal(value.tools.length, 1);
+  assert.deepEqual(value.tools[0].tools.map(tool => tool.name), ['followup_task', 'list_agents']);
+  assert.deepEqual(value.tools[0].tools[0], current);
+  assert.equal(input[0].tools[0].tools.length, 2, 'native source objects must remain unchanged');
+});
 
 test('Gemini signature IDs fit OpenAI limits and call/result pairing survives', () => {
   const id = 'call_' + 'x'.repeat(300);
@@ -25,7 +39,7 @@ test('one native conversation routes exact GPT bytes and Gemini tool history wit
   const calls = [];
   const upstream = http.createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
-    calls.push({ url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString() });
+    calls.push({ url: req.url, headers: req.headers, raw: Buffer.concat(chunks), body: Buffer.concat(chunks).toString() });
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.end('event: response.completed\ndata: {"type":"response.completed"}\n\n');
   });
@@ -58,4 +72,18 @@ test('one native conversation routes exact GPT bytes and Gemini tool history wit
   assert.equal(gemini.service_tier, undefined);
   assert.equal(gemini.prompt_cache_key, undefined);
   assert.equal((await fetch(endpoint, { method: 'POST', headers, body: '{"model":"gemini-unknown"}' })).status, 400);
+  const compressedGpt = zlib.zstdCompressSync(Buffer.from(gpt));
+  const compressedHeaders = { ...headers, 'Content-Encoding': 'zstd' };
+  assert.equal((await fetch(endpoint, { method: 'POST', headers: compressedHeaders, body: compressedGpt })).status, 200);
+  assert.equal(calls[2].headers['content-encoding'], 'zstd');
+  assert.deepEqual(calls[2].raw, compressedGpt);
+  const compressedGemini = zlib.zstdCompressSync(Buffer.from(JSON.stringify({ model: 'gemini-4-neon', input })));
+  assert.equal((await fetch(endpoint, { method: 'POST', headers: compressedHeaders, body: compressedGemini })).status, 200);
+  assert.equal(calls[3].headers['content-encoding'], undefined);
+  assert.equal(JSON.parse(calls[3].body).model, 'gemini-4-neon');
+  const longId = 'call_' + 'x'.repeat(300);
+  const crossProvider = zlib.zstdCompressSync(Buffer.from(JSON.stringify({ model: 'gpt-6.1-sol', input: [{ type: 'function_call_output', call_id: longId, output: 'ok' }] })));
+  assert.equal((await fetch(endpoint, { method: 'POST', headers: compressedHeaders, body: crossProvider })).status, 200);
+  assert.equal(calls[4].headers['content-encoding'], undefined);
+  assert.ok(JSON.parse(calls[4].body).input[0].call_id.length <= 64);
 });

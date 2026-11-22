@@ -30,3 +30,22 @@ test('host telemetry is authenticated, non-cacheable, read-only and sanitizes fa
   assert.equal((await fetch(url, { headers, method: 'POST' })).status, 404);
   assert.equal(calls, 2);
 });
+
+test('all-null collectors are unavailable, while an honest partial snapshot is still useful', async t => {
+  const app = express();
+  let partial = false;
+  app.use(createServerStatusRouter((_req, _res, next) => next(), async () => ({
+    version: 1, hostname: 'fixture', sampledAt: '2026-11-22T00:00:00Z',
+    cpu: null, memory: partial ? { totalBytes: 1 } : null, storage: null, network: null,
+    warnings: ['cpu_unavailable'],
+  }) as any));
+  const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const url = `http://127.0.0.1:${address.port}/server-status`;
+  const missing = await fetch(url);
+  assert.equal(missing.status, 503);
+  assert.equal((await missing.json()).code, 'SERVER_STATUS_UNAVAILABLE');
+  partial = true;
+  assert.equal((await fetch(url)).status, 200);
+});

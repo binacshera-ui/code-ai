@@ -5262,6 +5262,7 @@ export async function runCodexPrompt(
   return queueBySessionKey(queueKey, async () => {
     const previousSession = sessionId ? await resolveSessionRecord(profile, sessionId) : null;
     if (previousSession) requireOriginalSessionRecord(previousSession);
+    const threadModelProvider = previousSession?.modelProvider || modelProvider;
     const selectedPermissionMode = executionConfig.permissionModeId
       ? resolvePermissionMode(profile, executionConfig.permissionModeId)
       : await getSelectedPermissionMode(profile);
@@ -5458,7 +5459,8 @@ export async function runCodexPrompt(
           managedOwner: true,
           expectedOwnerSettings: {
             model: executionConfig.model!, cwd: runCwd, approvalPolicy: 'never' as const,
-            ...(modelProvider === 'code_ai' && isGeminiCodexModel(executionConfig.model) ? { modelProvider } : {}),
+            ...(modelProvider === 'code_ai' && threadModelProvider && isGeminiCodexModel(executionConfig.model)
+              ? { modelProvider: threadModelProvider } : {}),
             sandbox: { type: 'dangerFullAccess' }, reasoningEffort: executionConfig.reasoningEffort || null,
           },
           onSubmissionChanged: options.onNativeSubmissionChanged,

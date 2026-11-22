@@ -3,6 +3,8 @@ import http from 'node:http';
 import https from 'node:https';
 import { readFile } from 'node:fs/promises';
 import { timingSafeEqual, createHash } from 'node:crypto';
+import zlib from 'node:zlib';
+import { promisify } from 'node:util';
 import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
 
 const MAX_BODY = 64 * 1024 * 1024;
@@ -20,9 +22,26 @@ export function openaiRequest(body) {
 
 export function geminiRequest(body) {
   const value = { ...body };
+  // Native OpenAI threads also replay tool declarations as additional_tools
+  // input items. Hoist once, keeping current definitions authoritative. Broad
+  // adapter drop_params would silently discard unrelated unsupported behavior.
+  const mergeTools = tools => {
+    const entries = new Map();
+    for (const tool of tools) {
+      const key = tool.name ? `${tool.type}:${tool.name}` : JSON.stringify(tool);
+      const previous = entries.get(key);
+      entries.set(key, previous && tool.type === 'namespace'
+        ? { ...tool, tools: mergeTools([...(previous.tools || []), ...(tool.tools || [])]) } : tool);
+    }
+    return [...entries.values()];
+  };
+  if (Array.isArray(value.input)) {
+    const additions = value.input.filter(item => item.type === 'additional_tools').flatMap(item => item.tools || []);
+    if (additions.length) value.tools = mergeTools([...additions, ...(value.tools || [])]);
+    value.input = value.input.filter(item => !['reasoning', 'additional_tools'].includes(item.type));
+  }
   // Opaque OpenAI reasoning cannot be interpreted by Google. Conversation
   // messages and exact tool call/result pairs stay in the native transcript.
-  if (Array.isArray(value.input)) value.input = value.input.filter(item => item.type !== 'reasoning');
   delete value.prompt_cache_key;
   delete value.service_tier;
   delete value.include;
@@ -71,7 +90,17 @@ export function createInferenceRouter(settings) {
         chunks.push(chunk);
       }
       let bytes = Buffer.concat(chunks);
-      const body = bytes.length ? JSON.parse(bytes.toString('utf8')) : null;
+      // Built-in OpenAI threads in Codex 0.171 compress Responses requests.
+      // Read the model from bounded decoded JSON, but retain exact original
+      // GPT bytes unless a cross-provider tool-ID conversion is necessary.
+      const encoding = req.headers['content-encoding']?.trim().toLowerCase();
+      let decoded = bytes;
+      if (bytes.length && encoding && encoding !== 'identity') {
+        const decoder = { zstd: zlib.zstdDecompress, gzip: zlib.gunzip, deflate: zlib.inflate, br: zlib.brotliDecompress }[encoding];
+        if (!decoder) { fail(415, 'Unsupported model request encoding'); return; }
+        decoded = await promisify(decoder)(bytes, { maxOutputLength: MAX_BODY });
+      }
+      const body = decoded.length ? JSON.parse(decoded.toString('utf8')) : null;
       const gemini = isGeminiCodexModel(body?.model);
       if (body?.model?.startsWith('gemini-') && !gemini) { fail(400, 'Gemini model is not registered'); return; }
       const target = new URL(url.pathname.slice('/v1'.length) + url.search, (gemini ? settings.geminiBaseUrl : settings.openaiBaseUrl) + '/');
@@ -91,7 +120,10 @@ export function createInferenceRouter(settings) {
         // Gemini encodes thought signatures inside tool IDs. OpenAI has a
         // 64-character ID limit; map matching call/result IDs consistently.
         const converted = openaiRequest(body);
-        if (JSON.stringify(converted) !== JSON.stringify(body)) bytes = Buffer.from(JSON.stringify(converted));
+        if (JSON.stringify(converted) !== JSON.stringify(body)) {
+          bytes = Buffer.from(JSON.stringify(converted));
+          delete headers['content-encoding'];
+        }
       }
       if (bytes.length) headers['content-length'] = String(bytes.length);
       const upstream = (target.protocol === 'https:' ? https : http).request(target, {
