@@ -1,8 +1,13 @@
 import fs from 'node:fs/promises';
 import { loadEnvFile } from 'node:process';
 
-// Optional operator-supplied environment file. No host path is assumed.
-if (process.env.CODEX_INCIDENT_ENV_FILE) loadEnvFile(process.env.CODEX_INCIDENT_ENV_FILE);
+// Prefer explicitly supplied runtime credentials. A restricted investigator can
+// use codex-work-mode.mjs instead; it never needs access to the root secret file.
+if (!process.env.CODEX_INCIDENT_FAILURE_AUTH_TOKEN && !process.env.BC2_FAILURE_AUTH_TOKEN
+    && process.env.CODEX_INCIDENT_ENV_FILE) {
+  try { loadEnvFile(process.env.CODEX_INCIDENT_ENV_FILE); }
+  catch (error) { if (!['ENOENT', 'EACCES'].includes(error.code)) throw error; }
+}
 
 function readFlag(args, name) {
   const index = args.indexOf(name);
@@ -68,10 +73,10 @@ const kind = readFlag(args, '--kind');
 const contextFile = readFlag(args, '--context');
 const baseUrl = String(
   process.env.CODEX_INCIDENT_FAILURE_URL ||
-  ''
+  process.env.BC2_FAILURE_URL ||
+  `http://127.0.0.1:${process.env.BC2_FAILURE_PORT || 8210}`
 ).replace(/\/+$/g, '');
-const authToken = process.env.CODEX_INCIDENT_FAILURE_AUTH_TOKEN || '';
-if (!baseUrl) throw new Error('CODEX_INCIDENT_FAILURE_URL is required');
+const authToken = process.env.CODEX_INCIDENT_FAILURE_AUTH_TOKEN || process.env.BC2_FAILURE_AUTH_TOKEN || '';
 
 let payload = {};
 if (summaryFile) {

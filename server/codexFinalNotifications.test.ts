@@ -143,14 +143,14 @@ test('interrupted runs use a high-priority warning and reopen the selected remot
   );
   const request = buildRequest(message, {
     outcome: 'interrupted',
-    serverId: 'remote-a',
+    serverId: 'beam-10g',
     serverLabel: 'BEAM 10G',
   });
 
   assert.equal(request.method, 'POST');
   assert.equal(request.headers.Tags, 'warning,robot_face');
   assert.equal(request.headers.Priority, 'high');
-  assert.equal(request.headers.Click, `${TEST_ORIGIN}/session/developer/session-123?server=remote-a`);
+  assert.equal(request.headers.Click, `${TEST_ORIGIN}/session/developer/session-123?server=beam-10g`);
   assert.match(Buffer.from(request.body).toString('utf8'), /המשימה נקטעה/u);
   assert.match(Buffer.from(request.body).toString('utf8'), /BEAM 10G/u);
   assert.match(Buffer.from(request.body).toString('utf8'), /המשך במשימה/u);

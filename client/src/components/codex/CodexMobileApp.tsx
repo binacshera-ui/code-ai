@@ -45,6 +45,7 @@ import { useDecisionBoard } from './useDecisionBoard';
 import { decisionBoardProgress, decisionAnswerError, isDecisionBoardCode, type DecisionBoardApi } from './decisionBoardClient';
 import { interleaveUserInput } from './userInputTimeline';
 import { fetchWithDeploymentRetry } from './deploymentRetry';
+import { createDurableQueueSubmission, createQueueRequestScope, queueListViewForPanel, removeAcknowledgedAttachments } from './queueRequestLifecycle';
 import type { ServerStatusSnapshot } from '../../../../shared/serverStatus';
 import { readServerStatus } from './serverStatusTransport';
 import { collectSessionActivity } from './sessionUnread';
@@ -6475,7 +6476,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
                 ? codeProps.className.match(/language-([A-Za-z0-9_-]+)/)
                 : null;
 
-              if (languageMatch?.[1] === 'code-ai-flow' || languageMatch?.[1] === 'code_ai_flow' || languageMatch?.[1] === 'flow-json') {
+              if (languageMatch?.[1] === 'bina-flow' || languageMatch?.[1] === 'bina_flow' || languageMatch?.[1] === 'flow-json') {
                 return (
                   <div className="my-3 flex items-center gap-2 rounded-2xl border border-teal-100 bg-gradient-to-l from-teal-50 to-violet-50 px-4 py-3 text-xs font-medium text-teal-800" dir="rtl">
                     <GitBranch className="h-4 w-4 shrink-0" />
@@ -8209,7 +8210,7 @@ function SidebarPanel({
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const loadActiveTaskItems = useCallback((signal: AbortSignal) => fetchJsonForServer<{ items: CodexQueueServerItem[] }>(
     serverId,
-    `/api/codex/queue/items?profile=${encodeURIComponent(profileId)}`,
+    `/api/codex/queue/items?view=compact&profile=${encodeURIComponent(profileId)}`,
     { signal },
   ).then(data => data.items), [serverId, profileId]);
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
@@ -9056,7 +9057,7 @@ function FolderPickerDialog({
                     onOpenPath();
                   }
                 }}
-                placeholder="/workspace או C:\\repo"
+                placeholder="/srv/workspace או C:\\repo"
                 dir="ltr"
                 className="h-10 flex-1 rounded-full border border-slate-200 bg-white px-4 text-sm text-slate-700 outline-none transition focus:border-slate-300"
               />
@@ -12321,7 +12322,7 @@ function TopicManagerDialog({
             <input
               value={triggerLabel}
               onChange={(event) => onChangeTriggerLabel(event.target.value)}
-              placeholder="שם לטריגר, לדוגמה התראות הפרויקט"
+              placeholder="שם לטריגר, לדוגמה התראות MAKE2"
               className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-700 outline-none transition focus:border-indigo-300"
             />
 
@@ -15975,8 +15976,9 @@ export function CodexMobileApp() {
   const sessionDetailMemoryCacheRef = useRef<Map<string, CodexSessionDetail>>(new Map());
   const sessionDetailMemoryCacheUpdatedAtRef = useRef<Map<string, number>>(new Map());
   const sessionDetailPrefetchInFlightRef = useRef<Map<string, Promise<CodexSessionDetail | null>>>(new Map());
-  const sendInFlightRef = useRef(false);
-  const sendDedupRef = useRef<{ fingerprint: string; requestId: string; expiresAt: number } | null>(null);
+  const queueSubmission = useRef(createDurableQueueSubmission()).current;
+  const queueRequestScope = useRef(createQueueRequestScope()).current;
+  const retryInFlightRef = useRef(new Set<string>());
   const bindMainScrollElement = useCallback((element: HTMLElement | null) => {
     mainScrollRef.current = element;
     setMainScrollElement(element);
@@ -16048,6 +16050,10 @@ export function CodexMobileApp() {
     [profiles, workspaceMode]
   );
   const currentQueueKey = selectedSessionId || draftConversationKey;
+  const queueReadScope = JSON.stringify([serverId, profileId, selectedSessionId || (isDraftConversation ? draftConversationKey : null)]);
+  queueRequestScope.setScope(queueReadScope);
+  const composerRequestStateRef = useRef({ workbenchSelections, scheduledFor, scheduleType, queuePanelStage });
+  composerRequestStateRef.current = { workbenchSelections, scheduledFor, scheduleType, queuePanelStage };
   const finalNotificationScope = JSON.stringify([serverId, profileId, currentQueueKey]);
   finalNotificationRequests.setScope(finalNotificationScope);
   const draftSidebarSessionId = forkDraftContext ? toDraftSessionId(draftConversationKey) : null;
@@ -16147,8 +16153,6 @@ export function CodexMobileApp() {
   }, [serverId, profileId, selectedSessionId, currentProfile?.provider, authStatus?.authenticated, authStatus?.deviceUnlocked]);
   const userInput = useCodexUserInput(userInputScope, userInputApi, Boolean(selectedSessionId && activeSessionIds.has(selectedSessionId)));
   const decisionBoardScope = JSON.stringify([serverId, profileId, currentQueueKey]);
-  const activeDecisionBoardScopeRef = useRef(decisionBoardScope);
-  activeDecisionBoardScopeRef.current = decisionBoardScope;
   const decisionBoardApi = useMemo<DecisionBoardApi | null>(() => {
     if (!profileId || !currentQueueKey || !authStatus?.authenticated || authStatus.deviceUnlocked === false) return null;
     const route = '/api/codex/session-decisions';
@@ -18470,7 +18474,9 @@ export function CodexMobileApp() {
     candidateSessions: CodexSessionSummary[] = sessions,
     boundSessionId?: string | null
   ) {
-    if (selectedSessionId || !isDraftConversation) {
+    const syncTicket = queueRequestScope.capture(JSON.stringify([serverId, nextProfileId,
+      selectedSessionId || (isDraftConversation ? draftConversationKey : null)]));
+    if (selectedSessionId || !isDraftConversation || queueSubmission.inFlight || !queueRequestScope.current(syncTicket)) {
       return;
     }
 
@@ -18502,14 +18508,16 @@ export function CodexMobileApp() {
       draftSessionMapRef.current[draftConversationKey] = resolvedDraftSessionId;
       delete draftQueueItemIdsRef.current[draftConversationKey];
       const loadedSession = await loadSessionDetail(resolvedDraftSessionId, nextProfileId, { silent: true });
-      if (loadedSession && !loadedSession.isDraft) {
+      if (loadedSession && !loadedSession.isDraft
+        && activeServerRef.current === serverId && activeProfileRef.current === nextProfileId
+        && (queueRequestScope.current(syncTicket) || activeSelectedSessionIdRef.current === resolvedDraftSessionId)) {
         setForkDraftContext(null);
         replaceCurrentSessionRoute(nextProfileId, loadedSession.id, 'session');
         return;
       }
     }
 
-    if (!forkDraftContext) {
+    if (!forkDraftContext || !queueRequestScope.current(syncTicket)) {
       return;
     }
 
@@ -18531,7 +18539,7 @@ export function CodexMobileApp() {
 
   async function loadQueueItems(
     nextProfileId = profileId,
-    options?: { silent?: boolean; syncDraft?: boolean }
+    options?: { silent?: boolean; syncDraft?: boolean; history?: boolean }
   ) {
     const silent = options?.silent ?? false;
     const shouldSyncDraft = options?.syncDraft ?? true;
@@ -18539,22 +18547,26 @@ export function CodexMobileApp() {
     const requestedQueueKey = selectedSessionId || (
       isDraftConversation ? draftConversationKey : null
     );
+    const requestTicket = queueRequestScope.beginRead(JSON.stringify([requestServerId, nextProfileId, requestedQueueKey]));
+    if (!requestTicket) return null;
+    const listView = queueListViewForPanel(composerRequestStateRef.current.queuePanelStage, options?.history);
 
     try {
       const data = await fetchJsonForServer<CodexQueueItemsResponse>(
         requestServerId,
-        `/api/codex/queue/items?profile=${encodeURIComponent(nextProfileId)}${requestedQueueKey
+        `/api/codex/queue/items?${listView === 'compact' ? 'view=compact&' : ''}profile=${encodeURIComponent(nextProfileId)}${requestedQueueKey
           ? `&queueKey=${encodeURIComponent(requestedQueueKey)}`
           : ''}`
       );
       if (
         requestServerId !== activeServerRef.current
         || nextProfileId !== activeProfileRef.current
+        || !queueRequestScope.acceptRead(requestTicket)
       ) {
-        return data;
+        return null;
       }
       startTransition(() => {
-        setQueueItems(data.items);
+        setQueueItems((current) => queueRequestScope.acceptRead(requestTicket) ? data.items : current);
       });
       if (shouldSyncDraft) {
         await syncDraftSessionFromQueue(
@@ -18574,7 +18586,7 @@ export function CodexMobileApp() {
           silent,
         },
       });
-      if (!silent) {
+      if (!silent && queueRequestScope.current(requestTicket)) {
         setError(loadError.message || 'Failed to load Codex queue');
       }
       return null;
@@ -18676,6 +18688,7 @@ export function CodexMobileApp() {
     }
 
     pollInFlightRef.current = true;
+    const pollTicket = queueRequestScope.capture(queueReadScope);
 
     try {
       const now = Date.now();
@@ -18693,7 +18706,7 @@ export function CodexMobileApp() {
         loadQueueItems(profileId, { silent: true }),
       ]);
 
-      if (!sessionRows) {
+      if (!sessionRows || !queueRequestScope.current(pollTicket)) {
         return;
       }
 
@@ -19679,16 +19692,7 @@ export function CodexMobileApp() {
 
   async function enqueueCurrentPrompt(saveAsDraft = false) {
     const trimmedPrompt = prompt.trim();
-    if (!profileId || (!trimmedPrompt && draftAttachments.length === 0) || sendInFlightRef.current) {
-      return;
-    }
-
-    if (!saveAsDraft && draftAttachments.length === 0 && await handleSupportedSlashCommand(trimmedPrompt)) {
-      return;
-    }
-
-    if (!saveAsDraft && scheduleType === 'recurring' && !scheduledFor) {
-      setError('בחר שעה לתיזמון הקבוע לפני השליחה.');
+    if (!profileId || (!trimmedPrompt && draftAttachments.length === 0) || queueSubmission.inFlight) {
       return;
     }
 
@@ -19700,6 +19704,7 @@ export function CodexMobileApp() {
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .join('\n\n');
     const payloadFingerprint = JSON.stringify({
+      serverId,
       saveAsDraft,
       profileId,
       queueKey: currentQueueKey,
@@ -19710,7 +19715,8 @@ export function CodexMobileApp() {
       permissionModeId: modelPermissionSnapshot?.selectedModeId || null,
       forkSourceSessionId: forkDraftContext?.sourceSessionId || null,
       forkEntryId: forkDraftContext?.forkEntryId || null,
-      prompt: trimmedPrompt,
+      prompt: effectivePromptForProvider,
+      promptPreview: trimmedPrompt,
       workbenchSelectionIds: workbenchSelections.map((selection) => selection.selectionId),
       scheduledFor,
       scheduleType,
@@ -19718,205 +19724,219 @@ export function CodexMobileApp() {
       sessionInstruction: effectiveSessionInstruction || null,
       attachments: draftAttachments.map((attachment) => attachment.id),
     });
-    const now = Date.now();
-    const previousDedup = sendDedupRef.current;
-    const clientRequestId = previousDedup
-      && previousDedup.fingerprint === payloadFingerprint
-      && previousDedup.expiresAt > now
-      ? previousDedup.requestId
-      : buildQueueId();
-
-    sendDedupRef.current = {
-      fingerprint: payloadFingerprint,
-      requestId: clientRequestId,
-      expiresAt: now + 15000,
-    };
-    recordCodexBreadcrumb('queue-enqueue-requested', {
-      profileId,
-      selectedSessionId,
-      queueKey: currentQueueKey,
-      model: selectedModelSlug,
-      reasoningEffort: selectedReasoningEffort,
-      attachments: draftAttachments.length,
-      hasPrompt: Boolean(trimmedPrompt),
-      scheduleType,
-    });
-    sendInFlightRef.current = true;
-    setIsSending(true);
-    setError(null);
-
-    try {
-      // A distinct route fails closed on an older server instead of sending it.
-      const request = <T,>(url: string, init?: RequestInit) => fetchJsonForServer<T>(serverId, url, init);
-      if (!saveAsDraft && currentProfile?.provider === 'codex' && workModes.mode.rationalEnabled && currentQueueKey) {
-        await releaseWorkModeHoldsForUser(request, { profileId, sessionKey: currentQueueKey });
-      }
-      const data = await request<CodexQueueCreateResponse>(saveAsDraft ? '/api/codex/queue/drafts' : '/api/codex/queue/items', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          saveAsDraft,
-          clientRequestId,
-          prompt: effectivePromptForProvider,
-          promptPreview: trimmedPrompt,
-          sessionInstruction: effectiveSessionInstruction || undefined,
-          sessionId: selectedSessionId,
-          queueKey: currentQueueKey,
-          profileId,
-          cwd: !selectedSessionId ? activeComposerCwd : undefined,
-          model: selectedModelSlug || undefined,
-          reasoningEffort: selectedReasoningEffort || undefined,
-          permissionModeId: modelPermissionSnapshot?.selectedModeId || undefined,
-          scheduledAt: !saveAsDraft && scheduledFor ? new Date(scheduledFor).toISOString() : undefined,
-          recurrence: !saveAsDraft && scheduleType === 'recurring'
-            ? {
-              frequency: recurringFreq,
-              timeZone: browserTimeZone,
-            }
-            : undefined,
-          attachments: draftAttachments.map((attachment) => ({
-            id: attachment.id,
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            size: attachment.size,
-            path: attachment.path,
-            isImage: attachment.isImage,
-          })),
-        }),
-      });
-
-      const createdItems = data.items && data.items.length > 0
-        ? data.items
-        : data.item
-          ? [data.item]
-          : [];
-
-      if (createdItems.length === 0) {
-        throw new Error('השרת לא החזיר משימות חדשות לתור.');
-      }
-
-      startTransition(() => {
-        setQueueItems((current) => {
-          const nextById = new Map(current.map((item) => [item.id, item]));
-          for (const item of createdItems) {
-            nextById.set(item.id, item);
-          }
-          return sortQueueItemsForDisplay([...nextById.values()]);
-        });
-      });
-      if (!selectedSessionId) {
-        draftQueueItemIdsRef.current[currentQueueKey] = Array.from(new Set([
-          ...(draftQueueItemIdsRef.current[currentQueueKey] || []),
-          ...createdItems.map((item) => item.id),
-        ]));
-      }
-      setPrompt('');
-      if ((IS_WORKBENCH_EMBED || IS_EXTENSION_PANEL) && workbenchSelections.length > 0) {
-        setWorkbenchSelections([]);
-        if (IS_WORKBENCH_EMBED) {
-          window.parent.postMessage({ type: 'code-ai:workbench-clear-selections' }, window.location.origin);
-        } else {
-          postExtensionPanelMessage({ type: 'code-ai:extension-clear-selections' });
+    const sendTicket = queueRequestScope.capture(queueReadScope);
+    return queueSubmission.run({
+      fingerprint: `enqueue:${payloadFingerprint}`,
+      createRequestId: buildQueueId,
+      sending: setIsSending,
+      request: async (clientRequestId) => {
+        setError(null);
+        // The synchronous gate is held before this first await, including slash
+        // commands. Two rapid clicks cannot both pass an async preflight.
+        if (!saveAsDraft && draftAttachments.length === 0 && await handleSupportedSlashCommand(trimmedPrompt)) return null;
+        if (!queueRequestScope.current(sendTicket)) return null;
+        if (!saveAsDraft && scheduleType === 'recurring' && !scheduledFor) {
+          setError('בחר שעה לתיזמון הקבוע לפני השליחה.');
+          return null;
         }
-      }
-      setScheduledFor('');
-      setIsScheduleOpen(false);
-      setScheduleType('once');
-      if (!saveAsDraft) clearSessionContextSelectionAfterSend();
-      clearDraftAttachments();
-      if (saveAsDraft) setQueuePanelStage('details');
-      sendDedupRef.current = null;
-      recordCodexBreadcrumb('queue-enqueue-succeeded', {
-        itemIds: createdItems.map((item) => item.id),
-        statuses: createdItems.map((item) => item.status),
-      });
-      await loadQueueItems(profileId, { silent: true });
-    } catch (sendError: any) {
-      reportCodexClientLog({
-        type: 'queue-enqueue-failed',
-        message: sendError.message || 'Failed to enqueue Codex task',
-        details: {
-          profileId,
-          selectedSessionId,
-          queueKey: currentQueueKey,
-        },
-      });
-      setError(sendError.message || 'Failed to enqueue Codex task');
-    } finally {
-      sendInFlightRef.current = false;
-      setIsSending(false);
-    }
+        recordCodexBreadcrumb('queue-enqueue-requested', {
+          profileId, selectedSessionId, queueKey: currentQueueKey,
+          model: selectedModelSlug, reasoningEffort: selectedReasoningEffort,
+          attachments: draftAttachments.length, hasPrompt: Boolean(trimmedPrompt), scheduleType,
+        });
+        // A distinct route fails closed on an older server instead of sending it.
+        const request = <T,>(url: string, init?: RequestInit) => fetchJsonForServer<T>(serverId, url, init);
+        if (!saveAsDraft && currentProfile?.provider === 'codex' && workModes.mode.rationalEnabled && currentQueueKey) {
+          await releaseWorkModeHoldsForUser(request, { profileId, sessionKey: currentQueueKey });
+        }
+        if (!queueRequestScope.current(sendTicket)) return null;
+        const data = await request<CodexQueueCreateResponse>(saveAsDraft ? '/api/codex/queue/drafts' : '/api/codex/queue/items', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            saveAsDraft,
+            clientRequestId,
+            prompt: effectivePromptForProvider,
+            promptPreview: trimmedPrompt,
+            sessionInstruction: effectiveSessionInstruction || undefined,
+            sessionId: selectedSessionId,
+            queueKey: currentQueueKey,
+            profileId,
+            cwd: !selectedSessionId ? activeComposerCwd : undefined,
+            model: selectedModelSlug || undefined,
+            reasoningEffort: selectedReasoningEffort || undefined,
+            permissionModeId: modelPermissionSnapshot?.selectedModeId || undefined,
+            scheduledAt: !saveAsDraft && scheduledFor ? new Date(scheduledFor).toISOString() : undefined,
+            recurrence: !saveAsDraft && scheduleType === 'recurring'
+              ? {
+                frequency: recurringFreq,
+                timeZone: browserTimeZone,
+              }
+              : undefined,
+            attachments: draftAttachments.map((attachment) => ({
+              id: attachment.id,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              size: attachment.size,
+              path: attachment.path,
+              isImage: attachment.isImage,
+            })),
+          }),
+        });
+
+        const createdItems = data.items && data.items.length > 0
+          ? data.items
+          : data.item
+            ? [data.item]
+            : [];
+
+        if (createdItems.length === 0 || createdItems.some((item) => !item || typeof item.id !== 'string' || !item.id)) {
+          throw new Error('השרת לא החזיר משימות חדשות לתור.');
+        }
+        return createdItems;
+      },
+      accepted: (createdItems) => {
+        recordCodexBreadcrumb('queue-enqueue-succeeded', {
+          itemIds: createdItems.map((item) => item.id),
+          statuses: createdItems.map((item) => item.status),
+        });
+        if (!selectedSessionId) {
+          draftQueueItemIdsRef.current[currentQueueKey] = Array.from(new Set([
+            ...(draftQueueItemIdsRef.current[currentQueueKey] || []),
+            ...createdItems.map((item) => item.id),
+          ]));
+        }
+        // A late acknowledgement still belongs to its original conversation;
+        // never clear a new server/session's composer or insert its queue rows.
+        if (!queueRequestScope.acknowledged(sendTicket)) return;
+        startTransition(() => {
+          setQueueItems((current) => {
+            if (!queueRequestScope.current(sendTicket)) return current;
+            const nextById = new Map(current.map((item) => [item.id, item]));
+            for (const item of createdItems) {
+              nextById.set(item.id, item);
+            }
+            return sortQueueItemsForDisplay([...nextById.values()]);
+          });
+        });
+        setPrompt((current) => current === prompt ? '' : current);
+        if ((IS_WORKBENCH_EMBED || IS_EXTENSION_PANEL) && workbenchSelections.length > 0) {
+          const sentIds = new Set(workbenchSelections.map((selection) => selection.selectionId));
+          setWorkbenchSelections((current) => current.filter((selection) => !sentIds.has(selection.selectionId)));
+          if (composerRequestStateRef.current.workbenchSelections === workbenchSelections) {
+            if (IS_WORKBENCH_EMBED) {
+              window.parent.postMessage({ type: 'code-ai:workbench-clear-selections' }, window.location.origin);
+            } else {
+              postExtensionPanelMessage({ type: 'code-ai:extension-clear-selections' });
+            }
+          }
+        }
+        setScheduledFor((current) => current === scheduledFor ? '' : current);
+        if (composerRequestStateRef.current.scheduledFor === scheduledFor && composerRequestStateRef.current.scheduleType === scheduleType) {
+          setIsScheduleOpen(false);
+          setScheduleType('once');
+        }
+        if (!saveAsDraft) clearSessionContextSelectionAfterSend(sessionContextSelection);
+        const sentAttachmentIds = new Set(draftAttachments.map((attachment) => attachment.id));
+        setDraftAttachments((current) => removeAcknowledgedAttachments(current, sentAttachmentIds, url => URL.revokeObjectURL(url)));
+        if (saveAsDraft) setQueuePanelStage('details');
+      },
+      failed: (sendError: any) => {
+        reportCodexClientLog({
+          type: 'queue-enqueue-failed',
+          message: sendError.message || 'Failed to enqueue Codex task',
+          details: {
+            profileId,
+            selectedSessionId,
+            queueKey: currentQueueKey,
+          },
+        });
+        if (queueRequestScope.current(sendTicket)) setError(sendError.message || 'Failed to enqueue Codex task');
+      },
+      refresh: () => queueRequestScope.current(sendTicket)
+        ? loadQueueItems(profileId, { silent: true, history: saveAsDraft ? true : undefined }) : undefined,
+      backgroundFailed: (refreshError: any) => reportCodexClientLog({
+        type: 'queue-enqueue-refresh-failed', message: refreshError.message || 'Failed to refresh accepted task',
+        details: { profileId, queueKey: currentQueueKey },
+      }),
+    });
   }
 
   async function continueAbortedSession() {
-    if (!profileId || !selectedSessionId || sendInFlightRef.current) {
+    if (!profileId || !selectedSessionId || queueSubmission.inFlight) {
       return;
     }
 
     const continuationPrompt = 'Continue from the exact point where the previous turn was aborted. Continue the same task without restarting, do not repeat completed work, and finish the response fully until the task is complete.';
-    const clientRequestId = buildQueueId();
     const effectiveSessionInstruction = isSessionInstructionEnabled ? sessionInstruction : null;
-
-    recordCodexBreadcrumb('session-aborted-continue-requested', {
-      profileId,
-      sessionId: selectedSessionId,
-      queueKey: currentQueueKey,
+    const sendTicket = queueRequestScope.capture(queueReadScope);
+    return queueSubmission.run({
+      fingerprint: `continue:${JSON.stringify({ serverId, profileId, selectedSessionId, currentQueueKey,
+        selectedModelSlug, selectedReasoningEffort, effectiveSessionInstruction,
+        permissionModeId: modelPermissionSnapshot?.selectedModeId || null })}`,
+      createRequestId: buildQueueId,
+      sending: (sending) => { setIsSending(sending); setIsContinuingAbortedSession(sending); },
+      request: async (clientRequestId) => {
+        setError(null);
+        recordCodexBreadcrumb('session-aborted-continue-requested', {
+          profileId, sessionId: selectedSessionId, queueKey: currentQueueKey,
+        });
+        const request = <T,>(url: string, init?: RequestInit) => fetchJsonForServer<T>(serverId, url, init);
+        if (currentProfile?.provider === 'codex' && workModes.mode.rationalEnabled) {
+          await releaseWorkModeHoldsForUser(request, { profileId, sessionKey: selectedSessionId });
+        }
+        if (!queueRequestScope.current(sendTicket)) return null;
+        const data = await request<{ item: CodexQueueServerItem }>('/api/codex/queue/items', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            clientRequestId,
+            prompt: continuationPrompt,
+            promptPreview: 'המשך את הסבב שנקטע עד הסוף',
+            sessionInstruction: effectiveSessionInstruction || undefined,
+            sessionId: selectedSessionId,
+            queueKey: currentQueueKey,
+            profileId,
+            model: selectedModelSlug || undefined,
+            reasoningEffort: selectedReasoningEffort || undefined,
+            permissionModeId: modelPermissionSnapshot?.selectedModeId || undefined,
+          }),
+        });
+        if (!data?.item?.id) throw new Error('השרת לא החזיר משימה חדשה לתור.');
+        return data.item;
+      },
+      accepted: (item) => {
+        recordCodexBreadcrumb('session-aborted-continue-succeeded', {
+          itemId: item.id, status: item.status,
+        });
+        if (!queueRequestScope.acknowledged(sendTicket)) return;
+        startTransition(() => {
+          setQueueItems((current) => queueRequestScope.current(sendTicket)
+            ? sortQueueItemsForDisplay([item, ...current.filter((candidate) => candidate.id !== item.id)]) : current);
+        });
+      },
+      failed: (continueError: any) => {
+        reportCodexClientLog({
+          type: 'session-aborted-continue-failed',
+          message: continueError.message || 'Failed to continue aborted Codex turn',
+          details: {
+            profileId,
+            sessionId: selectedSessionId,
+            queueKey: currentQueueKey,
+          },
+        });
+        if (queueRequestScope.current(sendTicket)) setError(continueError.message || 'Failed to continue aborted Codex turn');
+      },
+      refresh: () => queueRequestScope.current(sendTicket) ? loadQueueItems(profileId, { silent: true }) : undefined,
+      backgroundFailed: (refreshError: any) => reportCodexClientLog({
+        type: 'session-aborted-continue-refresh-failed', message: refreshError.message || 'Failed to refresh accepted continuation',
+        details: { profileId, sessionId: selectedSessionId },
+      }),
     });
-    sendInFlightRef.current = true;
-    setIsSending(true);
-    setIsContinuingAbortedSession(true);
-    setError(null);
-
-    try {
-      const request = <T,>(url: string, init?: RequestInit) => fetchJsonForServer<T>(serverId, url, init);
-      if (currentProfile?.provider === 'codex' && workModes.mode.rationalEnabled) {
-        await releaseWorkModeHoldsForUser(request, { profileId, sessionKey: selectedSessionId });
-      }
-      const data = await request<{ item: CodexQueueServerItem }>('/api/codex/queue/items', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          clientRequestId,
-          prompt: continuationPrompt,
-          promptPreview: 'המשך את הסבב שנקטע עד הסוף',
-          sessionInstruction: effectiveSessionInstruction || undefined,
-          sessionId: selectedSessionId,
-          queueKey: currentQueueKey,
-          profileId,
-          model: selectedModelSlug || undefined,
-          reasoningEffort: selectedReasoningEffort || undefined,
-          permissionModeId: modelPermissionSnapshot?.selectedModeId || undefined,
-        }),
-      });
-
-      startTransition(() => {
-        setQueueItems((current) => [data.item, ...current.filter((item) => item.id !== data.item.id)]);
-      });
-      recordCodexBreadcrumb('session-aborted-continue-succeeded', {
-        itemId: data.item.id,
-        status: data.item.status,
-      });
-      await loadQueueItems(profileId, { silent: true });
-    } catch (continueError: any) {
-      reportCodexClientLog({
-        type: 'session-aborted-continue-failed',
-        message: continueError.message || 'Failed to continue aborted Codex turn',
-        details: {
-          profileId,
-          sessionId: selectedSessionId,
-          queueKey: currentQueueKey,
-        },
-      });
-      setError(continueError.message || 'Failed to continue aborted Codex turn');
-    } finally {
-      sendInFlightRef.current = false;
-      setIsSending(false);
-      setIsContinuingAbortedSession(false);
-    }
   }
 
   async function cancelQueueItem(itemId: string) {
@@ -20022,6 +20042,11 @@ export function CodexMobileApp() {
   }
 
   async function retryQueueItem(itemId: string) {
+    const retryKey = JSON.stringify([serverId, profileId, itemId]);
+    if (retryInFlightRef.current.has(retryKey)) return;
+    retryInFlightRef.current.add(retryKey);
+    const retryTicket = queueRequestScope.capture(queueReadScope);
+    let acknowledged = false;
     try {
       recordCodexBreadcrumb('queue-retry-requested', { itemId });
       const target = queueItems.find(item => item.id === itemId);
@@ -20032,25 +20057,33 @@ export function CodexMobileApp() {
           profileId: target?.sourceProfileId || target?.profileId || profileId, sessionKey,
         });
       }
+      if (!queueRequestScope.current(retryTicket)) return;
       const data = await request<CodexQueueItemResponse>(`/api/codex/queue/items/${encodeURIComponent(itemId)}/retry`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
       });
+      if (!data?.item?.id) throw new Error('השרת לא החזיר את המשימה שנוסתה מחדש.');
+      acknowledged = true;
+      if (!queueRequestScope.acknowledged(retryTicket)) return;
       startTransition(() => {
-        setQueueItems((current) => data.item.id === itemId
+        setQueueItems((current) => !queueRequestScope.current(retryTicket) ? current : data.item.id === itemId
           ? current.map((item) => item.id === itemId ? data.item : item)
           : [...current.filter((item) => item.id !== data.item.id), data.item]);
       });
-      await loadQueueItems(profileId, { silent: true });
     } catch (queueError: any) {
       reportCodexClientLog({
         type: 'queue-retry-failed',
         message: queueError.message || 'Failed to retry queue item',
         details: { itemId },
       });
-      setError(queueError.message || 'Failed to retry queue item');
+      if (queueRequestScope.current(retryTicket)) setError(queueError.message || 'Failed to retry queue item');
+    } finally {
+      retryInFlightRef.current.delete(retryKey);
+    }
+    if (acknowledged && queueRequestScope.current(retryTicket)) {
+      void loadQueueItems(profileId, { silent: true });
     }
   }
 
@@ -21432,10 +21465,10 @@ export function CodexMobileApp() {
     };
   }
 
-  function clearSessionContextSelectionAfterSend() {
-    setSessionContextSelection(createEmptySessionContextSelection(
-      normalizeSessionActionRestriction(sessionContextSelection.actionRestriction)
-    ));
+  function clearSessionContextSelectionAfterSend(sentSelection: CodexSessionContextSelection) {
+    setSessionContextSelection((current) => current === sentSelection ? createEmptySessionContextSelection(
+      normalizeSessionActionRestriction(sentSelection.actionRestriction)
+    ) : current);
     setIsAdditionsMenuOpen(false);
     setIsAnchorManagerOpen(false);
     setIsSkillPickerDialogOpen(false);
@@ -24451,6 +24484,7 @@ export function CodexMobileApp() {
                   isOpen={queuePanelStage !== 'closed'}
                   onClick={() => {
                     setQueuePanelStage((current) => current === 'closed' ? 'summary' : 'closed');
+                    if (queuePanelStage === 'details') void loadQueueItems(profileId, { silent: true, history: false });
                   }}
                 />
               )}
@@ -24482,7 +24516,9 @@ export function CodexMobileApp() {
                   statusSummary={collapsedQueueStatusSummary}
                   expanded={queuePanelStage === 'details'}
                   onToggle={() => {
-                    setQueuePanelStage((current) => current === 'details' ? 'summary' : 'details');
+                    const openDetails = queuePanelStage !== 'details';
+                    setQueuePanelStage(openDetails ? 'details' : 'summary');
+                    void loadQueueItems(profileId, { silent: true, history: openDetails });
                   }}
                   attached
                 />
@@ -25778,9 +25814,9 @@ export function CodexMobileApp() {
       {isDecisionBoardOpen && decisionBoard.client && (
         <Suspense fallback={<div role="status" className="fixed inset-0 z-[140] flex items-center justify-center bg-black/30" dir="rtl"><span className="rounded-2xl px-4 py-3 text-sm" style={{ background: 'var(--code-ai-panel-bg)', color: 'var(--code-ai-canvas-text)' }}>טוען החלטות…</span></div>}>
           <DecisionBoardDialog key={decisionBoardScope} scope={decisionBoardScope} themeClassName={themeClassName} themePresetId={themePresetId} state={decisionBoard.state} onChange={decisionBoard.client.change} onSave={decisionBoard.client.save} onEnabled={decisionBoard.client.setEnabled} onRefresh={() => void decisionBoard.client?.refresh()} onClose={closeDecisionBoard} native={{ requests: userInput.requests, submittingId: userInput.submittingId, error: userInput.error, answer: userInput.answer }} onSubmit={async () => {
-            const submittedScope = decisionBoardScope;
+            const ticket = queueRequestScope.capture(queueReadScope);
             const accepted = await decisionBoard.client!.submit();
-            if (accepted && activeDecisionBoardScopeRef.current === submittedScope) void loadQueueItems(profileId, { silent: true });
+            if (accepted && queueRequestScope.current(ticket)) void loadQueueItems(profileId, { silent: true });
             return accepted;
           }} />
         </Suspense>

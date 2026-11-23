@@ -6,19 +6,19 @@ import {
 } from './sessionRoute';
 
 test('a server-only entry URL selects its server instead of stale local storage', () => {
-  const route = readSessionRoute('https://code-ai.test/?server=remote-a');
-  assert.equal(route?.serverId, 'remote-a');
+  const route = readSessionRoute('https://code-ai.test/?server=personal-windows-me');
+  assert.equal(route?.serverId, 'personal-windows-me');
   assert.equal(route?.sessionKey, null);
   assert.equal(readSessionRoute('https://code-ai.test/'), null);
 });
 
 test('remote notification links preserve the selected server', () => {
   const route = readSessionRoute(
-    'https://code-ai.test/session/beam-user/session-123?server=remote-a',
+    'https://code-ai.test/session/beam-user/session-123?server=beam-10g',
   );
 
   assert.deepEqual(route, {
-    serverId: 'remote-a',
+    serverId: 'beam-10g',
     profileId: 'beam-user',
     sessionKey: 'session-123',
     sessionId: 'session-123',
@@ -44,11 +44,11 @@ test('older local notification links without a server still open locally', () =>
 test('session navigation keeps the remote server query parameter', () => {
   assert.equal(
     buildSessionHref(
-      'https://code-ai.test/session/beam-user/old-session?server=remote-a',
+      'https://code-ai.test/session/beam-user/old-session?server=beam-10g',
       'beam-user',
       'new-session',
       'session',
     ),
-    '/session/beam-user/new-session?server=remote-a',
+    '/session/beam-user/new-session?server=beam-10g',
   );
 });

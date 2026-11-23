@@ -12,7 +12,7 @@ import {
 } from './markdownFiles';
 
 test('recognizes the representative CRM screenshot and decodes Hebrew paths once', () => {
-  const path = '/workspace/projects/business/projects/05/design-lab/dab-crm/screenshots/crm-exact-rtl.png';
+  const path = '/srv/workspace/business/projects/05/design-lab/dab-crm/screenshots/crm-exact-rtl.png';
   assert.deepEqual(parseLocalFileHref(path), { rawPath: path });
   assert.deepEqual(parseLocalFileHref('/workspace/design/%D7%AA%D7%9E%D7%95%D7%A0%D7%94%20%D7%90.png'), { rawPath: '/workspace/design/תמונה א.png' });
   assert.deepEqual(parseLocalFileHref('/workspace/design/100%.png'), { rawPath: '/workspace/design/100%.png' });
@@ -20,13 +20,13 @@ test('recognizes the representative CRM screenshot and decodes Hebrew paths once
 });
 
 test('resolves relatives against the message session, not the app process directory', () => {
-  assert.deepEqual(parseLocalFileHref('screenshots/crm.png', '/workspace/projects/design'), { rawPath: '/workspace/projects/design/screenshots/crm.png' });
-  assert.deepEqual(parseLocalFileHref('../screenshots/./crm.png', '/workspace/projects/design'), { rawPath: '/workspace/projects/screenshots/crm.png' });
+  assert.deepEqual(parseLocalFileHref('screenshots/crm.png', '/srv/workspace/design'), { rawPath: '/srv/workspace/design/screenshots/crm.png' });
+  assert.deepEqual(parseLocalFileHref('../screenshots/./crm.png', '/srv/workspace/design'), { rawPath: '/srv/workspace/screenshots/crm.png' });
   assert.deepEqual(parseLocalFileHref('../../crm.png', '/root'), { rawPath: '/crm.png' });
   assert.deepEqual(parseLocalFileHref('./screenshots/crm.png'), { rawPath: './screenshots/crm.png' });
-  assert.deepEqual(parseLocalFileHref('~/crm.png', '/workspace/projects'), { rawPath: '~/crm.png' });
-  assert.deepEqual(parseLocalFileHref('/other/crm.png', '/workspace/projects'), { rawPath: '/other/crm.png' });
-  assert.deepEqual(parseLocalFileHref('app.ts:12', '/workspace/projects'), { rawPath: '/workspace/projects/app.ts:12' });
+  assert.deepEqual(parseLocalFileHref('~/crm.png', '/srv/workspace'), { rawPath: '~/crm.png' });
+  assert.deepEqual(parseLocalFileHref('/other/crm.png', '/srv/workspace'), { rawPath: '/other/crm.png' });
+  assert.deepEqual(parseLocalFileHref('app.ts:12', '/srv/workspace'), { rawPath: '/srv/workspace/app.ts:12' });
   assert.deepEqual(parseLocalFileHref('README.md:12:3'), { rawPath: 'README.md:12:3' });
 });
 
@@ -68,8 +68,8 @@ test('builds authorized image URLs with explicit source server and cache-busting
 });
 
 test('source-scopes file routes without leaking context to external or unrelated URLs', () => {
-  assert.equal(withFileSourceServer('/api/codex/files/content?path=%2Froot%2Fa.png&server=wrong#page=2', 'beam'), '/api/codex/files/content?path=%2Froot%2Fa.png&server=beam#page=2');
-  assert.equal(withFileSourceServer('/api/codex/files/download?path=%2Froot%2Fa.png', 'local'), '/api/codex/files/download?path=%2Froot%2Fa.png&server=local');
+  assert.equal(withFileSourceServer('/api/codex/files/content?path=%2Fworkspace%2Fa.png&server=wrong#page=2', 'beam'), '/api/codex/files/content?path=%2Fworkspace%2Fa.png&server=beam#page=2');
+  assert.equal(withFileSourceServer('/api/codex/files/download?path=%2Fworkspace%2Fa.png', 'local'), '/api/codex/files/download?path=%2Fworkspace%2Fa.png&server=local');
   assert.equal(withFileSourceServer('https://example.com/image.png', 'beam'), 'https://example.com/image.png');
   assert.equal(withFileSourceServer('/api/other', 'beam'), '/api/other');
 });

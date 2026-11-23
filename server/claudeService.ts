@@ -155,7 +155,7 @@ const CLAUDE_RUNTIME_STATE_FILE = path.join(CODEX_APP_CONFIG.queueRoot, 'claude-
 const CLAUDE_CREDENTIALS_FILE = '.credentials.json';
 const CLAUDE_OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
-const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'; // gitleaks:allow -- public OAuth client ID, not a secret
 const SUPPORTED_REASONING_LEVELS: CodexReasoningLevelOption[] = [
   { effort: 'low', description: null },
   { effort: 'medium', description: null },

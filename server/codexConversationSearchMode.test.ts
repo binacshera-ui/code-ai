@@ -88,14 +88,14 @@ before(async () => {
     id: 'session-current',
     cwd: path.join(projectRoot, 'frontend'),
     createdAt: '2026-08-30T09:00:00.000Z',
-    userMessage: 'אני צריך מערכת לוגים חדשה לפרויקט ההדגמה',
+    userMessage: 'אני צריך מערכת לוגים חדשה לבינה כשרה 3.0',
     assistantMessage: 'תכננתי מערכת לוגים חדשה עם correlation id ושכבות אחסון.',
   });
   await writeSession({
     id: 'session-fork',
     cwd: path.join(projectRoot, 'frontend'),
     createdAt: '2026-08-30T11:00:00.000Z',
-    userMessage: 'אני צריך מערכת לוגים חדשה לפרויקט ההדגמה',
+    userMessage: 'אני צריך מערכת לוגים חדשה לבינה כשרה 3.0',
     assistantMessage: 'המשך חדש שאינו מכיל את ביטוי החיפוש.',
     forkedFromId: 'session-current',
   });

@@ -18,8 +18,8 @@ function renderMarkdownImage(text: string, serverId = 'beam', cwd = '/workspace/
 }
 
 test('the real Markdown pipeline renders an absolute local screenshot inline through the authorized route', () => {
-  const markup = renderMarkdownImage('![צילום מסך](/workspace/projects/business/projects/05/design-lab/dab-crm/screenshots/crm-exact-rtl.png)');
-  assert.match(markup, /<img[^>]+src="\/api\/codex\/files\/content\?path=%2Froot%2Fprojects%2Fbusiness%2Fprojects%2F05%2Fdesign-lab%2Fdab-crm%2Fscreenshots%2Fcrm-exact-rtl.png&amp;server=beam"/);
+  const markup = renderMarkdownImage('![צילום מסך](/srv/workspace/business/projects/05/design-lab/dab-crm/screenshots/crm-exact-rtl.png)');
+  assert.match(markup, /<img[^>]+src="\/api\/codex\/files\/content\?path=%2Fsrv%2Fworkspace%2Fbusiness%2Fprojects%2F05%2Fdesign-lab%2Fdab-crm%2Fscreenshots%2Fcrm-exact-rtl.png&amp;server=beam"/);
   assert.match(markup, /alt="צילום מסך"/);
   assert.match(markup, /loading="lazy"/);
   assert.match(markup, /decoding="async"/);
@@ -28,9 +28,9 @@ test('the real Markdown pipeline renders an absolute local screenshot inline thr
 });
 
 test('file URIs, Windows drives and relative images survive ReactMarkdown transform safely', () => {
-  assert.match(renderMarkdownImage('![URI](file:///workspace/design/crm.png)'), /path=%2Froot%2Fdesign%2Fcrm.png/);
+  assert.match(renderMarkdownImage('![URI](file:///workspace/design/crm.png)'), /path=%2Fworkspace%2Fdesign%2Fcrm.png/);
   assert.match(renderMarkdownImage('![Windows](C:/Users/Dev/crm.png)'), /path=C%3A%2FUsers%2FDev%2Fcrm.png/);
-  assert.match(renderMarkdownImage('![יחסי](screenshots/crm.png)'), /path=%2Froot%2Fdesign%2Fscreenshots%2Fcrm.png/);
+  assert.match(renderMarkdownImage('![יחסי](screenshots/crm.png)'), /path=%2Fworkspace%2Fdesign%2Fscreenshots%2Fcrm.png/);
 });
 
 test('identical Markdown on another server never reuses the original server content URL', () => {
@@ -55,8 +55,8 @@ test('external images stay external and unsafe destinations produce an error pla
 });
 
 test('already-authorized Markdown media URLs are also scoped to the message source server', () => {
-  const markup = renderMarkdownImage('![image](/api/codex/files/content?path=%2Froot%2Fcrm.png)');
-  assert.match(markup, /path=%2Froot%2Fcrm.png&amp;server=beam/);
+  const markup = renderMarkdownImage('![image](/api/codex/files/content?path=%2Fworkspace%2Fcrm.png)');
+  assert.match(markup, /path=%2Fworkspace%2Fcrm.png&amp;server=beam/);
 });
 
 test('linked images do not create nested interactive buttons', () => {
@@ -71,7 +71,7 @@ test('linked images do not create nested interactive buttons', () => {
 
 test('HTML waits for authenticated parent preparation and never navigates an opaque frame to protected assets', () => {
   const markup = renderToStaticMarkup(
-    <HtmlFilePreview contentUrl="/api/codex/files/content?path=%2Froot%2Fdesign%2Fdemo.html" content="<button onclick='alert(1)'>Demo</button>" name="demo.html" serverId="beam" fetchFile={async () => new Response('')} />
+    <HtmlFilePreview contentUrl="/api/codex/files/content?path=%2Fworkspace%2Fdesign%2Fdemo.html" content="<button onclick='alert(1)'>Demo</button>" name="demo.html" serverId="beam" fetchFile={async () => new Response('')} />
   );
   assert.doesNotMatch(markup, /<iframe|allow-same-origin|onclick=/);
   assert.match(markup, /טוען קבצים ומכין תצוגה מבודדת/);

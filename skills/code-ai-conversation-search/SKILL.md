@@ -26,7 +26,7 @@ Use `scripts/search_sessions.mjs` from this skill directory. Pass every profile 
 node scripts/search_sessions.mjs \
   --scope project \
   --query 'מערכת לוגים חדשה' \
-  --project-root /workspace/project \
+  --project-root /srv/workspace/bina-cshera \
   --session-id SESSION_ID \
   --profile developer=/home/example/.codex \
   --profile developer2=/home/example-secondary/.codex \

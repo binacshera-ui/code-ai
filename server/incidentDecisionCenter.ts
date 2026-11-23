@@ -64,19 +64,23 @@ const INCIDENT_CENTER_ROOT = path.join(CODEX_APP_CONFIG.storageRoot, 'incident-c
 const INCIDENT_CONTEXT_ROOT = path.join(INCIDENT_CENTER_ROOT, 'context');
 const FAILURE_HANDLING_BASE_URL = String(
   process.env.CODEX_INCIDENT_FAILURE_URL ||
-  ''
+  process.env.BC2_FAILURE_URL ||
+  `http://127.0.0.1:${process.env.BC2_FAILURE_PORT || 18210}`
 ).replace(/\/+$/g, '');
 const FAILURE_HANDLING_AUTH_TOKEN = String(
   process.env.CODEX_INCIDENT_FAILURE_AUTH_TOKEN ||
+  process.env.BC2_FAILURE_AUTH_TOKEN ||
   ''
 ).trim();
 const DEFAULT_INCIDENT_PROFILE_ID = String(
   process.env.CODEX_INCIDENT_PROFILE_ID ||
+  process.env.BC2_FAILURE_INCIDENT_PROFILE_ID ||
   CODEX_APP_CONFIG.defaultProfileId ||
   ''
 ).trim();
 const DEFAULT_INCIDENT_SESSION_ID = String(
   process.env.CODEX_INCIDENT_SESSION_ID ||
+  process.env.BC2_FAILURE_INCIDENT_SESSION_ID ||
   ''
 ).trim();
 
@@ -99,11 +103,8 @@ function failureHeaders(): Record<string, string> {
     : {};
 }
 
-export async function requestIncidentJson(
-  pathname: string, options: RequestInit = {}, baseUrl = FAILURE_HANDLING_BASE_URL,
-) {
-  if (!baseUrl) throw new Error('CODEX_INCIDENT_FAILURE_URL is required');
-  const response = await fetch(`${baseUrl.replace(/\/+$/g, '')}${pathname}`, {
+export async function requestIncidentJson(pathname: string, options: RequestInit = {}) {
+  const response = await fetch(`${FAILURE_HANDLING_BASE_URL}${pathname}`, {
     ...options,
     headers: {
       'content-type': 'application/json',

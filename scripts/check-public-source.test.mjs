@@ -79,3 +79,21 @@ test('private policy detects local identifiers while allowing the public reposit
   assert.ok(JSON.parse(result.stderr).findings.some(item => item.rule === 'operator-private-identifier'));
   assert.ok(!result.stderr.includes(identifier));
 }));
+
+test('full product names do not remove optional integrations under the historical standalone policy', () => fixture(root => {
+  mkdirSync(path.join(root, '.private'));
+  writeFileSync(path.join(root, '.gitignore'), '.private/\n');
+  const policy = path.join(root, '.private', 'identifiers');
+  writeFileSync(policy, 'bina-cshera\nbina_\n');
+  writeFileSync(path.join(root, 'integration.ts'), 'export const origin = "https://app.bina-cshera.co.il";');
+  assert.equal(check(root, { CODE_AI_PRIVATE_IDENTIFIERS_FILE: policy }).status, 0);
+}));
+
+test('runtime secrets and database artifacts are rejected even when git force-adds them', () => fixture(root => {
+  writeFileSync(path.join(root, '.env'), 'CONFIGURED_VALUE=not-a-pattern-recognizable-credential');
+  writeFileSync(path.join(root, 'queue.sqlite'), 'database fixture');
+  const result = check(root);
+  assert.equal(result.status, 1);
+  assert.equal(JSON.parse(result.stderr).findings.filter(item => item.rule === 'private-source-path').length, 2);
+  assert.ok(!result.stderr.includes('not-a-pattern-recognizable-credential'));
+}));

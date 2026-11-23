@@ -7,8 +7,13 @@ const files = [...new Set(execFileSync('git', ['ls-files', '-co', '--exclude-sta
   cwd: root, encoding: 'utf8',
 }).split('\0').filter(Boolean))];
 const extraPolicy = process.env.CODE_AI_PRIVATE_IDENTIFIERS_FILE;
+// The full product includes these named optional integrations. Public product
+// names are not credentials; the historical standalone denylist also matched
+// their source filenames and cannot be used to drop working product features.
+const publicIntegrations = new Set(['bina-cshera', 'binacshera', 'bina_', 'bina-',
+  'syncbina', 'binabrowser', 'bina session', 'bina runtime', 'bina 3']);
 const identifiers = extraPolicy ? readFileSync(extraPolicy, 'utf8').split(/\r?\n/)
-  .map(value => value.trim().toLowerCase()).filter(value => value && !value.startsWith('#')) : [];
+  .map(value => value.trim().toLowerCase()).filter(value => value && !value.startsWith('#') && !publicIntegrations.has(value)) : [];
 const rules = [
   ['operator-home', /\/(?:root\/|mnt\/hdd\/|home\/(?!example(?:-secondary)?\/|you\/|ubuntu\/|operator\/)[^/\s'"`]+\/)/g],
   ['private-key', /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g],
@@ -32,7 +37,8 @@ for (const file of files) {
     if (error.code === 'ENOENT') continue;
     throw error;
   }
-  if (/^(?:ops|\.private)\/|(?:^|\/)(?:MIGRATION-RECEIPT\.md|[^/]+\.bundle)$/.test(file)) {
+  if (/^(?:ops|\.private|\.code-ai)\/|(?:^|\/)(?:MIGRATION-RECEIPT\.md|[^/]+\.bundle|[^/]+\.(?:pem|key|p12|pfx)|queue\.sqlite(?:-wal|-shm)?)$/.test(file)
+      || /(?:^|\/)\.env(?:\.[^/]+)?$/.test(file) && !/\.example$/.test(file)) {
     findings.push({ file, rule: 'private-source-path' });
     continue;
   }

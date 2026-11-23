@@ -404,6 +404,9 @@ async function detectPlaywrightExecutable(codexHome: string, headless: boolean):
   const browsersRoots = [
     BROWSER_MODE_LOCAL_BROWSERS_ROOT,
     path.join(homeDir, '.cache', 'ms-playwright'),
+    path.join('/home/developer', '.cache', 'ms-playwright'),
+    path.join('/home/developer2', '.cache', 'ms-playwright'),
+    path.join('/root', '.cache', 'ms-playwright'),
   ];
 
   const preferredEntries = headless

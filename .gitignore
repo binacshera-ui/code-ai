@@ -1,6 +1,5 @@
 # Dependencies and generated releases
 node_modules/
-/node_modules
 dist/
 dist.before-*/
 .deploy-releases/
@@ -26,10 +25,11 @@ __pycache__/
 .cache/
 .vite/
 
-# Private host operations and generated artifacts never enter the source repository.
+# Do not publish runtime symlinks, temporary bundles or operator receipts.
+/dist
+/.question-image-test-build/
 /ops/
 /.private/
-/.question-image-test-build/
 /MIGRATION-RECEIPT.md
 /deploy/code-ai/standalone-private-identifiers.txt
 *.pem
