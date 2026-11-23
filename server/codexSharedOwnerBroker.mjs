@@ -15,6 +15,7 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { nativeRpcTimeoutMs, publicRpcDiagnostic, validatePublicRpcDiagnostic } from './codexRpcDiagnostic.mjs';
 import { NATIVE_FRAME_BYTES, NATIVE_BUFFER_BYTES } from './codexNativeTransport.mjs';
 import { readSharedHistoryTurns } from './codexSharedHistory.mjs';
+import { CodexSharedSubscriptions, changesSubscription, trackExplicitSubscription } from './codexSharedSubscriptions.mjs';
 
 const MAX_BYTES = NATIVE_FRAME_BYTES;
 const MAX_PENDING_CALLS = 256;
@@ -697,6 +698,18 @@ async function connectNative(socket, expectedHome, onFrame = () => {}, freshStat
     }
     return result;
   };
+  const nativeCall = channel.call;
+  channel.call = async (method, params) => {
+    const subscription = changesSubscription(method);
+    if (subscription) channel.pendingSubscriptions = (channel.pendingSubscriptions ?? 0) + 1;
+    try {
+      const result = await nativeCall(method, params);
+      trackExplicitSubscription(channel, method, result);
+      return result;
+    } finally {
+      if (subscription) channel.pendingSubscriptions--;
+    }
+  };
   return channel;
 }
 
@@ -718,9 +731,11 @@ export async function startCodexSharedOwnerBroker({ socketPath, backendSocket, c
       if (channel.detached && !broker.keepConnection(channel)) channel.ws.close();
     }
   } });
-  let recover;
+  let recover, subscriptions;
   recover = await connectNative(backendSocket, home, frame => {
-    if (recover) void broker.observe(recover, frame).catch(() => {});
+    if (recover) void broker.observe(recover, frame).finally(() => {
+      if (['thread/started', 'turn/completed'].includes(frame.method)) subscriptions?.schedule();
+    }).catch(() => {});
   }, threadId => broker.freshStates.get(threadId));
   channels.add(recover);
   await recover.call('initialize', {
@@ -730,6 +745,8 @@ export async function startCodexSharedOwnerBroker({ socketPath, backendSocket, c
   try { await broker.recover(recover); }
   catch (error) { recover.ws.terminate(); throw error; }
   recover.setSink(() => {});
+  subscriptions = new CodexSharedSubscriptions({ broker, channels, recovery: recover });
+  subscriptions.schedule();
   const server = createServer((req, res) => { req.resume(); res.writeHead(404).end(); });
   const wss = new WebSocketServer({ server, maxPayload: MAX_BYTES, perMessageDeflate: false });
   wss.on('connection', front => {
@@ -800,6 +817,7 @@ export async function startCodexSharedOwnerBroker({ socketPath, backendSocket, c
   return {
     broker,
     async close() {
+      subscriptions.close();
       // Close this adapter's clients only. Never signal native owner/model jobs.
       for (const front of wss.clients) front.terminate();
       for (const channel of channels) channel.ws.terminate();
@@ -807,6 +825,36 @@ export async function startCodexSharedOwnerBroker({ socketPath, backendSocket, c
       await new Promise(resolve => server.close(resolve));
     },
   };
+}
+
+/** Broker-only rollback keeps the predecessor's routing/admission core but
+ * needs a subscriber for its already-created protected descendants too.
+ * This connection lives in the SAME broker process and never unsubscribes.
+ */
+export async function retainCodexSharedOwnerSubscriptions({ backendSocket, codexHome }, predecessor) {
+  let subscriptions, recovery;
+  try {
+    const { home } = await assertPrivateNativeEndpoint(backendSocket, codexHome);
+    recovery = await connectNative(backendSocket, home, frame => {
+      if (['thread/started', 'turn/completed'].includes(frame.method)) subscriptions?.schedule();
+    });
+    await recovery.call('initialize', { clientInfo: { name: 'code-ai-broker-retention', version: '1' },
+      capabilities: { experimentalApi: true } });
+    recovery.send({ method: 'initialized', params: {} }); recovery.setSink(() => {});
+    subscriptions = new CodexSharedSubscriptions({ broker: predecessor.broker,
+      channels: new Set([recovery]), recovery, releaseIdle: false });
+    // Complete protection before the installed runner publishes readiness.
+    await subscriptions.sweep();
+    return { broker: predecessor.broker, async close() {
+      subscriptions.close(); recovery.ws.terminate(); await predecessor.close();
+    } };
+  } catch (error) {
+    subscriptions?.close(); recovery?.ws.terminate();
+    // Ownership transferred to this helper when the predecessor opened. A
+    // failed inspection must not leave its server keeping the adopter alive.
+    try { await predecessor.close(); } catch { /* Preserve the inspection failure. */ }
+    throw error;
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
