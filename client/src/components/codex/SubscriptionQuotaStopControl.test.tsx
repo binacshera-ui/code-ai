@@ -34,7 +34,7 @@ test('view distinguishes measured headroom and real provider reset from an inven
 test('missing measurements remain unknown and do not display a fabricated countdown or zero usage', () => {
   const html = view({ snapshot: { ...snapshot, state: 'unavailable', usedPercent: null, remainingUntilStopPercent: null, resetsAt: null } });
   assert.equal((html.match(/לא ידוע/g) || []).length, 2);
-  assert.ok(html.includes('אין כרגע מדידת מכסה עדכנית'));
+  assert.ok(html.includes('רענון המכסה מתעכב · השיחות ממשיכות'));
   assert.ok(!html.includes('איפוס המכסה לפי הספק') && !html.includes('00:00:00') && !html.includes('>0%<'));
 });
 
@@ -64,7 +64,19 @@ test('the stopwatch launcher uses no render-time network request and no enabled 
   assert.equal(calls, 0);
   assert.ok(html.includes('data-testid="subscription-quota-stop-launcher"') && html.includes('aria-label="סף עצירה למנוי"'));
   assert.ok(html.includes('data-quota-stop-state="loading"'));
+  assert.ok(html.includes('data-quota-stop-placement="quota-panel"') && html.includes('w-full'));
   assert.ok(!html.includes('data-quota-stop-state="armed"') && !html.includes('90% ניצול'));
+});
+
+test('quota control belongs inside the usage panel and not alongside composer buttons', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const app = await readFile(process.cwd() + '/client/src/components/codex/CodexMobileApp.tsx', 'utf8');
+  const panelStart = app.indexOf('function CodexUsagePopover(');
+  const control = app.indexOf('<SubscriptionQuotaStopControl');
+  const composer = app.indexOf('ref={rateLimitButtonRef}');
+  assert.ok(panelStart >= 0 && control > panelStart && control < composer);
+  assert.equal((app.match(/<SubscriptionQuotaStopControl\b/g) || []).length, 1);
+  assert.ok(!app.slice(composer).includes('<SubscriptionQuotaStopControl'));
 });
 
 test('draft validation accepts fractional used percentages but rejects incomplete or out-of-range input', () => {

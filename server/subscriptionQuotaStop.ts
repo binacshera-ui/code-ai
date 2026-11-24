@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_SUBSCRIPTION_QUOTA_STOP,
+  matchesSubscriptionQuotaWindow,
   validateSubscriptionQuotaStopSettings,
   type SubscriptionQuotaStopSettings,
   type SubscriptionQuotaStopSnapshot,
@@ -24,13 +25,13 @@ export interface SubscriptionQuotaStopEvent {
 }
 type Listener = (event: SubscriptionQuotaStopEvent) => void | Promise<void>;
 const ACCOUNT_KEY = /^[a-f0-9]{64}$/;
-const unavailableMessage = 'הגבלת המכסה פעילה, אך נתון שימוש עדכני אינו זמין. שיחות המנוי מושהות עד לאימות המכסה.';
+const unavailableMessage = 'רענון המכסה אינו זמין כרגע. השיחות ממשיכות; עצירה תתבצע רק כשיימדד ניצול שהגיע לסף שהוגדר.';
 
 export class SubscriptionQuotaStopError extends Error {
   readonly code = 'SUBSCRIPTION_QUOTA_STOP';
   readonly statusCode = 423;
   constructor(public readonly snapshot: SubscriptionQuotaStopSnapshot | null = null) {
-    super(snapshot?.message || unavailableMessage);
+    super(snapshot?.message || 'לא ניתן לקרוא או לשמור את הגבלת מכסת המנוי. יש לבדוק את הגדרת המכסה.');
     this.name = 'SubscriptionQuotaStopError';
   }
 }
@@ -89,10 +90,11 @@ function unsupported(): SubscriptionQuotaStopSnapshot {
     message: 'ההגבלה מיועדת למנוי ChatGPT מחובר. חיובי API אינם חלק ממכסת המנוי.' };
 }
 function windows(usage: CodexAccountUsageSnapshot, selected: SubscriptionQuotaStopSettings['window']): WindowReading[] {
-  const names = selected === 'any' ? ['primary', 'secondary'] as const : [selected];
+  const names = ['primary', 'secondary'] as const;
   return usage.quotaGroups.flatMap(group => names.flatMap(name => {
     const w = group[name];
-    return w && typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent)
+    return w && matchesSubscriptionQuotaWindow(selected, w.windowMinutes)
+      && typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent)
       && w.usedPercent >= 0 && w.usedPercent <= 100
       ? [{ id: `${group.id}:${name}`, usedPercent: w.usedPercent,
         resetsAt: typeof w.resetsAt === 'number' && Number.isFinite(w.resetsAt) ? w.resetsAt : null }] : [];
@@ -226,7 +228,7 @@ export function createSubscriptionQuotaStopService(options: {
       let sample = samples.get(key);
       if (!sample || now() - sample.checkedAt >= pollMs || now() < sample.checkedAt || update) {
         let usage: CodexAccountUsageSnapshot | null = null;
-        try { usage = await loadUsage(profile); } catch { /* unavailable is fail-closed */ }
+        try { usage = await loadUsage(profile); } catch { /* A missing sample warns; it is not evidence of a reached threshold. */ }
         // A logout/login during the request must not apply the old account's
         // usage to either the replacement identity or this profile binding.
         const after = await identify(profile);
@@ -237,8 +239,9 @@ export function createSubscriptionQuotaStopService(options: {
         const age = now() - Date.parse(sample.usage.fetchedAt);
         if (Number.isFinite(age) && age >= -1_000 && age <= maxAge) {
           readings = windows(sample.usage, record.settings.window);
-          available = readings.length > 0 && (record.settings.window !== 'any'
-            || ['primary', 'secondary'].every(name => readings.some(w => w.id.endsWith(':' + name))));
+          // Providers may publish only one window. "Any" means any measured
+          // window reaches the limit, not that two windows must always exist.
+          available = readings.length > 0;
           if (available) observedAt = sample.usage.fetchedAt;
         }
       }
@@ -258,13 +261,15 @@ export function createSubscriptionQuotaStopService(options: {
     }
     const state: SubscriptionQuotaStopSnapshot['state'] = !record.settings.enabled ? 'disabled'
       : record.latch ? 'blocked' : !available ? 'unavailable' : 'armed';
+    const lastKnown = old.snapshot?.window === record.settings.window ? old.snapshot : null;
+    const displayUsed = leading?.usedPercent ?? (state === 'unavailable' ? lastKnown?.usedPercent ?? null : null);
     const snapshot: SubscriptionQuotaStopSnapshot = {
       ...record.settings, supported: true, state,
       accountScope: key,
-      usedPercent: leading?.usedPercent ?? null,
-      remainingUntilStopPercent: leading ? Math.max(0, Math.round((record.settings.stopAtUsedPercent - leading.usedPercent) * 100) / 100) : null,
-      resetsAt: leading?.resetsAt ?? record.latch?.resetsAt ?? null,
-      observedAt, stoppedAt: record.latch?.stoppedAt ?? null,
+      usedPercent: displayUsed,
+      remainingUntilStopPercent: displayUsed !== null ? Math.max(0, Math.round((record.settings.stopAtUsedPercent - displayUsed) * 100) / 100) : null,
+      resetsAt: leading?.resetsAt ?? record.latch?.resetsAt ?? (state === 'unavailable' ? lastKnown?.resetsAt ?? null : null),
+      observedAt: observedAt ?? (state === 'unavailable' ? lastKnown?.observedAt ?? null : null), stoppedAt: record.latch?.stoppedAt ?? null,
       message: state === 'blocked' ? `הושג סף העצירה של ${record.settings.stopAtUsedPercent}%. כל שיחות המנוי נעצרות; ההגבלה אינה חלה על חיובי API.`
         : state === 'unavailable' ? unavailableMessage : null,
     };
@@ -273,7 +278,7 @@ export function createSubscriptionQuotaStopService(options: {
     if (JSON.stringify(draft) !== JSON.stringify(store)) {
       try { await persist(draft); } catch { throw new SubscriptionQuotaStopError(); }
     }
-    if (state === 'blocked' || state === 'unavailable') {
+    if (state === 'blocked') {
       events.push({ accountKey: key, profileIds: await matchingProfiles(key, draft.bindings), snapshot });
     }
     return snapshot;
@@ -287,13 +292,13 @@ export function createSubscriptionQuotaStopService(options: {
   async function blocked(profile: SubscriptionQuotaProfile, model?: string | null) {
     if (isGeminiCodexModel(model)) return false;
     const snapshot = await read(profile);
-    return snapshot.enabled && ['blocked', 'unavailable'].includes(snapshot.state);
+    return snapshot.enabled && snapshot.state === 'blocked';
   }
   async function assertAllowed(profile: SubscriptionQuotaProfile,
     execution: { model?: string | null; recovery?: boolean } = {}) {
     if (execution.recovery || isGeminiCodexModel(execution.model)) return;
     const snapshot = await read(profile);
-    if (snapshot.enabled && ['blocked', 'unavailable'].includes(snapshot.state)) throw new SubscriptionQuotaStopError(snapshot);
+    if (snapshot.enabled && snapshot.state === 'blocked') throw new SubscriptionQuotaStopError(snapshot);
   }
   async function poll() {
     if (polling) return;

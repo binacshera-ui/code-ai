@@ -1,5 +1,12 @@
-/** Account-scoped subscription circuit breaker; never a token-cost estimate. */
+/** Legacy keys: primary selects the short window, secondary the weekly/long
+ * window. Provider slot order is not duration: a weekly-only plan uses primary. */
 export type SubscriptionQuotaWindow = 'primary' | 'secondary' | 'any';
+
+export function matchesSubscriptionQuotaWindow(selected: SubscriptionQuotaWindow, windowMinutes: number | null | undefined): boolean {
+  if (selected === 'any') return true;
+  if (typeof windowMinutes !== 'number' || !Number.isFinite(windowMinutes) || windowMinutes <= 0) return false;
+  return selected === 'secondary' ? windowMinutes > 24 * 60 : windowMinutes <= 24 * 60;
+}
 export interface SubscriptionQuotaStopSettings {
   enabled: boolean;
   stopAtUsedPercent: number;

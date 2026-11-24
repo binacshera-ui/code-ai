@@ -107,23 +107,28 @@ test('manual higher limit or disabling clears the latch, but saving the same set
   assert.equal((await guard.update(f.profile, { ...enabled, enabled: false })).state, 'disabled');
 });
 
-test('missing, stale or failed usage fails closed only for an enabled subscription policy', async t => {
+test('missing, stale or failed observations cannot manufacture a quota breach or cancel work', async t => {
   const f = await fixture(t), guard = f.create();
+  let stops = 0; guard.subscribe(() => { stops++; });
   await guard.update(f.profile, enabled);
   f.advance(); f.set(new Error('private upstream credential must not leak'));
   const unavailable = await guard.read(f.profile);
-  assert.equal(unavailable.state, 'unavailable'); assert.equal(await guard.blocked(f.profile), true);
+  assert.equal(unavailable.state, 'unavailable'); assert.equal(await guard.blocked(f.profile), false);
+  assert.equal(unavailable.usedPercent, 20, 'retain the last real observation, labelled as last known');
+  await guard.assertAllowed(f.profile); assert.equal(stops, 0);
   assert.ok(!JSON.stringify(unavailable).includes('private upstream'));
   f.advance(); const stale = f.usage(); stale.fetchedAt = new Date(epoch - 20_000).toISOString(); f.set(stale);
   assert.equal((await guard.read(f.profile)).state, 'unavailable');
+  await guard.assertAllowed(f.profile); assert.equal(stops, 0);
   f.advance(); f.set(f.usage()); assert.equal((await guard.read(f.profile)).state, 'armed');
 });
 
-test('known-profile unreadable auth fails closed; valid account rotation never inherits another subscription policy', async t => {
+test('unreadable auth is not a measured breach; account rotation never inherits another subscription policy', async t => {
   const f = await fixture(t), guard = f.create();
   await guard.update(f.profile, enabled);
   await writeFile(path.join(f.profile.codexHome, 'auth.json'), 'unreadable auth');
   assert.equal((await guard.read(f.profile)).state, 'unavailable');
+  assert.equal(await guard.blocked(f.profile), false);
   await f.auth(f.profile, 'new-synthetic-account');
   assert.equal((await guard.read(f.profile)).state, 'disabled');
   await f.auth(f.profile, '', true); assert.equal(await guard.blocked(f.profile), false);
@@ -139,14 +144,48 @@ test('API mode wins over stale stored ChatGPT tokens and non-Codex providers are
   await assert.rejects(guard.update(f.profile, enabled), /מנוי/);
 });
 
-test('any-window policy observes model-specific groups and fails closed on unknown selected windows', async t => {
+test('any-window policy observes model-specific groups without requiring optional windows', async t => {
   const f = await fixture(t), guard = f.create(), usage = f.usage(5, 6);
   usage.quotaGroups.push({ ...usage.quotaGroups[0], id: 'codex-special', primary: { ...usage.quotaGroups[0].primary!, usedPercent: 96 } });
   f.set(usage);
   assert.equal((await guard.update(f.profile, { ...enabled, window: 'any' })).state, 'blocked');
   await guard.update(f.profile, { ...enabled, enabled: false });
   const incomplete = f.usage(); incomplete.quotaGroups[0].secondary = null; f.set(incomplete);
-  assert.equal((await guard.update(f.profile, { ...enabled, window: 'any' })).state, 'unavailable');
+  assert.equal((await guard.update(f.profile, { ...enabled, window: 'any' })).state, 'armed');
+});
+
+test('real promax shape: weekly primary at 87%, null secondary and a 95% limit is armed, not stopped', async t => {
+  const f = await fixture(t), guard = f.create(); let stops = 0;
+  guard.subscribe(() => { stops++; });
+  const weeklyOnly = f.usage(87);
+  weeklyOnly.planType = 'promax';
+  weeklyOnly.quotaGroups[0].primary!.windowMinutes = 10080;
+  weeklyOnly.quotaGroups[0].secondary = null;
+  f.set(weeklyOnly);
+  for (const window of ['any', 'secondary'] as const) {
+    const s = await guard.update(f.profile, { enabled: true, stopAtUsedPercent: 95, window });
+    assert.equal(s.state, 'armed'); assert.equal(s.usedPercent, 87);
+    assert.equal(s.remainingUntilStopPercent, 8); assert.equal(s.message, null);
+    await guard.assertAllowed(f.profile);
+  }
+  assert.equal(stops, 0);
+  f.advance(); const reached = structuredClone(weeklyOnly);
+  reached.fetchedAt = f.usage().fetchedAt; reached.quotaGroups[0].primary!.usedPercent = 95;
+  f.set(reached);
+  assert.equal((await guard.read(f.profile)).state, 'blocked');
+  await assert.rejects(guard.assertAllowed(f.profile), isSubscriptionQuotaStopError);
+  assert.ok(stops > 0);
+  f.advance(); f.set(new Error('network outage after a real breach'));
+  assert.equal((await guard.read(f.profile)).state, 'blocked', 'confirmed stops survive later observation failures');
+});
+
+test('window duration selects short and weekly limits even when provider slot order changes', async t => {
+  const f = await fixture(t), guard = f.create(), usage = f.usage(96, 12);
+  usage.quotaGroups[0].primary!.windowMinutes = 10080;
+  usage.quotaGroups[0].secondary!.windowMinutes = 300;
+  f.set(usage);
+  assert.equal((await guard.update(f.profile, { ...enabled, window: 'primary' })).usedPercent, 12);
+  assert.equal((await guard.update(f.profile, { ...enabled, window: 'secondary' })).state, 'blocked');
 });
 
 test('durable threshold state exists before stop effects; callbacks can reenter reads without deadlocking', async t => {

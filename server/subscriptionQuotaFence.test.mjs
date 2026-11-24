@@ -7,7 +7,7 @@ import { subscriptionAccountKey, subscriptionTransportBlocked } from './subscrip
 import http from 'node:http';
 import { createInferenceRouter } from './codexInferenceRouter.mjs';
 
-test('transport fence preserves account and API isolation and fails closed on stale or corrupt enabled policy', async t => {
+test('transport fences confirmed breaches, not observation age, while preserving account and API isolation', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'code-ai-quota-fence-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const file = path.join(root, 'policy.json'), now = Date.now();
@@ -17,12 +17,17 @@ test('transport fence preserves account and API isolation and fails closed on st
   const save = () => writeFile(file, JSON.stringify(state));
   await save();
   assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gpt-6.1-sol', now), false);
-  assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gpt-6.1-sol', now + 31000), true);
+  assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gpt-6.1-sol', now + 31000), false);
+  entry.snapshot.observedAt = new Date(now - 120000).toISOString();
+  entry.snapshot.state = 'unavailable'; await save();
+  assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gpt-6.1-sol'), false);
   entry.snapshot.state = 'blocked'; await save();
   assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gpt-6.1-sol', now), true);
   assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gemini-4-carbon', now), false);
   assert.equal(await subscriptionTransportBlocked(file, null, 'gpt-6.1-sol', now), false);
   assert.equal(await subscriptionTransportBlocked(file, 'other-account', 'gpt-6.1-sol', now), false);
+  entry.latch = { stoppedAt: new Date(now).toISOString() }; entry.snapshot.state = 'unavailable'; await save();
+  assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gpt-6.1-sol'), true, 'a real breach survives missing later observations');
   entry.settings.enabled = false; await save();
   assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gpt-6.1-sol', now), false);
   await writeFile(file, 'invalid');
@@ -55,8 +60,13 @@ test('live transport stops streaming subscription requests and fences models/ima
   const body = JSON.stringify({ model: 'gpt-6.1-sol', input: [] });
   const response = await fetch(base + '/responses', { method: 'POST', headers, body });
   const reader = response.body.getReader(); await reader.read();
+  entry.snapshot.state = 'unavailable'; entry.snapshot.observedAt = new Date(Date.now() - 60000).toISOString();
+  await writeFile(file, JSON.stringify(state));
+  const pendingRead = reader.read();
+  const survived = await Promise.race([pendingRead.then(() => false, () => false), new Promise(resolve => setTimeout(() => resolve(true), 650))]);
+  assert.equal(survived, true, 'temporary missing data must not kill an in-flight model stream');
   entry.snapshot.state = 'blocked'; await writeFile(file, JSON.stringify(state));
-  const ended = await Promise.race([reader.read().then(() => true, () => true), new Promise(resolve => { const timer = setTimeout(() => resolve(false), 2000); timer.unref(); })]);
+  const ended = await Promise.race([pendingRead.then(() => true, () => true), new Promise(resolve => { const timer = setTimeout(() => resolve(false), 2000); timer.unref(); })]);
   assert.equal(ended, true, 'an already running stream must stop, not merely its next request');
   assert.equal((await fetch(base + '/responses', { method: 'POST', headers, body })).status, 423);
   assert.equal((await fetch(base + '/images/generations', { method: 'POST', headers, body: '{}' })).status, 423);

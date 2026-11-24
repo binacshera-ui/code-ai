@@ -2124,6 +2124,8 @@ function CodexUsagePopover({
   profileId,
   profileLabel,
   canManageCodexAccount,
+  themeClassName,
+  themePresetId,
   selectedModelSlug,
   selectedSessionId,
   loading,
@@ -2139,6 +2141,8 @@ function CodexUsagePopover({
   profileId: string;
   profileLabel: string | null;
   canManageCodexAccount: boolean;
+  themeClassName: string;
+  themePresetId: string;
   selectedModelSlug: string | null;
   selectedSessionId: string | null;
   loading: boolean;
@@ -2779,6 +2783,18 @@ function CodexUsagePopover({
         )}
 
         {showChatgptUsage && <>
+        {canManageCodexAccount && profileId && <SubscriptionQuotaStopControl
+          key={`${serverId}:${profileId}:${snapshot?.account?.accountIdMasked || 'unresolved'}`}
+          serverId={serverId}
+          profileId={profileId}
+          themeClassName={themeClassName}
+          themePresetId={themePresetId}
+          load={signal => fetchJsonForServer<{ quotaStop: SubscriptionQuotaStopSnapshot }>(serverId,
+            `/api/codex/subscription-quota-stop?${new URLSearchParams({ profile: profileId })}`, { signal }).then(result => result.quotaStop)}
+          save={settings => fetchJsonForServer<{ quotaStop: SubscriptionQuotaStopSnapshot }>(serverId,
+            '/api/codex/subscription-quota-stop', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ profileId, ...settings }) }).then(result => result.quotaStop)}
+        />}
         <section>
           <div className="mb-1.5 flex items-center justify-between px-1">
             <span className="text-[10px] font-semibold text-slate-700">כל מכסות Codex</span>
@@ -25136,18 +25152,6 @@ export function CodexMobileApp() {
                       ? <Loader2 className="h-[1.05rem] w-[1.05rem] animate-spin" />
                       : <Gauge className="h-[1.05rem] w-[1.05rem]" />}
                   </button>
-                  {currentProfile?.provider === 'codex' && profileId && <SubscriptionQuotaStopControl
-                    key={`${serverId}:${profileId}:${rateLimitSnapshot?.account?.accountIdMasked || rateLimitSnapshot?.account?.credentialId || 'unresolved'}`}
-                    serverId={serverId}
-                    profileId={profileId}
-                    themeClassName={themeClassName}
-                    themePresetId={themePresetId}
-                    load={signal => fetchJsonForServer<{ quotaStop: SubscriptionQuotaStopSnapshot }>(serverId,
-                      `/api/codex/subscription-quota-stop?${new URLSearchParams({ profile: profileId })}`, { signal }).then(result => result.quotaStop)}
-                    save={settings => fetchJsonForServer<{ quotaStop: SubscriptionQuotaStopSnapshot }>(serverId,
-                      '/api/codex/subscription-quota-stop', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ profileId, ...settings }) }).then(result => result.quotaStop)}
-                  />}
                   </div>
 
                   {isRateLimitOpen && (
@@ -25158,6 +25162,8 @@ export function CodexMobileApp() {
                       profileId={profileId || ''}
                       profileLabel={currentProfile?.label || null}
                       canManageCodexAccount={currentProfile?.provider === 'codex'}
+                      themeClassName={themeClassName}
+                      themePresetId={themePresetId}
                       selectedModelSlug={selectedModelSlug}
                       selectedSessionId={selectedSessionId}
                       loading={isRateLimitLoading}

@@ -6,7 +6,7 @@ import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
 export const subscriptionAccountKey = accountId => createHash('sha256')
   .update('codex\0' + accountId.trim()).digest('hex');
 
-export async function subscriptionTransportBlocked(stateFile, accountId, model, now = Date.now()) {
+export async function subscriptionTransportBlocked(stateFile, accountId, model) {
   if (!stateFile || !accountId || isGeminiCodexModel(model)) return false;
   try {
     const bytes = await readFile(stateFile);
@@ -16,10 +16,10 @@ export async function subscriptionTransportBlocked(stateFile, accountId, model, 
     const entry = state.accounts[subscriptionAccountKey(accountId)];
     if (!entry) return false;
     if (entry.settings?.enabled === false) return false;
-    const observed = Date.parse(entry.snapshot?.observedAt || '');
+    // A clock timeout or missing observation is not a measured quota breach.
+    // Keep enforcing a confirmed stop latch even when later samples fail.
     return entry.settings?.enabled !== true || entry.latch != null
-      || entry.snapshot?.state !== 'armed' || !Number.isFinite(observed)
-      || now < observed || now - observed > 30_000;
+      || entry.snapshot?.state === 'blocked';
   } catch (error) {
     // A missing file means this installation has never enabled the feature.
     // A configured but corrupt/unreadable policy is not permission to spend.

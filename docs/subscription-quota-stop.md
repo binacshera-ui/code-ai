@@ -1,6 +1,6 @@
 # Subscription quota stop
 
-The stopwatch next to the usage gauge configures a server-owned stop for a
+The stopwatch row inside the usage panel configures a server-owned stop for a
 Codex/ChatGPT subscription account. It starts disabled; the operator chooses a
 used-percentage threshold and the primary, secondary (usually weekly), or first
 matching window, then explicitly saves. Fractional percentages are accepted,
@@ -27,8 +27,13 @@ turn interruption are documented at https://developers.openai.com/codex/app-serv
   stored in the policy. A stale account-editor draft cannot configure a newly
   logged-in account.
 - The server polls while enabled, independently of any open browser, and stores
-  its stop latch before interruption. Missing/invalid fresh quota is fail-closed
-  while enabled; an unknown number is never interpreted as zero.
+  a confirmed threshold latch before interruption. Missing or delayed usage is
+  not evidence of a breach and never initiates cancellation. It also never
+  clears a confirmed stop. An unknown number is never interpreted as zero.
+- Windows are selected by their reported duration, not provider slot position:
+  Pro Max can report its only weekly window in `primary` with `secondary: null`.
+  "Any" evaluates the available windows, without requiring two windows to exist.
+  The stored legacy keys `primary`/`secondary` select short/weekly respectively.
 - New messages, direct runs, retries and scheduled/recurring/automatic starts
   must pass admission. Drafts remain editable. Waiting work is stopped, not
   deleted, and is not silently replayed after release or a quota reset.

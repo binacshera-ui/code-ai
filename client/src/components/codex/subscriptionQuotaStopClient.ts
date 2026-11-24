@@ -33,7 +33,7 @@ export function subscriptionQuotaStopStateLabel(snapshot: SubscriptionQuotaStopS
     disabled: 'סף העצירה כבוי',
     armed: 'ההגבלה פעילה · עוקבת אחר המכסה',
     blocked: 'סף העצירה הושג · השיחות חסומות',
-    unavailable: 'אין כרגע מדידת מכסה עדכנית',
+    unavailable: 'רענון המכסה מתעכב · השיחות ממשיכות',
     unsupported: 'סף מנוי אינו זמין בחיבור הזה',
   }[snapshot.state];
 }
