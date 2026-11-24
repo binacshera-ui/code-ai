@@ -21,6 +21,7 @@ const routerPort = Number(option('--port', '4188'));
 const adapterPort = Number(option('--adapter-port', '4189'));
 const settings = {
   runtimeRoot, keyFile, port: routerPort, adapterPort,
+  quotaStopStateFile: path.join(path.resolve(option('--storage-root', process.env.CODEX_STORAGE_ROOT || '.code-ai')), 'subscription-quota-stop.json'),
   geminiBaseUrl: `http://127.0.0.1:${adapterPort}/v1`,
   openaiBaseUrl: option('--openai-base-url', 'https://chatgpt.com/backend-api/codex'),
   authFiles: homes.map(home => path.join(home, 'auth.json')), gatewayKeyFile: keyPath,

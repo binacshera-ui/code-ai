@@ -1,4 +1,9 @@
 import { randomUUID } from 'crypto';
+import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
+import {
+  assertSubscriptionQuotaAllowed, isProfileSubscriptionBlocked,
+  registerSubscriptionQuotaStopListener, isSubscriptionQuotaStopError,
+} from './subscriptionQuotaStop.js';
 import { createCodexQueueStore, CODEX_QUEUE_SQLITE_FILENAME } from './codexQueueStore.mjs';
 import { createQueueStateTracker } from './codexQueueStoreTracking.mjs';
 import { selectQueueWorkspaceView, selectQueueHistoryPage, type QueueHistorySummary } from './queueWorkspaceSelection.js';
@@ -159,6 +164,7 @@ export interface CodexQueueItem {
   nativeRunId?: string | null;
   lastRunNativeSubmission?: (CodexSharedSubmission & { runId: string }) | null;
   nativeCancellationRequestedAt?: string | null;
+  subscriptionQuotaStopRequestedAt?: string | null;
   nativeReconcileAfter?: string | null;
   workModeRunId?: string | null;
   failureKind?: CodexFailureKind | null;
@@ -1713,9 +1719,41 @@ function markQueueItemStopped(item: CodexQueueItem) {
   item.updatedAt = stoppedAt;
   item.completedAt = stoppedAt;
   item.finalMessage = null;
-  item.error = null;
+  item.error = item.subscriptionQuotaStopRequestedAt ? 'ההרצה נעצרה עקב הגבלת מכסת המנוי.' : null;
   item.failureKind = null;
 }
+
+// Persist the intention before native interruption. Unknown native custody is
+// reconciled using its original identifiers, never declared cancelled or resent.
+registerSubscriptionQuotaStopListener(async event => {
+  await ensureStateLoaded();
+  const stopping: CodexQueueItem[] = [];
+  let changed = false;
+  for (const item of state.items) {
+    if (!event.profileIds.includes(item.profileId) || isGeminiCodexModel(item.model)
+        || item.status === 'draft' || isTerminalStatus(item.status) && !nativeSubmissionNeedsReconciliation(item.nativeSubmission)) continue;
+    const hadCustody = nativeSubmissionNeedsReconciliation(item.nativeSubmission);
+    item.subscriptionQuotaStopRequestedAt ||= nowIso();
+    item.error = 'ההרצה נעצרה עקב הגבלת מכסת המנוי.';
+    item.stopPolicy = null;
+    item.scheduleMode = 'once'; item.recurringFrequency = null; item.recurringTimeZone = null;
+    item.modelRetry = null; item.capacityRetryPendingAt = null;
+    item.updatedAt = nowIso();
+    if (item.status === 'running' || item.status === 'cancelling' || hadCustody) {
+      item.nativeCancellationRequestedAt ||= nowIso();
+      if (item.status !== 'running' && item.status !== 'cancelling') {
+        item.status = 'queued'; item.nativeReconcileAfter = null;
+      }
+      stopping.push(item);
+    } else markQueueItemStopped(item);
+    changed = true;
+  }
+  if (!changed) return;
+  await persistState();
+  for (const item of stopping) if (cancelAgentRun(item.id, item.profileId)) item.status = 'cancelling';
+  await persistState();
+  scheduleImmediateTick();
+});
 
 function findStopDecisionItem(sourceItemId: string): CodexQueueItem | null {
   return state.items.find((candidate) => candidate.stopDecisionForItemId === sourceItemId) || null;
@@ -2147,7 +2185,12 @@ async function pickRunnableItems(limit: number): Promise<CodexQueueItem[]> {
     && !(item.capacityRetry?.sourceWorkModeRunId === hold.runId)));
   const selected = selectRunnableCodexQueueItems(eligible, limit, activeWorkerItemIds, activeWorkerQueueKeys);
   const ready: CodexQueueItem[] = [];
-  for (const item of selected) if (await prepareCapacityContinuation(item)) ready.push(item);
+  for (const item of selected) {
+    const profile = CODEX_APP_CONFIG.profiles.find(profile => profile.id === item.profileId);
+    if (profile && !nativeSubmissionNeedsReconciliation(item.nativeSubmission)
+        && await isProfileSubscriptionBlocked(profile, item.model)) continue;
+    if (item.status === 'queued' && await prepareCapacityContinuation(item)) ready.push(item);
+  }
   return ready;
 }
 
@@ -2747,6 +2790,13 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
       sessionTitle: result.sessionTitle,
     });
   } catch (error: any) {
+    if (isSubscriptionQuotaStopError(error) && !nativeSubmissionNeedsReconciliation(item.nativeSubmission)) {
+      item.subscriptionQuotaStopRequestedAt ||= nowIso();
+      item.scheduleMode = 'once'; item.recurringFrequency = null; item.recurringTimeZone = null;
+      markQueueItemStopped(item);
+      await persistState();
+      return;
+    }
     if (error instanceof CodexExternalWriterBusyError && !item.nativeSubmission && item.status !== 'cancelling') {
       item.status = 'queued';
       item.nativeReconcileAfter = new Date(Date.now() + 60_000).toISOString();
@@ -3205,6 +3255,10 @@ export async function enqueueCodexQueueItem(input: EnqueueCodexQueueInput): Prom
     }
   }
 
+  const subscriptionProfile = CODEX_APP_CONFIG.profiles.find(profile => profile.id === input.profileId);
+  if (!input.saveAsDraft && subscriptionProfile) {
+    await assertSubscriptionQuotaAllowed(subscriptionProfile, { model: input.model });
+  }
   const recurrence = input.recurrence
     ? {
       frequency: input.recurrence.frequency,
@@ -3434,6 +3488,9 @@ export async function retryCodexQueueItem(
     throw new Error('Only failed or cancelled queue items can be retried');
   }
 
+  const subscriptionProfile = CODEX_APP_CONFIG.profiles.find(profile => profile.id === item.profileId);
+  if (subscriptionProfile) await assertSubscriptionQuotaAllowed(subscriptionProfile, { model: item.model });
+
   cancelPendingCapacityContinuations(item);
 
   if (item.nativeSubmission) {
@@ -3459,6 +3516,7 @@ export async function retryCodexQueueItem(
       capacityRetry: null, capacityRetryPendingAt: null,
       modelRetry: null,
       nativeSubmission: null, nativeCancellationRequestedAt: null, nativeReconcileAfter: null,
+      subscriptionQuotaStopRequestedAt: null,
       workModeRunId: null,
       scheduledAt: normalizeScheduledAt(scheduledAt), createdAt: at, updatedAt: at,
       startedAt: null, completedAt: null, finalMessage: null, error: null, attempts: 0,
@@ -3504,6 +3562,7 @@ export async function retryCodexQueueItem(
   item.updatedAt = nowIso();
   item.startedAt = null;
   item.completedAt = null;
+  item.subscriptionQuotaStopRequestedAt = null;
   if (item.stopPolicy) {
     item.stopPolicy = null;
   }

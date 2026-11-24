@@ -1,4 +1,7 @@
 import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
+import { randomUUID } from 'node:crypto';
+import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
+import { assertSubscriptionQuotaAllowed, registerSubscriptionQuotaStopListener } from './subscriptionQuotaStop.js';
 import {
   cancelCodexRun,
   consumeCodexFullReset,
@@ -468,13 +471,27 @@ export async function disconnectAgentCodexAccount(profileId?: string): Promise<v
 // between an accepted request and the provider child appearing in its run map.
 registerCodexDeploymentDrainParticipant('agent', () => ({ ready: true, active: 0 }));
 
+const subscriptionAgentRuns = new Map<string, { profileId: string; model: string | null }>();
+registerSubscriptionQuotaStopListener(async event => {
+  for (const [runId, run] of subscriptionAgentRuns) {
+    if (event.profileIds.includes(run.profileId) && !isGeminiCodexModel(run.model)) cancelAgentRun(runId, run.profileId);
+  }
+});
+
 export async function runAgentPrompt(
   ...args: Parameters<typeof runAdmittedAgentPrompt>
 ): Promise<AgentRunResult> {
   const admission = acquireCodexDeploymentAdmission('agent', args[4]?.deploymentAdmission);
+  const profile = resolveProfile(args[2]);
+  const options = args[4] || {};
+  const runId = options.runId || randomUUID();
+  subscriptionAgentRuns.set(runId, { profileId: profile.id, model: options.executionConfig?.model || null });
   try {
-    return await runAdmittedAgentPrompt(...args);
+    await assertSubscriptionQuotaAllowed(profile, { model: options.executionConfig?.model,
+      recovery: Boolean(options.nativeSubmission) });
+    return await runAdmittedAgentPrompt(args[0], args[1], args[2], args[3], { ...options, runId });
   } finally {
+    subscriptionAgentRuns.delete(runId);
     admission.release();
   }
 }

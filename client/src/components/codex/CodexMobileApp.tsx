@@ -48,6 +48,8 @@ import { fetchWithDeploymentRetry } from './deploymentRetry';
 import { createDurableQueueSubmission, createQueueRequestScope, queueListViewForPanel, removeAcknowledgedAttachments } from './queueRequestLifecycle';
 import type { ServerStatusSnapshot } from '../../../../shared/serverStatus';
 import { readServerStatus } from './serverStatusTransport';
+import { SubscriptionQuotaStopControl } from './SubscriptionQuotaStopControl';
+import type { SubscriptionQuotaStopSnapshot } from '../../../../shared/subscriptionQuotaStop';
 import { collectSessionActivity } from './sessionUnread';
 import ReactMarkdown from 'react-markdown';
 import { MarkdownFileImage, MarkdownImageLinkContext } from './MarkdownFileImage';
@@ -25110,6 +25112,7 @@ export function CodexMobileApp() {
                 />
 
                 <div className="relative ml-1 flex shrink-0 flex-col items-center justify-end gap-1 self-stretch">
+                  <div className="flex items-center">
                   <button
                     ref={rateLimitButtonRef}
                     type="button"
@@ -25133,6 +25136,19 @@ export function CodexMobileApp() {
                       ? <Loader2 className="h-[1.05rem] w-[1.05rem] animate-spin" />
                       : <Gauge className="h-[1.05rem] w-[1.05rem]" />}
                   </button>
+                  {currentProfile?.provider === 'codex' && profileId && <SubscriptionQuotaStopControl
+                    key={`${serverId}:${profileId}:${rateLimitSnapshot?.account?.accountIdMasked || rateLimitSnapshot?.account?.credentialId || 'unresolved'}`}
+                    serverId={serverId}
+                    profileId={profileId}
+                    themeClassName={themeClassName}
+                    themePresetId={themePresetId}
+                    load={signal => fetchJsonForServer<{ quotaStop: SubscriptionQuotaStopSnapshot }>(serverId,
+                      `/api/codex/subscription-quota-stop?${new URLSearchParams({ profile: profileId })}`, { signal }).then(result => result.quotaStop)}
+                    save={settings => fetchJsonForServer<{ quotaStop: SubscriptionQuotaStopSnapshot }>(serverId,
+                      '/api/codex/subscription-quota-stop', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ profileId, ...settings }) }).then(result => result.quotaStop)}
+                  />}
+                  </div>
 
                   {isRateLimitOpen && (
                     <CodexUsagePopover

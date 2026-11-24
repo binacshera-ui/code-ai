@@ -6,6 +6,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 import codexRoutes, { requireCodexAccess } from './codexRoutes.js';
+import { createSubscriptionQuotaStopRouter } from './subscriptionQuotaStopRoutes.js';
+import { startSubscriptionQuotaStopMonitor, stopSubscriptionQuotaStopMonitor } from './subscriptionQuotaStop.js';
+import { registerSubscriptionQuotaNativeStop } from './subscriptionQuotaRuntime.js';
 import codexWordExportRoutes from './codexWordExportRoutes.js';
 import codexFinalNotificationRoutes from './codexFinalNotificationRoutes.js';
 import { recordCodexServerCrash } from './codexCrashLogs.js';
@@ -232,6 +235,7 @@ app.use('/api/codex/remote-incidents/:serverId', createIncidentRemoteGateway({ r
 app.post('/api/codex/work-mode-control', createWorkModeControlHandler());
 app.use('/api/codex', requireRemoteAgentToken);
 app.use('/api/codex', createRemoteHostProxyMiddleware(requireCodexAccess));
+app.use('/api/codex', createSubscriptionQuotaStopRouter(requireCodexAccess));
 app.use('/api/codex/message-exports', requireCodexAccess, codexWordExportRoutes);
 app.use('/api/codex/session-final-notification', requireCodexAccess, codexFinalNotificationRoutes);
 app.use('/api/codex', codexRoutes);
@@ -344,6 +348,8 @@ server.once('listening', () => {
       console.error('❌ Failed to start final-response notification worker:', error);
     });
 
+  registerSubscriptionQuotaNativeStop();
+  startSubscriptionQuotaStopMonitor();
   void startCodexQueueWorker()
     .then(() => {
       console.log('🤖 Codex queue worker started');
@@ -374,6 +380,7 @@ function shutdownServer(signal: NodeJS.Signals): void {
   shutdownPersonalChromeBridge();
   shutdownPersonalPortForwardBroker();
   stopCodexCliAutoUpdateWorker();
+  stopSubscriptionQuotaStopMonitor();
 
   const forceExitTimer = setTimeout(() => {
     console.error('❌ Timed out while closing code-ai; forcing open connections to close');

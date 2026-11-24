@@ -6,6 +6,7 @@ import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
 import { promisify } from 'node:util';
 import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
+import { subscriptionTransportBlocked } from './subscriptionQuotaFence.mjs';
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'upgrade', 'proxy-authorization']);
@@ -61,7 +62,8 @@ export function createInferenceRouter(settings, { logger = event => console.log(
     for (const filename of settings.authFiles) {
       try {
         const auth = JSON.parse(await readFile(filename, 'utf8'));
-        if (equal(token, auth.tokens?.access_token) || equal(token, auth.OPENAI_API_KEY)) return true;
+        if (equal(token, auth.OPENAI_API_KEY)) return { accountId: null };
+        if (equal(token, auth.tokens?.access_token)) return { accountId: auth.tokens?.account_id || null };
       } catch { /* Another configured profile can be authenticated. */ }
     }
     return false;
@@ -83,7 +85,8 @@ export function createInferenceRouter(settings, { logger = event => console.log(
       if (!imageRequest && !/^\/v1\/(responses(?:\/compact)?|models)$/.test(url.pathname)) {
         fail(404, 'Unknown inference route'); return;
       }
-      if (!await authorized(req.headers.authorization)) { fail(401, 'Code AI account authentication required'); return; }
+      const authentication = await authorized(req.headers.authorization);
+      if (!authentication) { fail(401, 'Code AI account authentication required'); return; }
       if (imageRequest) {
         if (req.method !== 'POST') { fail(405, 'Image requests require POST'); return; }
         const requestId = randomUUID(), started = performance.now();
@@ -124,6 +127,11 @@ export function createInferenceRouter(settings, { logger = event => console.log(
       const body = !imageRequest && decoded.length ? JSON.parse(decoded.toString('utf8')) : null;
       const gemini = isGeminiCodexModel(body?.model);
       if (body?.model?.startsWith('gemini-') && !gemini) { fail(400, 'Gemini model is not registered'); return; }
+      const quotaStateFile = settings.quotaStopStateFile || process.env.CODE_AI_QUOTA_STOP_STATE_FILE;
+      const blocked = () => subscriptionTransportBlocked(quotaStateFile, authentication.accountId, body?.model);
+      if (req.method === 'POST' && await blocked()) {
+        fail(423, 'Subscription quota stop is active; model work is paused.'); return;
+      }
       const target = new URL(url.pathname.slice('/v1'.length) + url.search, (gemini ? settings.geminiBaseUrl : settings.openaiBaseUrl) + '/');
       // URL paths are appended explicitly; a leading slash would discard /v1
       // or /backend-api/codex from the configured provider endpoint.
@@ -156,6 +164,20 @@ export function createInferenceRouter(settings, { logger = event => console.log(
         incoming.on('error', () => res.destroy());
       });
       upstream.setTimeout(360000, () => upstream.destroy());
+      // Fencing future samples is not enough: stop already-streaming model and
+      // image requests when the same durable account latch trips.
+      if (quotaStateFile && authentication.accountId && !gemini && req.method === 'POST') {
+        let checking = false;
+        const poll = setInterval(async () => {
+          if (checking) return;
+          checking = true;
+          try { if (await blocked()) { upstream.destroy(); res.destroy(); } }
+          finally { checking = false; }
+        }, 500);
+        poll.unref();
+        res.once('close', () => clearInterval(poll));
+        res.once('finish', () => clearInterval(poll));
+      }
       upstream.on('error', error => {
         if (imageMetadata) logger({ event: 'inference.image.transport_failed', ...imageMetadata,
           code: error.code || error.name, stage: 'provider' });
