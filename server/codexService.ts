@@ -18,6 +18,8 @@ import {
   type CodexResetCreditsSnapshot,
   type CodexResetConsumptionResult,
 } from './codexAccountUsage.js';
+import { readCodexCatalogAccountScope, refreshCodexAccountModels } from './codexAccountModels.js';
+import { normalizeCodexServiceTierValue, normalizeCodexServiceTierConfigValue, codexResponseSpeedModes, selectedCodexResponseSpeed } from './codexResponseSpeed.js';
 import {
   getForkDraftSession,
   getForkSessionMetadata,
@@ -677,6 +679,7 @@ registerCodexDeploymentDrainParticipant('native-codex', () => ({
 const MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 let modelCatalogCacheEpoch = 0;
 const modelCatalogCache = new Map<string, {
+  accountScope: string;
   expiresAt: number;
   models: CodexAvailableModel[];
 }>();
@@ -798,28 +801,6 @@ function normalizeExecutionSettingValue(value: string | null | undefined): strin
 
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
-}
-
-function normalizeCodexServiceTierValue(value: string | null | undefined): 'fast' | 'flex' | null {
-  const normalized = normalizeExecutionSettingValue(value)?.toLowerCase() || null;
-  if (!normalized) {
-    return null;
-  }
-
-  if (normalized === 'standard') {
-    return 'flex';
-  }
-
-  if (normalized === 'priority') {
-    return 'fast';
-  }
-
-  return normalized === 'fast' || normalized === 'flex' ? normalized : null;
-}
-
-function normalizeCodexServiceTierConfigValue(value: string | null | undefined): 'fast' | null {
-  const normalized = normalizeCodexServiceTierValue(value);
-  return normalized === 'fast' ? 'fast' : null;
 }
 
 function buildCodexProcessEnv(profile: CodexProfile, codexHomeOverride?: string | null): NodeJS.ProcessEnv {
@@ -4831,14 +4812,16 @@ export async function updateCodexMultiAgentMode(
 
 async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAvailableModel[]> {
   const epoch = modelCatalogCacheEpoch;
+  const accountScope = await readCodexCatalogAccountScope(profile.codexHome);
   const cached = modelCatalogCache.get(profile.id);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (cached && cached.accountScope === accountScope && cached.expiresAt > Date.now()) {
     return cached.models.map((model) => ({
       ...model,
       supportedReasoningLevels: model.supportedReasoningLevels.map((level) => ({ ...level })),
     }));
   }
 
+  const accountModels = await refreshCodexAccountModels(profile.codexHome, accountScope);
   const runModelCatalogCommand = (env: NodeJS.ProcessEnv) => spawnSync(CODEX_BIN, ['debug', 'models'], {
     cwd: profile.workspaceCwd,
     env,
@@ -4908,11 +4891,14 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
                 .map((tier) => normalizeCodexServiceTierValue(
                   normalizeExecutionSettingValue(tier?.id) || normalizeExecutionSettingValue(tier?.name)
                 ))
-                .filter((value): value is string => Boolean(value))
+                .filter(value => value !== null)
               : []),
           ]
             .map((value) => normalizeCodexServiceTierValue(normalizeExecutionSettingValue(value)) || normalizeExecutionSettingValue(value)?.toLowerCase() || null)
             .filter((value): value is string => Boolean(value))
+            .filter(value => value !== 'ultrafast' || Boolean(accountModels?.some(model => model.slug === slug
+              && (Array.isArray(model.additional_speed_tiers) && model.additional_speed_tiers.includes('ultrafast')
+                || Array.isArray(model.service_tiers) && model.service_tiers.some(tier => tier?.id === 'ultrafast')))))
         )),
         isConfiguredDefault: false,
       };
@@ -4920,6 +4906,7 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
     .filter((entry): entry is CodexAvailableModel => Boolean(entry));
 
   if (epoch === modelCatalogCacheEpoch) modelCatalogCache.set(profile.id, {
+    accountScope,
     expiresAt: Date.now() + MODEL_CATALOG_CACHE_TTL_MS,
     models,
   });
@@ -4958,29 +4945,16 @@ function buildCodexResponseSpeedSnapshot(
     };
   }
 
-  const supportsFast = Boolean(selectedModelOption.availableResponseSpeedIds?.includes('fast'));
-  const selectedModeId = defaults.serviceTier === 'fast' ? 'fast' : 'flex';
+  const availableModes = codexResponseSpeedModes(selectedModelOption.availableResponseSpeedIds || []);
+  const selectedModeId = selectedCodexResponseSpeed(selectedModelOption.availableResponseSpeedIds || [], defaults.serviceTier);
   return {
     selectedModeId,
-    selectedLabel: selectedModeId === 'fast' ? 'מהיר' : 'רגיל',
+    selectedLabel: availableModes.find(mode => mode.id === selectedModeId)!.label,
     configurable: true,
-    note: supportsFast
+    note: availableModes.length > 1
       ? 'Codex response speed נשלט דרך service_tier בקובץ config.toml.'
       : `למודל ${selectedModelOption.displayName} יש כרגע tier רגיל בלבד.`,
-    availableModes: [
-      {
-        id: 'flex',
-        label: 'רגיל',
-        description: 'תצורת ברירת המחדל של Codex CLI ליציבות ושימוש מאוזן.',
-      },
-      ...(supportsFast
-        ? [{
-          id: 'fast',
-          label: 'מהיר',
-          description: 'מהירות תגובה גבוהה יותר עם שימוש מוגבר.',
-        }]
-        : []),
-    ],
+    availableModes,
   };
 }
 
@@ -5001,9 +4975,8 @@ export async function updateCodexResponseSpeed(profileId: string | undefined, mo
   const selectedModelOption = selectedModel
     ? models.find((model) => model.slug === selectedModel) || null
     : null;
-  const supportsFast = Boolean(selectedModelOption?.availableResponseSpeedIds?.includes('fast'));
-  if (normalizedModeId === 'fast' && !supportsFast) {
-    throw new Error('Fast mode is not available for the selected Codex model');
+  if (normalizedModeId !== 'flex' && !selectedModelOption?.availableResponseSpeedIds?.includes(normalizedModeId)) {
+    throw new Error('מצב המהירות אינו זמין למודל ולחשבון המחוברים.');
   }
 
   const configPath = path.join(profile.codexHome, 'config.toml');
@@ -5275,7 +5248,10 @@ export async function runCodexPrompt(
     : promptText;
   const queueKey = buildProviderRunQueueKey(profile.id, sessionId, options.runId);
   const executionConfig = await resolveCodexExecutionConfig(profile, options.executionConfig);
-  const { modelProvider } = await readCodexExecutionDefaults(profile);
+  const { modelProvider, serviceTier: configuredServiceTier } = await readCodexExecutionDefaults(profile);
+  const speedModel = (await loadCodexAvailableModels(profile)).find(model => model.slug === executionConfig.model);
+  const serviceTier = normalizeCodexServiceTierConfigValue(selectedCodexResponseSpeed(
+    speedModel?.availableResponseSpeedIds || [], configuredServiceTier));
 
   return queueBySessionKey(queueKey, async () => {
     const previousSession = sessionId ? await resolveSessionRecord(profile, sessionId) : null;
@@ -5439,11 +5415,13 @@ export async function runCodexPrompt(
         profileId: profile.id, runId: activeRunId, sessionId, prompt: effectivePromptText, imagePaths,
         threadOptions: {
           model: executionConfig.model,
+          serviceTier,
           ...(modelProvider === 'code_ai' ? { modelProvider } : {}),
           approvalPolicy: sandbox === 'danger-full-access' ? 'never' : 'on-request',
           sandbox,
         },
         turnOptions: {
+          serviceTier,
           ...(executionConfig.model ? { model: executionConfig.model } : {}),
           ...(executionConfig.reasoningEffort ? { effort: executionConfig.reasoningEffort } : {}),
         },
@@ -5477,6 +5455,7 @@ export async function runCodexPrompt(
           managedOwner: true,
           expectedOwnerSettings: {
             model: executionConfig.model!, cwd: runCwd, approvalPolicy: 'never' as const,
+            serviceTier,
             ...(modelProvider === 'code_ai' && threadModelProvider && isGeminiCodexModel(executionConfig.model)
               ? { modelProvider: threadModelProvider } : {}),
             sandbox: { type: 'dangerFullAccess' }, reasoningEffort: executionConfig.reasoningEffort || null,
