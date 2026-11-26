@@ -71,7 +71,7 @@ for (const status of ['idle', 'notLoaded']) test(status + ' is a normal-send dec
   assert.deepEqual(f.calls.map(call => call.method), ['thread/read']); assert.equal(f.closes, 1);
 });
 
-test('active input stays in the same turn with real user input, images and untrusted tool-output context', async t => {
+test('active input stays in the same turn with real user input and images exactly once, without duplicated tool-output context', async t => {
   const f = await fixture(t);
   f.request.input.push({ type: 'localImage', path: '/neutral/attachment.png', detail: 'original' });
   f.request.contextText += '\nAttached neutral image: /neutral/attachment.png';
@@ -83,8 +83,9 @@ test('active input stays in the same turn with real user input, images and untru
   assert.deepEqual(f.steers(), [{ method: 'turn/steer', params: {
     threadId: 'thread-one', expectedTurnId: 'turn-one', clientUserMessageId: nativeId,
     input: f.request.input,
-    additionalContext: { [nativeId]: { kind: 'untrusted', name: 'code_ai_live_input', value: f.request.contextText } },
   } }]);
+  assert.equal(Object.hasOwn(f.steers()[0].params, 'additionalContext'), false);
+  assert.equal(JSON.stringify(f.steers()[0].params).split(f.request.input[0].text).length - 1, 1);
   assert.deepEqual(f.calls.map(call => call.method), ['thread/read', 'thread/turns/list', 'turn/steer']);
   assert.equal(f.store.get('main', 'request-one').status, 'delivered'); assert.equal(f.closes, 1);
 });
@@ -94,6 +95,35 @@ test('delivered retry after service/store restart returns one durable receipt wi
   await f.reopen();
   const second = await f.service.append(f.request);
   assert.deepEqual(second, first); assert.equal(f.connects, 1); assert.equal(f.steers().length, 1);
+});
+
+// Frozen identity from the previously accepted dual-input release. Keeping
+// this hash prevents an upgrade from conflicting with or replaying an old ACK.
+const legacyRequest = {
+  profileId: 'main', sessionId: 'thread-legacy', clientRequestId: 'request-legacy',
+  input: [{ type: 'text', text: 'Neutral legacy follow-up' }], contextText: 'Neutral legacy follow-up',
+  connectionOptions: { codexHome: '/neutral/legacy-codex' },
+};
+const legacyHash = '3bdd82056e486693694095c78926ca591fa252a82b0c000c66b5b67574fb39e6';
+
+test('legacy delivered receipt survives the input-only upgrade and restart without connecting or retransmitting', async t => {
+  const f = await fixture(t); f.request = structuredClone(legacyRequest);
+  assert.equal(codexLiveInputPayloadHash(f.request), legacyHash);
+  const old = f.store.reserve({ ...legacyRequest, payloadHash: legacyHash, turnId: 'turn-legacy' }).row;
+  f.store.markDelivered(old.id, old.turnId); await f.reopen();
+  assert.deepEqual(await f.service.append(f.request), { id: old.id, profileId: 'main', sessionId: 'thread-legacy',
+    clientRequestId: 'request-legacy', turnId: 'turn-legacy', status: 'delivered', kind: 'active-turn' });
+  assert.equal(f.connects, 0); assert.equal(f.steers().length, 0);
+});
+
+test('legacy lost-ACK receipt reconciles its original real user history after upgrade without resending', async t => {
+  const f = await fixture(t); f.request = structuredClone(legacyRequest);
+  const old = f.store.reserve({ ...legacyRequest, payloadHash: legacyHash, turnId: 'turn-legacy' }).row;
+  f.store.markUnconfirmed(old.id); f.history.push(f.nativeItem()); await f.reopen();
+  const receipt = await f.service.append(f.request);
+  assert.equal(receipt.id, old.id); assert.equal(receipt.turnId, 'turn-legacy');
+  assert.deepEqual(f.calls.map(call => call.method), ['thread/items/list']);
+  assert.equal(f.calls[0].params.turnId, 'turn-legacy'); assert.equal(f.steers().length, 0);
 });
 
 for (const field of ['input', 'contextText', 'sessionId', 'codexHome']) test('stable request ID conflicts with changed ' + field + ' rather than sending again', async t => {
@@ -284,7 +314,7 @@ test('input mutation during awaited I/O cannot change the reserved envelope or n
   f.request.input[0].text = 'mutated after submit'; f.request.contextText = 'mutated context';
   finish.resolve(); await sending;
   assert.deepEqual(f.steers()[0].params.input, original.input);
-  assert.equal(Object.values(f.steers()[0].params.additionalContext)[0].value, original.contextText);
+  assert.equal(Object.hasOwn(f.steers()[0].params, 'additionalContext'), false);
   assert.equal(f.store.get('main', 'request-one').payloadHash, codexLiveInputPayloadHash(original));
 });
 

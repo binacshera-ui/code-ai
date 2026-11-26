@@ -15,17 +15,22 @@ The persistent SQLite file contains delivery receipts only; no worker executes
 those records.
 
 Active delivery uses `turn/steer` with the real `expectedTurnId`, actual user
-input, a correlated `clientUserMessageId`, and `additionalContext` of kind
-`untrusted`. The latter is delivered as native function-call-output context;
-the real user input also preserves the user message in native history. The
-running model/tool call is not interrupted and no model, permission, working
-directory or reasoning setting is overridden. Model/settings changes apply to
-the next turn. No synthetic tool timeline event is invented.
+input and a correlated `clientUserMessageId`. The text enters the native user
+history and model context once. Do not repeat it in `additionalContext` or as a
+synthetic tool result: doing both creates two context copies, even though only
+one turn and one native user item exist. The running model/tool call is not
+interrupted and no model, permission, working directory or reasoning setting is
+overridden. Model/settings changes apply to the next turn.
 
 Standalone `turn/start.toolOutput` is deliberately not used as an active-only
 primitive: it can start a turn after an idle race and does not enforce the
 required expected-turn guard. Repeating a native client message ID is **not**
 native deduplication.
+
+Native 0.171 rejects `turn/steer` with an empty input, so a tool-result-only
+carrier is not a substitute for native user input. Input-only steering was
+verified against the real binary and owner broker during held model sampling
+and a running shell, with exactly one copy in subsequent model requests.
 
 ## Delivery and retry
 
@@ -45,6 +50,10 @@ native deduplication.
 - Capability is scoped to server and profile. An older remote backend must not
   silently queue a known-active follow-up. A new conversation still waiting for
   its native session binding retains the draft until that binding is available.
+- The internal `contextText` field remains in the payload hash for compatibility
+  with existing delivery receipts. It is not sent to the native model as a
+  second context item. Old delivered and lost-ACK receipts still reconcile
+  without resubmission after upgrading the representation.
 
 ## Agent instructions for Bina Cshera 3.0 Remix
 
@@ -66,10 +75,10 @@ input through completeChat, FIFO or remixControlPlaneRuntime.admit.
 
 Inspect the actually running binary and generated schema; do not infer support
 from its custom 0.0.0 version label. Prove turn/steer with expectedTurnId,
-clientUserMessageId, real input and additionalContext:{[stableSourceId]:{
-kind:'untrusted',name:'remix_live_input',value:actualUserText}}. Verify actual
-function_call_output in model input and a persisted real userMessage. Do not
-invent a typed functionCallOutput event. Do not use unguarded turn/start.toolOutput
+clientUserMessageId and the actual user input ONLY. Do not duplicate the text in
+additionalContext or a synthetic tool output. Verify exactly one text copy in
+model context and one persisted real userMessage. The goal is noninterrupting
+native steering, not forcing a tool-result representation. Do not use unguarded turn/start.toolOutput
 as an active-only primitive; it can start a new turn when completion wins a race.
 
 Preserve canonical conversation/turn IDs versus original provider turn IDs, and
@@ -89,9 +98,35 @@ its original endpoint and ID. Handle two quick sends and session-binding races.
 
 Test with neutral inputs: append during model streaming and a harmless running
 shell command, preserve the same turn ID, do not abort the shell, observe real
-user messages and function-call-output context, repeat a request once only,
+user messages with exactly one context copy, repeat a request once only,
 recover lost ACK/restart, test completion race and profile/conversation isolation,
 and prove explicit schedules remain scheduled. Cover shared/server and
 desktop-local separately. Follow the current repo's normal build/deploy process;
 report exactly which paths were tested and which are live.
+```
+
+### נוסח קצר להעתקה לסוכן רמיקס
+
+```text
+הוסף ברמיקס צירוף הודעה רגילה לסבב Codex פעיל, פעם אחת בלבד,
+בלי לעצור את המודל או הכלים ובלי ליצור פריט FIFO או סבב חדש.
+השתמש ב-turn/steer עם expectedTurnId, clientUserMessageId והקלט האמיתי בלבד;
+אל תשכפל את הטקסט ב-additionalContext או בתוצאת כלי מדומה.
+תזמון מפורש וחזרתיות יישארו במנגנון התזמון, ושליחה בזמן שאין ריצה
+תמשיך במסלול הרגיל.
+
+בדוק את SystemView.tsx ואת המסלול isSubmitting -> enqueueComposerTurn(immediate).
+חבר את המסירה ל-steerSessionTurn הקיים דרך runtime-manager, shared owner
+ו-server-runtime/BST, תוך שמירת המיפוי בין מזהי הסבב הקנוניים למזהי native.
+אל תעביר הודעה חיה דרך completeChat, FIFO או remixControlPlaneRuntime.admit.
+ב-desktop-local השתמש בערוץ הבקרה ובקורא stdout היחידים שכבר קיימים.
+
+שמור קבלות מסירה ומזהה בקשה עמיד. אחרי אובדן אישור בדוק את ההיסטוריה
+המקורית לפי clientId; אל תשדר שוב על סמך timeout. סבב שהסתיים בדיוק
+בזמן השליחה צריך להחזיר דחייה בלי מעבר אוטומטי לתור. נקה טיוטה רק
+אחרי אישור מסירה תואם.
+
+בדוק מול הבינארי המותקן בפועל: הודעה בזמן streaming ובזמן כלי shell,
+אותו turnId, טקסט פעם אחת בקונטקסט ובהיסטוריה, המשך כלי ללא ביטול,
+retry/restart ללא כפילות, מרוץ סיום, והפרדה מתזמון. דווח מה נבדק ומה נפרס.
 ```

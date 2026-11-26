@@ -28,6 +28,8 @@ const ended = () => new CodexLiveInputError('LIVE_TURN_ENDED',
 export function isCodexLiveInputError(error) { return error instanceof CodexLiveInputError; }
 export function codexLiveInputClientId(requestId) { return 'code-ai:live:' + requestId; }
 export function codexLiveInputPayloadHash({ sessionId, input, contextText, connectionOptions }) {
+  // Keep contextText in the durable identity for receipts created before
+  // input-only steering. It is not sent as a second copy of the user message.
   return createHash('sha256').update(JSON.stringify(canonical({
     sessionId, input, contextText, codexHome: connectionOptions?.codexHome,
   }))).digest('hex');
@@ -150,7 +152,6 @@ export function createCodexLiveInputService({ store, connect = connectCodexLiveI
           accepted = await connection.rpc('turn/steer', {
             threadId: value.sessionId, expectedTurnId: turnId, clientUserMessageId: clientId,
             input: value.input,
-            additionalContext: { [clientId]: { kind: 'untrusted', name: 'code_ai_live_input', value: value.contextText } },
           });
         } catch (error) {
           if (error?.nativeRejected && [-32600, -32602].includes(error.code)) {
