@@ -97,6 +97,7 @@ try {
   for (const model of models) {
     if (receipt.checks.some(check => check.model === model && check.tools?.length)) continue;
     await turn(model, `Keep the same conversation. Run a shell command to compute 17 * 23. ${model.startsWith('deepseek-') ? `Also use apply_patch to create the harmless qualification file ${model}.txt containing only 391 in the current test workspace. Verify it with a shell command.` : 'Do not read files or change anything.'} Then answer with the code from the first message and the arithmetic result.`, marker, true);
+    await turn('gpt-6.1-sol', 'After switching providers, answer with the original code and the arithmetic result. No tools.', marker);
   }
   await turn('gpt-6.1-sol', 'Now answer with the original code and the arithmetic result from previous tool output. No tools.', marker);
   await stop(); await start();

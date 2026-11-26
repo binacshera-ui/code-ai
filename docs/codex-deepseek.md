@@ -60,6 +60,24 @@ Threads created under the shared `code_ai` provider can select GPT, Gemini or
 either DeepSeek provider for the next turn while retaining their native thread
 and tool history. A model selection does not interrupt or replace a running turn.
 
+Sealed `encrypted_content` is provider/account state, not a portable transcript
+or an uploaded file. The router records only its SHA-256 fingerprint, source
+provider/model and authentication scope in private `provider-state.sqlite`
+under the inference runtime root. It observes JSON/SSE output without changing
+response bytes. Replay requires the same provider endpoint and account (or API
+credential scope); item IDs and the presence of ciphertext are not proof of
+ownership. The registry survives router restarts and never contains ciphertext,
+reasoning text, API keys, or OAuth tokens.
+
+At the transport boundary, foreign or unverifiable legacy **reasoning** items
+are excluded from that request only. The native transcript, visible messages,
+and exact tool call/result pairs remain unchanged. Valid recorded same-scope
+state is retained, including after switching away and back. Existing untracked
+reasoning is omitted rather than guessed to be decryptable by OpenAI.
+No failed turn or business operation is automatically replayed. An unverifiable
+encrypted **compaction checkpoint** is rejected explicitly rather than silently
+discarding the conversation's only remaining history.
+
 Historical threads pinned to Codex's built-in `openai` provider retain the
 existing compatibility limitation described in [the Gemini integration](codex-gemini.md).
 Codex 0.171 rejects changing their provider identity on resume. Do not rewrite
@@ -84,6 +102,8 @@ native owner or rewrite the transcript.
 
 Run `node --test deploy/code-ai/inference/install.test.mjs` for provisioning and
 `node --test server/codexInferenceRouter.test.mjs` for transport boundaries.
+Run `node --test server/codexProviderState.test.mjs` for state ownership,
+legacy-history handling, private persistence, and chunked UTF-8/SSE parsing.
 Release qualification must separately exercise both exact provider models with
 real Codex tools, follow-up turns, model switching and resume. A successful
 plain-text request alone is not proof that the agent harness works.

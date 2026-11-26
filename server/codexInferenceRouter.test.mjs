@@ -5,7 +5,27 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { createInferenceRouter, openaiRequest, geminiRequest, deepseekRequest, numericProviderUsage } from './codexInferenceRouter.mjs';
+import { createInferenceRouter, listenInferenceServer, openaiRequest, geminiRequest, deepseekRequest, numericProviderUsage } from './codexInferenceRouter.mjs';
+
+test('successor takes the same listener while the previous in-flight stream drains intact', async t => {
+  let oldResponse;
+  let accept;
+  const accepted = new Promise(resolve => { accept = resolve; });
+  const old = http.createServer((_req, res) => { oldResponse = res; res.writeHead(200); res.write('before-'); accept(); });
+  await new Promise(resolve => old.listen(0, '127.0.0.1', resolve));
+  const port = old.address().port;
+  const pending = fetch(`http://127.0.0.1:${port}`).then(r => r.text());
+  await accepted;
+  const next = http.createServer((_req, res) => res.end('new-release'));
+  t.after(() => { old.close(); next.close(); });
+  const binding = listenInferenceServer(next, port, { waitMs: 1000, retryMs: 5 });
+  const drained = new Promise(resolve => old.close(resolve));
+  await binding;
+  assert.equal(await (await fetch(`http://127.0.0.1:${port}`)).text(), 'new-release');
+  oldResponse.end('after');
+  assert.equal(await pending, 'before-after');
+  await drained;
+});
 
 test('direct DeepSeek keeps sealed reasoning and custom tool history without mutating native transcript', () => {
   const reasoning = { type: 'reasoning', encrypted_content: 'sealed-provider-thought', summary: [] };
@@ -51,6 +71,84 @@ test('numeric usage preserves unknown cache telemetry and never records content'
     unreported_token_details: ['cached_tokens'], secret: 'do-not-log', cost: 0.01 }), {
     input_tokens: 20, input_tokens_details: { cache_write_tokens: 0 }, cost: 0.01, unreported_token_details: ['cached_tokens'],
   });
+});
+
+test('same native history switches both DeepSeek providers and GPT without replaying foreign sealed state', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-state-router-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const auth = path.join(root, 'auth.json');
+  await writeFile(auth, JSON.stringify({ tokens: { access_token: 'fixture-token-a', account_id: 'account-a' } }));
+  const calls = [], logs = [];
+  const upstream = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    calls.push({ url: req.url, body, headers: req.headers });
+    const item = { type: 'reasoning', id: `rs_${calls.length}`, encrypted_content: `sealed-${req.url}-${calls.length}`, summary: [] };
+    if (body.stream) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const text = `data: ${JSON.stringify({ type: 'response.output_item.done', item })}\n\ndata: ${JSON.stringify({ type: 'response.completed', response: { output: [item] } })}\n\n`;
+      res.write(text.slice(0, 23)); res.end(text.slice(23));
+    } else {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ output: [item] }));
+    }
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  t.after(() => upstream.close());
+  const base = `http://127.0.0.1:${upstream.address().port}`;
+  const settings = { runtimeRoot: root, authFiles: [auth], openaiBaseUrl: `${base}/openai/v1`,
+    providerKeys: { VENICE_API_KEY: 'fixture-venice-key', EXPLABS_API_KEY: 'fixture-experiential-key' },
+    providerBaseUrls: { venice: `${base}/venice/v1`, experiential: `${base}/experiential/v1` } };
+  let server;
+  async function start() {
+    server = createInferenceRouter(settings, { logger: e => logs.push(e) });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  }
+  t.after(() => server.close());
+  await start();
+  const history = [{ role: 'user', content: 'neutral same-thread fixture' },
+    { type: 'custom_tool_call', id: 'ctc_fixture', call_id: 'fixture-call', name: 'apply_patch', input: 'neutral test' },
+    { type: 'custom_tool_call_output', call_id: 'fixture-call', output: 'fixture completed' }];
+  let token = 'fixture-token-a';
+  async function request(model, input, stream = true) {
+    const r = await fetch(`http://127.0.0.1:${server.address().port}/v1/responses`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: zlib.gzipSync(Buffer.from(JSON.stringify({ model, input, stream }))),
+    });
+    assert.equal(r.status, 200);
+    const text = await r.text();
+    return stream ? JSON.parse(text.split('\n').find(line => line.startsWith('data: ')).slice(6)).item : JSON.parse(text).output[0];
+  }
+  const legacy = { type: 'reasoning', id: 'rs_legacy', encrypted_content: 'unverified-legacy-secret' };
+  const gpt = await request('gpt-6.1-sol', [...history, legacy]);
+  assert.deepEqual(calls[0].body.input, history);
+  const venice = await request('deepseek-v4.1-flash-venice', [...history, gpt]);
+  assert.deepEqual(calls[1].body.input, history);
+  const experiential = await request('deepseek-v4.1-flash-experiential', [...history, gpt, venice], false);
+  assert.deepEqual(calls[2].body.input, history);
+  await new Promise(resolve => server.close(resolve));
+  await start();
+  token = 'fixture-refreshed-oauth-token';
+  await writeFile(auth, JSON.stringify({ tokens: { access_token: token, account_id: 'account-a' } }));
+  await request('gpt-6.1-sol', [...history, gpt, venice, experiential]);
+  assert.deepEqual(calls[3].body.input, [...history, gpt], 'keep real GPT state across switches and restart');
+  await request('deepseek-v4.1-flash-venice', [...history, gpt, venice, experiential]);
+  assert.deepEqual(calls[4].body.input, [...history, venice]);
+  assert.equal(calls[3].headers['content-encoding'], undefined, 'changed compressed JSON must be re-encoded correctly');
+  settings.providerKeys.VENICE_API_KEY = 'fixture-rotated-provider-key';
+  await request('deepseek-v4.1-flash-venice', [...history, venice]);
+  assert.deepEqual(calls[5].body.input, history, 'API-key rotation does not inherit opaque state');
+  await writeFile(auth, JSON.stringify({ tokens: { access_token: token, account_id: 'account-b' } }));
+  await request('gpt-6.1-sol', [...history, gpt]);
+  assert.deepEqual(calls[6].body.input, history, 'another account cannot replay GPT sealed state');
+  const rejected = await fetch(`http://127.0.0.1:${server.address().port}/v1/responses`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-6.1-sol', input: [{ type: 'compaction', encrypted_content: 'unverified-checkpoint' }] }),
+  });
+  assert.equal(rejected.status, 409);
+  assert.match(await rejected.text(), /checkpoint/);
+  assert.equal(calls.length, 7, 'unsafe checkpoint does not reach any provider');
+  assert.doesNotMatch(JSON.stringify(logs), /sealed-|fixture-token|fixture-.*-key|neutral same-thread|unverified-legacy/);
 });
 
 test('both direct provider routes isolate credentials, retain SSE and reject unregistered models', async t => {

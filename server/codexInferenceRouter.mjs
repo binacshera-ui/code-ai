@@ -9,6 +9,8 @@ import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
 import { getCodexApiModel, isCodexApiModel, isDeepseekCodexModel } from '../shared/codexApiModels.mjs';
 import { parseEnv } from 'node:util';
 import { subscriptionTransportBlocked } from './subscriptionQuotaFence.mjs';
+import path from 'node:path';
+import { ProviderStateStore, providerStateScope, filterProviderState, providerStateObserver } from './codexProviderState.mjs';
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'upgrade', 'proxy-authorization']);
@@ -42,8 +44,8 @@ export function openaiRequest(body, { stripUnsealedReasoning = true } = {}) {
       ? prefix + createHash('sha256').update(item.id).digest('hex').slice(0, 40) : short(item.id);
   };
   // Stateless non-OpenAI providers may expose a summary-only reasoning item.
-  // OpenAI treats its ID as a stored reference and returns 404; only sealed
-  // replayable reasoning carries the state needed for stateless continuation.
+  // OpenAI treats its ID as a stored reference and returns 404. The transport
+  // separately verifies ownership of sealed reasoning before this conversion.
   return { ...body, input: body.input.filter(item => !stripUnsealedReasoning || item.type !== 'reasoning' || item.encrypted_content).map(item => ({ ...item,
     ...(item.id ? { id: itemId(item) } : {}),
     ...(item.call_id ? { call_id: short(item.call_id) } : {}),
@@ -107,6 +109,8 @@ function equal(a, b) {
 }
 
 export function createInferenceRouter(settings, { logger = event => console.log(JSON.stringify(event)) } = {}) {
+  const providerState = new ProviderStateStore(settings.providerStateFile ||
+    (settings.runtimeRoot ? path.join(settings.runtimeRoot, 'provider-state.sqlite') : ':memory:'));
   async function authorized(header) {
     if (!header?.startsWith('Bearer ')) return false;
     const token = header.slice(7);
@@ -175,7 +179,7 @@ export function createInferenceRouter(settings, { logger = event => console.log(
       // Native image editing sends multipart files. Image requests belong to
       // OpenAI and pass through byte-for-byte, including boundaries/encoding;
       // only Responses JSON needs model routing and tool-history conversion.
-      const body = !imageRequest && decoded.length ? JSON.parse(decoded.toString('utf8')) : null;
+      let body = !imageRequest && decoded.length ? JSON.parse(decoded.toString('utf8')) : null;
       const gemini = isGeminiCodexModel(body?.model);
       const deepseek = isDeepseekCodexModel(body?.model);
       const api = isCodexApiModel(body?.model);
@@ -191,6 +195,19 @@ export function createInferenceRouter(settings, { logger = event => console.log(
       }
       const baseUrl = deepseek ? (settings.providerBaseUrls?.[apiModel.provider] || apiModel.apiBase)
         : gemini ? settings.geminiBaseUrl : settings.openaiBaseUrl;
+      const provider = deepseek ? apiModel.provider : gemini ? 'gemini' : 'openai';
+      const scope = !imageRequest && body ? providerStateScope({ provider, endpoint: baseUrl,
+        accountId: api ? null : authentication.accountId,
+        accountHeader: api ? null : req.headers['chatgpt-account-id'],
+        credential: deepseek ? settings.providerKeys[apiModel.credentialEnv]
+          : gemini ? settings.geminiGatewayKey : req.headers.authorization }) : null;
+      let stateRemoved = 0;
+      if (scope) {
+        const filtered = filterProviderState(body, providerState, scope);
+        body = filtered.body;
+        stateRemoved = filtered.removed;
+        if (stateRemoved) logger({ event: 'inference.state.filtered', provider, model: body.model, removed: stateRemoved });
+      }
       const target = new URL(url.pathname.slice('/v1'.length) + url.search, baseUrl + '/');
       // URL paths are appended explicitly; a leading slash would discard /v1
       // or /backend-api/codex from the configured provider endpoint.
@@ -208,7 +225,7 @@ export function createInferenceRouter(settings, { logger = event => console.log(
         // Gemini encodes thought signatures inside tool IDs. OpenAI has a
         // 64-character ID limit; map matching call/result IDs consistently.
         const converted = openaiRequest(body);
-        if (JSON.stringify(converted) !== JSON.stringify(body)) {
+        if (stateRemoved || JSON.stringify(converted) !== JSON.stringify(body)) {
           bytes = Buffer.from(JSON.stringify(converted));
           delete headers['content-encoding'];
         }
@@ -218,6 +235,18 @@ export function createInferenceRouter(settings, { logger = event => console.log(
         method: req.method, headers,
       }, incoming => {
         const responseHeaders = Object.fromEntries(Object.entries(incoming.headers).filter(([name]) => !HOP_HEADERS.has(name)));
+        if (scope && incoming.statusCode >= 200 && incoming.statusCode < 300) {
+          const observer = providerStateObserver(incoming.headers['content-type'], item =>
+            providerState.record(item, { scope, provider, model: body.model }));
+          let failed = false;
+          const observe = action => {
+            if (failed) return;
+            try { action(); }
+            catch { failed = true; logger({ event: 'inference.state.observe_failed', provider }); }
+          };
+          incoming.on('data', chunk => observe(() => observer.push(chunk)));
+          incoming.once('end', () => observe(() => observer.end()));
+        }
         if (deepseek) {
           let pendingLine = '', reported = false, oversized = false;
           const report = response => {
@@ -272,10 +301,33 @@ export function createInferenceRouter(settings, { logger = event => console.log(
       });
       res.on('close', () => { if (!res.writableEnded) upstream.destroy(); });
       upstream.end(bytes);
-    } catch { fail(400, 'Invalid model request'); }
+    } catch (error) {
+      if (error.code === 'provider_state_checkpoint_mismatch') fail(409, error.message);
+      else fail(400, 'Invalid model request');
+    }
   });
   server.requestTimeout = 0;
+  server.once('close', () => providerState.close());
   return server;
+}
+
+/** A successor may wait for the old listener to close while old streams drain. */
+export async function listenInferenceServer(server, port, { waitMs = 0, retryMs = 100 } = {}) {
+  const deadline = performance.now() + waitMs;
+  for (;;) {
+    try {
+      await new Promise((resolve, reject) => {
+        const ready = () => { server.off('error', failed); resolve(); };
+        const failed = error => { server.off('listening', ready); reject(error); };
+        server.once('listening', ready); server.once('error', failed);
+        server.listen(port, '127.0.0.1');
+      });
+      return;
+    } catch (error) {
+      if (error.code !== 'EADDRINUSE' || performance.now() >= deadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, retryMs));
+    }
+  }
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
@@ -283,7 +335,8 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   settings.geminiGatewayKey = (await readFile(settings.gatewayKeyFile, 'utf8')).trim();
   if (settings.providerKeyFile) settings.providerKeys = parseEnv(await readFile(settings.providerKeyFile, 'utf8'));
   const server = createInferenceRouter(settings);
-  server.listen(settings.port, '127.0.0.1', () => console.log('Code AI inference router ready'));
+  await listenInferenceServer(server, settings.port, { waitMs: Number(process.env.CODE_AI_INFERENCE_BIND_WAIT_MS || 0) });
+  console.log('Code AI inference router ready');
   // Stop accepting requests while existing model/image streams complete.
   for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => server.close());
 }
