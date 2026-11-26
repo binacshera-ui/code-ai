@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { NATIVE_FRAME_BYTES, assertNativeHistoryRead } from './codexNativeTransport.mjs';
+import { nativeRpcTimeoutMs, publicRpcDiagnostic } from './codexRpcDiagnostic.mjs';
 
 const same = (a, b) => {
   if (a === b) return true;
@@ -85,8 +86,14 @@ export async function recoverReservedQueuedInput({ rpc, readReservation, ...targ
  * This capability is not exposed to browser clients or arbitrary queued inputs.
  */
 export async function recoverManagedQueuedSubmission(options) {
-  return withManagedNativeConnection(options, async ({rpc, readReservation}) =>
-    recoverReservedQueuedInput({...options, rpc, readReservation: () => readReservation(options.threadId)}));
+  try {
+    return await withManagedNativeConnection(options, async ({rpc, readReservation}) =>
+      recoverReservedQueuedInput({...options, rpc, readReservation: () => readReservation(options.threadId)}));
+  } catch (error) {
+    error.diagnostic ||= publicRpcDiagnostic('initialize', null,
+      error.code === 'ENOENT' ? 'Native endpoint unavailable' : error.message);
+    throw error;
+  }
 }
 
 /** Read-only compatibility for an older broker. No input, settings or journal
@@ -157,7 +164,12 @@ async function withManagedNativeConnection({ codexHome, readOnly = false, broker
     let frame; try { frame = JSON.parse(bytes.toString()); } catch { return ws.terminate(); }
     const p = pending.get(frame.id); if (!p) return;
     pending.delete(frame.id); clearTimeout(p.timer);
-    if (frame.error) { const e = new Error('Native recovery refused'); e.nativeRejected = true; e.code = frame.error.code; p.reject(e); }
+    if (frame.error) {
+      const e = new Error('Native recovery refused');
+      e.nativeRejected = true; e.code = frame.error.code;
+      e.diagnostic = publicRpcDiagnostic(p.method, frame.error.code, frame.error.message, Date.now() - p.startedAt);
+      p.reject(e);
+    }
     else p.resolve(frame.result);
   });
   const rpc = (method, params) => new Promise((resolve, reject) => {
@@ -165,8 +177,14 @@ async function withManagedNativeConnection({ codexHome, readOnly = false, broker
       try { assertNativeHistoryRead(method, params); } catch (e) { reject(e); return; }
     }
     if (ws.readyState !== WebSocket.OPEN) return reject(new Error('Native recovery unavailable'));
-    const id = ++next, timer = setTimeout(() => { pending.delete(id); reject(new Error('Native recovery acknowledgement unavailable')); }, 8000);
-    pending.set(id, { resolve, reject, timer }); ws.send(JSON.stringify({ id, method, params }));
+    const id = ++next, startedAt = Date.now();
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      const error = new Error('Native recovery acknowledgement unavailable');
+      error.diagnostic = publicRpcDiagnostic(method, null, error.message, Date.now() - startedAt);
+      reject(error);
+    }, nativeRpcTimeoutMs(method));
+    pending.set(id, { resolve, reject, timer, method, startedAt }); ws.send(JSON.stringify({ id, method, params }));
   });
   try {
     await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', () => reject(new Error('Native recovery unavailable'))); });

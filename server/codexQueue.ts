@@ -2415,11 +2415,13 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
   }
 
   item.status = item.nativeCancellationRequestedAt ? 'cancelling' : 'running';
-  item.startedAt = nowIso();
-  item.updatedAt = item.startedAt;
+  const reconcilingNativeInput = nativeSubmissionNeedsReconciliation(item.nativeSubmission);
+  if (!reconcilingNativeInput || !item.startedAt) item.startedAt = nowIso();
+  item.updatedAt = nowIso();
   item.error = null;
   item.failureKind = null;
-  item.attempts += 1;
+  // Reattaching the SAME accepted input is not another execution attempt.
+  if (!reconcilingNativeInput) item.attempts += 1;
   await persistState();
 
   if (item.agentSessionId && item.agentLinkKind === 'agent' && item.agentId) {
@@ -2823,6 +2825,10 @@ async function processQueueItem(item: CodexQueueItem, deploymentAdmission: { rel
       item.status = 'queued';
       item.nativeReconcileAfter = new Date(Date.now() + 30_000).toISOString();
       item.error = 'Native submission is awaiting reconciliation; the message has not been resent.';
+      if (error.diagnostic) {
+        const { operation, reason, nativeCode } = error.diagnostic;
+        item.error += ` [${operation}: ${reason}${nativeCode === null ? '' : ` (${nativeCode})`}]`;
+      }
       item.updatedAt = nowIso();
       await persistState();
       return;
@@ -3423,6 +3429,30 @@ export async function cancelCodexQueueItem(itemId: string): Promise<CodexQueueIt
     throw new Error('Queue item was not found');
   }
 
+  if (nativeSubmissionNeedsReconciliation(item.nativeSubmission)) {
+    // Commit stop intent before signalling a transport. Detached work must
+    // reconnect to its exact native IDs, then delete/interrupt that input.
+    // Returning here acknowledges intent only, never an unproved cancellation.
+    item.nativeCancellationRequestedAt ||= nowIso();
+    item.stopPolicy = null;
+    item.scheduleMode = 'once';
+    item.recurringFrequency = null;
+    item.recurringTimeZone = null;
+    item.nativeReconcileAfter = null;
+    const runningLocally = item.status === 'running' || item.status === 'cancelling';
+    item.status = runningLocally ? 'cancelling' : 'queued';
+    item.updatedAt = nowIso();
+    item.error = null;
+    cancelPendingCapacityContinuations(item);
+    await persistState();
+    if (runningLocally && !cancelAgentRun(item.id, item.profileId)) {
+      item.status = 'queued';
+      await persistState();
+    }
+    scheduleImmediateTick();
+    return cloneQueueItem(item);
+  }
+
   if (item.status === 'cancelling') {
     throw new Error('Queue item is already stopping');
   }
@@ -3443,13 +3473,6 @@ export async function cancelCodexQueueItem(itemId: string): Promise<CodexQueueIt
     item.error = null;
     await persistState();
     return cloneQueueItem(item);
-  }
-
-  // A detached provider may still own this message even though the local
-  // transport is no longer running. Never acknowledge cancellation without
-  // native queue deletion or a correlated terminal cancellation event.
-  if (nativeSubmissionNeedsReconciliation(item.nativeSubmission)) {
-    throw new Error('Native submission must be reconciled before cancellation');
   }
 
   if (isTerminalStatus(item.status) && item.status !== 'failed') {

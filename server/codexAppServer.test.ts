@@ -767,8 +767,14 @@ test('pending shared input invokes recovery with only durable IDs; lost ACK deta
   const run = runCodexAppServerTurn({...options('shared-cancel-pending'),
     sharedTransport:{bridgePath,socketPath:'/synthetic/not-installed',
       onSubmissionChanged: s => {state=s;},
-      recoverQueuedInput: async (...ids) => {calls.push(ids);throw Error('synthetic lost ACK');}}});
-  await assert.rejects(run, CodexAppServerDetachedError);
+      recoverQueuedInput: async (...ids) => {calls.push(ids);throw Object.assign(Error('private-test-marker'),{
+        diagnostic:{version:1,operation:'thread/queue/start',reason:'native-rejected',nativeCode:-32603,elapsedMs:15,prompt:'private-test-marker'},
+      });}}});
+  await assert.rejects(run, (error: unknown) => {
+    assert.ok(error instanceof CodexAppServerDetachedError);
+    assert.deepEqual(error.diagnostic,{version:1,operation:'thread/queue/start',reason:'native-rejected',nativeCode:-32603,elapsedMs:15});
+    assert.ok(!JSON.stringify(error).includes('private-test-marker'));return true;
+  });
   assert.deepEqual(calls,[['parent-thread','queued-one',state?.clientUserMessageId]]);
   assert.match(state?.clientUserMessageId || '', /^code-ai:/);
   assert.equal(state?.queuedSubmissionId,'queued-one');

@@ -144,9 +144,11 @@ export class CodexAppServerRetryStoppedError extends CodexAppServerTurnFailedErr
 
 /** The native owner still owns accepted work; never retry it as a new prompt. */
 export class CodexAppServerDetachedError extends Error {
-  constructor(public readonly submission: CodexSharedSubmission) {
+  readonly diagnostic: ReturnType<typeof validatePublicRpcDiagnostic>;
+  constructor(public readonly submission: CodexSharedSubmission, diagnostic?: unknown) {
     super('Codex shared connection lost; accepted native work must be reconciled before retry');
     this.name = 'CodexAppServerDetachedError';
+    this.diagnostic = validatePublicRpcDiagnostic(diagnostic);
   }
 }
 
@@ -335,7 +337,7 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
     if (retryProbe) clearInterval(retryProbe);
     if (options.sharedTransport && nativeSubmissionPossible && error && !(error instanceof CodexAppServerCancelledError)) {
       deliveryPhase = 'detached';
-      error = new CodexAppServerDetachedError(submission());
+      error = new CodexAppServerDetachedError(submission(), (error as { diagnostic?: unknown }).diagnostic);
       void persistSubmission().catch(() => undefined);
     } else if (options.sharedTransport && result) {
       deliveryPhase = 'completed';
@@ -446,7 +448,7 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
     if (!options.sharedTransport?.recoverQueuedInput || stopped || aborting || ownTurnKnown || !queuedSubmissionId || queuedRecoveryBusy) return;
     queuedRecoveryBusy = true;
     void options.sharedTransport.recoverQueuedInput(sessionId, queuedSubmissionId, clientUserMessageId)
-      .catch(() => { if (!stopped) stop(new CodexAppServerDetachedError(submission())); })
+      .catch(error => { if (!stopped) stop(new CodexAppServerDetachedError(submission(), error?.diagnostic)); })
       .finally(() => {
         queuedRecoveryBusy = false;
         if (!stopped && !ownTurnKnown) {

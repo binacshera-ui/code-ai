@@ -8,7 +8,10 @@ const at=new Date().toISOString();
 const item=(id,status,native=true)=>({id,profileId:'developer',queueKey:'queue-'+id,sessionId:'00000000-0000-4000-8000-000000000001',prompt:'Synthetic cancellation recovery',attachments:[],status,createdAt:at,updatedAt:at,scheduledAt:at,attempts:1,startedAt:at,completedAt:null,
  ...(native?{nativeSubmission:{clientUserMessageId:'code-ai:'+id,queuedSubmissionId:'00000000-0000-4000-8000-000000000002',turnId:'00000000-0000-4000-8000-000000000003',deliveryPhase:'running'}}:{})});
 await mkdir(path.join(storage,'queue'));
-await writeFile(path.join(storage,'queue/state.json'),JSON.stringify({items:[item('pending','cancelling'),item('ordinary','cancelling',false),item('running','running')],sessionBindings:{}}));
+const detached = item('detached','queued');
+detached.nativeSubmission.turnId = null;
+detached.nativeSubmission.deliveryPhase = 'detached';
+await writeFile(path.join(storage,'queue/state.json'),JSON.stringify({items:[item('pending','cancelling'),item('ordinary','cancelling',false),item('running','running'),detached],sessionBindings:{}}));
 const queue=await import('./codexQueue.js');
 after(async()=>{await queue.shutdownCodexQueueWorker();await rm(storage,{recursive:true,force:true})});
 test('cold restart preserves exact native IDs and stop intent instead of inventing a cancellation',async()=>{
@@ -22,4 +25,19 @@ test('ordinary active native work reconnects without acquiring cancellation inte
 });
 test('non-native predecessor stopping still follows the existing stopped-process contract',async()=>{
  const v=await queue.getCodexQueueItem('ordinary');assert.equal(v.status,'cancelled');
+});
+
+test('detached pending input accepts durable stop intent without resending or inventing native cancellation',async()=>{
+ const v=await queue.cancelCodexQueueItem('detached');
+ assert.equal(v.status,'queued');assert.ok(v.nativeCancellationRequestedAt);assert.equal(v.completedAt,null);
+ assert.equal(v.nativeSubmission.clientUserMessageId,'code-ai:detached');
+ assert.equal(v.nativeSubmission.queuedSubmissionId,detached.nativeSubmission.queuedSubmissionId);
+ assert.equal(v.nativeSubmission.turnId,null);assert.equal(v.nativeSubmission.deliveryPhase,'detached');
+ const d=JSON.parse(await readFile(path.join(storage,'queue/state.json'),'utf8'));
+ assert.equal(d.items.find(i=>i.id==='detached').nativeCancellationRequestedAt,v.nativeCancellationRequestedAt);
+ assert.equal(d.items.find(i=>i.id==='detached').startedAt,at);assert.equal(v.attempts,1);
+ const again=await queue.cancelCodexQueueItem('detached');
+ assert.equal(again.nativeCancellationRequestedAt,v.nativeCancellationRequestedAt);
+ assert.equal(again.nativeSubmission.deliveryPhase,'detached');
+ assert.ok(!(await queue.getCodexQueueItem('running')).nativeCancellationRequestedAt);
 });

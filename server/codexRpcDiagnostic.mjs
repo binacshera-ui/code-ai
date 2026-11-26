@@ -1,18 +1,19 @@
 /** Public, closed-vocabulary RPC diagnostics. Native messages stay private. */
 const slowReads = new Set(['thread/resume', 'thread/read', 'thread/turns/list', 'thread/items/list']);
 const operations = new Set([...slowReads, 'initialize', 'thread/start', 'thread/queue/list',
-  'thread/queue/add', 'thread/settings/update', 'turn/start', 'turn/steer', 'turn/interrupt',
+  'thread/queue/add', 'thread/queue/start', 'thread/queue/delete', 'thread/settings/update', 'turn/start', 'turn/steer', 'turn/interrupt',
   'config/read', 'configRequirements/read', 'account/read']);
 export const rpcDiagnosticReasons = new Set(['native-read-timeout', 'native-write-timeout',
   'native-rejected', 'native-connection-lost', 'native-capacity-unavailable',
-  'settings-observation-unavailable', 'workspace-requirements', 'configuration-invalid',
+  'settings-observation-unavailable', 'native-endpoint-unavailable', 'workspace-requirements', 'configuration-invalid',
   'authentication-refresh', 'thread-writer-conflict', 'custody-unresolved', 'history-recovery-limit']);
 
 export function nativeRpcTimeoutMs(method) { return slowReads.has(method) ? 120_000 : 15_000; }
 
 export function publicRpcDiagnostic(method, code, message, elapsedMs = 0) {
   const text = typeof message === 'string' ? message.toLowerCase() : '';
-  const reason = /history.*(?:pagination|recovery budget)/.test(text) ? 'history-recovery-limit'
+  const reason = /native endpoint unavailable/.test(text) ? 'native-endpoint-unavailable'
+    : /history.*(?:pagination|recovery budget)/.test(text) ? 'history-recovery-limit'
     : /workspace requirements/.test(text) ? 'workspace-requirements'
     : /invalid type|failed to parse.*config|failed to deserialize.*config/.test(text) ? 'configuration-invalid'
     : /token.*refresh|logged out|sign in again/.test(text) ? 'authentication-refresh'

@@ -9,7 +9,8 @@ test('native failure classification never echoes arbitrary messages, credentials
   const secret = 'private-test-marker';
   for (const [message, reason] of [['request timed out', 'native-read-timeout'], ['failed to load workspace requirements', 'workspace-requirements'],
     ['invalid type string expected u32', 'configuration-invalid'], ['access token could not be refreshed; sign in again', 'authentication-refresh'],
-    ['already has an active writer', 'thread-writer-conflict'], ['Native connection lost', 'native-connection-lost']]) {
+    ['already has an active writer', 'thread-writer-conflict'], ['Native connection lost', 'native-connection-lost'],
+    ['Native endpoint unavailable', 'native-endpoint-unavailable']]) {
     const diagnostic = publicRpcDiagnostic('thread/resume', -32603, message + ' token=' + secret, 18.5);
     assert.equal(diagnostic.reason, reason); assert.equal(diagnostic.elapsedMs, 19);
     assert.equal(JSON.stringify(diagnostic).includes(secret), false);
@@ -20,4 +21,9 @@ test('peer diagnostics are closed enums with allowlisted fields only', () => {
   assert.equal(validatePublicRpcDiagnostic({ version: 1, operation: 'thread/resume', reason: 'arbitrary secret' }), null);
   const d = validatePublicRpcDiagnostic({ ...publicRpcDiagnostic('thread/resume', -32603, 'request timed out'), prompt: 'private-test-marker', elapsedMs: Infinity });
   assert.equal(JSON.stringify(d).includes('private-test-marker'), false); assert.equal(d.elapsedMs, 0);
+});
+test('queue start and delete recovery retain their safe operation names', () => {
+  for (const operation of ['thread/queue/start', 'thread/queue/delete']) {
+    assert.equal(publicRpcDiagnostic(operation, -32603, 'private-test-marker').operation, operation);
+  }
 });
