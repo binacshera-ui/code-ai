@@ -18,7 +18,10 @@ import {
   CodexUploadedAttachment,
   CODEX_UPLOAD_ROOT,
   subscribeCodexSessionChanges,
+  buildPromptWithAttachments,
 } from './codexService.js';
+import { appendCodexLiveMessage, codexLiveInputCapability } from './codexLiveMessages.js';
+import { withCodexMessageAdmission, shouldAppendLiveMessage } from './codexMessageAdmission.mjs';
 import {
   cancelAgentCodexDeviceAuth,
   consumeAgentFullReset,
@@ -50,6 +53,7 @@ import {
   enqueueCodexQueueItem,
   getCodexQueueItem,
   getCodexQueueItemSession,
+  findCodexQueueRequest,
   listCodexQueueItems,
   listCodexQueueCompletionTimes,
   listCodexQueueWorkspaceItems,
@@ -940,7 +944,7 @@ export function readAuthenticatedUser(req: Request) {
   };
 }
 
-export function requireCodexAccess(req: Request, res: Response, next: NextFunction) {
+export async function requireCodexAccess(req: Request, res: Response, next: NextFunction) {
   if ((req as any).codeAiRemoteAgentAuthenticated === true) {
     (req as any).codexAuth = {
       authenticated: true,
@@ -960,7 +964,7 @@ export function requireCodexAccess(req: Request, res: Response, next: NextFuncti
 
   const extensionCredentials = readPersonalChromeUiCredentials(req);
   if (extensionCredentials) {
-    void authenticatePersonalChromeUiToken(extensionCredentials.deviceId, extensionCredentials.token)
+    return authenticatePersonalChromeUiToken(extensionCredentials.deviceId, extensionCredentials.token)
       .then((authState) => {
         if (!authState) {
           const browserAuthState = readAuthenticatedUser(req);
@@ -1852,7 +1856,8 @@ router.get('/models', requireCodexAccess, async (req, res) => {
     const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
     const catalog = await getAgentModelCatalog(profileId, { forceRefresh });
     res.setHeader('Cache-Control', 'no-store');
-    res.json(catalog);
+    const resolvedProfile = findConfiguredProfile(profileId || CODEX_APP_CONFIG.defaultProfileId);
+    res.json({ ...catalog, liveInput: codexLiveInputCapability(resolvedProfile?.id || '') });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load Codex models' });
   }
@@ -5561,7 +5566,7 @@ router.delete('/session-subtasks/:subtaskId', requireCodexAccess, async (req, re
   }
 });
 
-router.post(['/queue/items', '/queue/drafts'], requireCodexAccess, async (req, res) => {
+const handleMessageCreate = async (req: Request, res: Response) => {
   try {
     const requestedProfileId = typeof req.body?.profileId === 'string' ? req.body.profileId : undefined;
     const visibleProfileId = requestedProfileId || 'developer';
@@ -5646,6 +5651,20 @@ router.post(['/queue/items', '/queue/drafts'], requireCodexAccess, async (req, r
       });
       res.status(201).json({ item });
       return;
+    }
+
+    if (req.path === '/messages' && clientRequestId) {
+      const previous = await findCodexQueueRequest(profileId, clientRequestId);
+      if (previous) { res.status(202).json({ item: previous }); return; }
+    }
+    if (shouldAppendLiveMessage({ route: req.path, sessionId, draft: false, scheduledAt, recurrence, provider: configuredProfile.provider })) {
+      const message = buildPromptWithAttachments(prompt, attachments);
+      if (!message.promptText.trim()) { res.status(400).json({ error: 'Message must not be empty' }); return; }
+      const delivery = await appendCodexLiveMessage({ profileId, sessionId: sessionId!, clientRequestId: clientRequestId!,
+        input: [{ type: 'text', text: message.promptText }, ...message.imagePaths.map(file => ({ type: 'localImage' as const, path: file }))],
+        contextText: message.promptText,
+      });
+      if (delivery) { res.json({ delivery }); return; }
     }
 
     const isDraftTarget = isDraftSessionKey(sessionId) || isDraftSessionKey(queueKey);
@@ -6107,7 +6126,22 @@ router.post(['/queue/items', '/queue/drafts'], requireCodexAccess, async (req, r
   } catch (error: any) {
     res.status(typeof error?.statusCode === 'number' ? error.statusCode : 500).json({
       error: error.message || 'Failed to enqueue Codex task',
+      ...(req.path === '/messages' && typeof error.code === 'string' ? { code: error.code } : {}),
     });
+  }
+};
+
+router.post(['/queue/items', '/queue/drafts'], requireCodexAccess, handleMessageCreate);
+router.post('/messages', requireCodexAccess, async (req, res) => {
+  const requestId = typeof req.body?.clientRequestId === 'string' ? req.body.clientRequestId.trim() : '';
+  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(requestId)) {
+    res.status(400).json({ error: 'A stable clientRequestId is required' }); return;
+  }
+  const profileId = typeof req.body?.profileId === 'string' ? req.body.profileId : CODEX_APP_CONFIG.defaultProfileId;
+  try {
+    await withCodexMessageAdmission(profileId, requestId, () => handleMessageCreate(req, res));
+  } catch {
+    if (!res.headersSent) res.status(503).json({ error: 'Message admission is unavailable', code: 'LIVE_INPUT_UNAVAILABLE' });
   }
 });
 

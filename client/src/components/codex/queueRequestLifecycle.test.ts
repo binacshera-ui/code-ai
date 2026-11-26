@@ -146,6 +146,19 @@ test('navigation before a retry POST cannot forget an earlier ambiguous request 
   assert.equal(events.includes('post:request-2'), false);
 });
 
+test('only releasing the exact unresolved request permits a fresh explicit submission', async () => {
+  const { lifecycle, events, options } = harness();
+  await lifecycle.run({ ...options, request: async () => { throw new Error('proven non-delivery'); } });
+  assert.equal(lifecycle.releaseUnresolved(options.fingerprint, 'another-request'), false);
+  assert.equal(lifecycle.releaseUnresolved('another-payload', 'request-1'), false);
+  assert.equal(lifecycle.releaseUnresolved(options.fingerprint, 'request-1'), true);
+  assert.equal(lifecycle.releaseUnresolved(options.fingerprint, 'request-1'), false);
+  assert.equal(events.filter(event => event.startsWith('post:')).length, 0);
+  await lifecycle.run(options);
+  assert.ok(events.includes('post:request-2'));
+  assert.equal(events.includes('post:request-1'), false);
+});
+
 test('queue reads reject out-of-order responses and any read preceding a durable ack', () => {
   const scope = createQueueRequestScope();
   scope.setScope('server/profile/session');

@@ -37,6 +37,7 @@ import { shutdownCodexTerminals } from './codexTerminal.js';
 import { shutdownCodexDesignModeBridge } from './codexDesignMode.js';
 import { shutdownCodexUxModeBridge } from './codexUxMode.js';
 import { closeCodexSharedModeBridges } from './codexSharedModes.js';
+import { closeCodexLiveMessages } from './codexLiveMessages.js';
 import {
   attachPersonalChromeBridge,
   createPersonalChromeBridgeRouter,
@@ -400,7 +401,7 @@ function shutdownServer(signal: NodeJS.Signals): void {
   });
 
   void Promise.all([
-    closeServer,
+    closeServer.then(() => closeCodexLiveMessages()),
     PASSIVE_HTTP_NODE ? Promise.resolve() : shutdownCodexQueueWorker(),
     closeCodexSharedModeBridges().then(() => Promise.all([
       shutdownCodexDesignModeBridge(),

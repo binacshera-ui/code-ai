@@ -4688,7 +4688,7 @@ async function waitForSessionReady(
   }
 }
 
-function buildPromptWithAttachments(
+export function buildPromptWithAttachments(
   prompt: string,
   attachments: CodexUploadedAttachment[],
   options: {

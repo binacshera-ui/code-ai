@@ -20,31 +20,48 @@ export function createCodexUploadMiddleware(uploadRoot: string): RequestHandler 
         callback(null, `${Date.now()}-${randomUUID()}-${safeName}`);
       },
     }),
-    // Busboy rejects at the threshold itself. Add one byte to make 75 MiB
-    // inclusive, matching the client validator; 75 MiB + 1 is still rejected.
+    // Preserve the inclusive boundary with both the locked Multer 2.2 parser
+    // and newer Multer versions; verify the final file sizes below as well.
     limits: { fileSize: MAX_UPLOAD_FILE_BYTES + 1, files: MAX_UPLOAD_FILES },
   }).array('files', MAX_UPLOAD_FILES);
 
-  return (req, res, next) => {
-    receive(req, res, (error) => {
-      if (!error) return next();
-      // Multer removes partial uploads before this callback. Always return JSON,
-      // including for malformed multipart data, so the composer can show the error.
-      if (error instanceof multer.MulterError) {
-        const tooLarge = error.code === 'LIMIT_FILE_SIZE';
-        const tooMany = error.code === 'LIMIT_FILE_COUNT' || error.code === 'LIMIT_UNEXPECTED_FILE';
-        res.status(tooLarge ? 413 : 400).json({
-          code: error.code,
-          error: tooLarge ? 'הגודל המרבי לקובץ הוא 75MB.'
-            : tooMany ? `ניתן להעלות עד ${MAX_UPLOAD_FILES} קבצים בבקשה אחת, בשדה files.`
-              : 'בקשת העלאת הקבצים אינה תקינה.',
-        });
+  // Report the actual Multer completion to the HTTP lifetime tracker, including
+  // terminal error responses. A callback that never calls next() is otherwise
+  // indistinguishable from an upload that is still writing after disconnect.
+  return async (req, res, next) => {
+    let error = await new Promise<(Error & { code?: string }) | undefined>((resolve) => receive(req, res, error => resolve(error)));
+    const files = Array.isArray(req.files) ? req.files : [];
+    const oversized = files.find(file => file.size > MAX_UPLOAD_FILE_BYTES);
+    if (!error && oversized) {
+      // Newer Multer makes its own Busboy boundary inclusive. Reject the extra
+      // byte consistently and clean the same whole batch as a parser failure.
+      try {
+        await Promise.all(files.map(file => fs.unlink(file.path).catch(error => {
+          if (error.code !== 'ENOENT') throw error;
+        })));
+      } catch (cleanupError) {
+        next(cleanupError);
         return;
       }
-      res.status(error.code === 'ENOSPC' ? 507 : error.code ? 500 : 400).json({
-        error: error.code === 'ENOSPC' ? 'אין מספיק מקום פנוי בשרת להעלאת הקבצים.'
-          : 'לא ניתן להעלות את הקבצים. בדקו את החיבור ונסו שוב.',
+      error = new multer.MulterError('LIMIT_FILE_SIZE', oversized.fieldname);
+    }
+    if (!error) return next();
+    // Multer removes partial uploads before this callback. Always return JSON,
+    // including for malformed multipart data, so the composer can show the error.
+    if (error instanceof multer.MulterError) {
+      const tooLarge = error.code === 'LIMIT_FILE_SIZE';
+      const tooMany = error.code === 'LIMIT_FILE_COUNT' || error.code === 'LIMIT_UNEXPECTED_FILE';
+      res.status(tooLarge ? 413 : 400).json({
+        code: error.code,
+        error: tooLarge ? 'הגודל המרבי לקובץ הוא 75MB.'
+          : tooMany ? `ניתן להעלות עד ${MAX_UPLOAD_FILES} קבצים בבקשה אחת, בשדה files.`
+            : 'בקשת העלאת הקבצים אינה תקינה.',
       });
+      return;
+    }
+    res.status(error.code === 'ENOSPC' ? 507 : error.code ? 500 : 400).json({
+      error: error.code === 'ENOSPC' ? 'אין מספיק מקום פנוי בשרת להעלאת הקבצים.'
+        : 'לא ניתן להעלות את הקבצים. בדקו את החיבור ונסו שוב.',
     });
   };
 }

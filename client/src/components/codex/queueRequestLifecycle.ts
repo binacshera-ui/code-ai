@@ -61,6 +61,12 @@ export function createDurableQueueSubmission() {
   const unresolvedRequestIds = new Map<string, string>();
   return {
     get inFlight() { return inFlight; },
+    /** A correlated server rejection can prove this exact write never landed.
+     * Keep the draft, but permit a new ID on the next explicit submission. */
+    releaseUnresolved(fingerprint: string, clientRequestId: string) {
+      if (unresolvedRequestIds.get(fingerprint) !== clientRequestId) return false;
+      return unresolvedRequestIds.delete(fingerprint);
+    },
     async run<T>(options: SubmissionOptions<T>): Promise<boolean> {
       if (inFlight) return false;
       inFlight = true;

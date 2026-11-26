@@ -3219,6 +3219,16 @@ export async function getCodexQueueItem(itemId: string): Promise<CodexQueueItem 
   return item ? cloneQueueItem(item) : null;
 }
 
+/** The regular send may already own this request after its HTTP ACK was lost.
+ * Check before considering live delivery, and preserve the original commit. */
+export async function findCodexQueueRequest(profileId: string, clientRequestId: string): Promise<CodexQueueItem | null> {
+  await ensureStateLoaded();
+  const item = state.items.find(entry => entry.profileId === profileId && entry.clientRequestId === clientRequestId);
+  if (!item) return null;
+  await persistState();
+  return cloneQueueItem(item);
+}
+
 export async function getCodexQueueItemSession(itemId: string): Promise<CodexSessionDetail | null> {
   const item = await getCodexQueueItem(itemId);
   if (!item?.sessionId) {

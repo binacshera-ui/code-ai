@@ -46,6 +46,9 @@ import { decisionBoardProgress, decisionAnswerError, isDecisionBoardCode, type D
 import { interleaveUserInput } from './userInputTimeline';
 import { fetchWithDeploymentRetry } from './deploymentRetry';
 import { createDurableQueueSubmission, createQueueRequestScope, queueListViewForPanel, removeAcknowledgedAttachments } from './queueRequestLifecycle';
+import { ACTIVE_TURN_MESSAGE_NOTICE, composerMessageEndpoint, composerMessageProvenNotDelivered,
+  createComposerLiveInputCapability, createComposerMessageEndpointPins, parseComposerMessageAcceptance,
+  type ComposerLiveInputCapability } from './composerMessageDelivery';
 import type { ServerStatusSnapshot } from '../../../../shared/serverStatus';
 import { readServerStatus } from './serverStatusTransport';
 import { SubscriptionQuotaStopControl } from './SubscriptionQuotaStopControl';
@@ -792,6 +795,7 @@ interface CodexModelCatalogResponse {
   responseSpeed: CodexResponseSpeedSnapshotResponse | null;
   multiAgent?: CodexMultiAgentSnapshotResponse | null;
   cliUpdate?: CodexCliAutoUpdateSnapshotResponse | null;
+  liveInput?: ComposerLiveInputCapability;
 }
 
 interface CodexCliAutoUpdateSnapshotResponse {
@@ -1028,11 +1032,6 @@ interface TransferTargetOption {
 interface CodexQueueItemsResponse {
   items: CodexQueueServerItem[];
   boundSessionId?: string | null;
-}
-
-interface CodexQueueCreateResponse {
-  item?: CodexQueueServerItem;
-  items?: CodexQueueServerItem[];
 }
 
 interface CodexQueueItemResponse {
@@ -4449,7 +4448,11 @@ async function fetchJsonForServer<T>(
 
   const data = trimmed ? JSON.parse(trimmed) : null;
   if (!response.ok) {
-    throw new Error((data as { error?: string } | null)?.error || 'Request failed');
+    const failure = data as { error?: string; code?: unknown } | null;
+    throw Object.assign(new Error(failure?.error || 'Request failed'), {
+      status: response.status,
+      ...(typeof failure?.code === 'string' ? { code: failure.code } : {}),
+    });
   }
   return data as T;
 }
@@ -15690,6 +15693,7 @@ export function CodexMobileApp() {
   const [prompt, setPrompt] = useState('');
   const [workbenchSelections, setWorkbenchSelections] = useState<WorkbenchElementSelection[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [composerDeliveryNotice, setComposerDeliveryNotice] = useState<{ scope: string; epoch: number } | null>(null);
   const [devicePassword, setDevicePassword] = useState('');
   const [isUnlockingDevice, setIsUnlockingDevice] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -16003,6 +16007,8 @@ export function CodexMobileApp() {
   const sessionDetailPrefetchInFlightRef = useRef<Map<string, Promise<CodexSessionDetail | null>>>(new Map());
   const queueSubmission = useRef(createDurableQueueSubmission()).current;
   const queueRequestScope = useRef(createQueueRequestScope()).current;
+  const composerLiveInputCapability = useRef(createComposerLiveInputCapability()).current;
+  const composerMessageEndpointPins = useRef(createComposerMessageEndpointPins()).current;
   const retryInFlightRef = useRef(new Set<string>());
   const bindMainScrollElement = useCallback((element: HTMLElement | null) => {
     mainScrollRef.current = element;
@@ -16077,8 +16083,10 @@ export function CodexMobileApp() {
   const currentQueueKey = selectedSessionId || draftConversationKey;
   const queueReadScope = JSON.stringify([serverId, profileId, selectedSessionId || (isDraftConversation ? draftConversationKey : null)]);
   queueRequestScope.setScope(queueReadScope);
-  const composerRequestStateRef = useRef({ workbenchSelections, scheduledFor, scheduleType, queuePanelStage });
-  composerRequestStateRef.current = { workbenchSelections, scheduledFor, scheduleType, queuePanelStage };
+  const composerLiveInputScope = JSON.stringify([serverId, profileId]);
+  composerLiveInputCapability.setScope(composerLiveInputScope);
+  const composerRequestStateRef = useRef({ workbenchSelections, scheduledFor, scheduleType, queuePanelStage, queueItems });
+  composerRequestStateRef.current = { workbenchSelections, scheduledFor, scheduleType, queuePanelStage, queueItems };
   const finalNotificationScope = JSON.stringify([serverId, profileId, currentQueueKey]);
   finalNotificationRequests.setScope(finalNotificationScope);
   const draftSidebarSessionId = forkDraftContext ? toDraftSessionId(draftConversationKey) : null;
@@ -18067,7 +18075,7 @@ export function CodexMobileApp() {
   async function loadSessionDetail(
     sessionId: string,
     nextProfileId = profileId,
-    options?: { silent?: boolean; tail?: number; full?: boolean }
+    options?: { silent?: boolean; tail?: number; full?: boolean; fresh?: boolean }
   ) {
     const silent = options?.silent ?? false;
     const requestServerId = activeServerRef.current;
@@ -18084,13 +18092,13 @@ export function CodexMobileApp() {
     }
 
     try {
-      const freshCachedSession = !silent
+      const freshCachedSession = !options?.fresh && !silent
         && !full
         && tail === INITIAL_TIMELINE_WINDOW_SIZE
         && Date.now() - (sessionDetailMemoryCacheUpdatedAtRef.current.get(cacheKey) || 0) < 15_000
         ? sessionDetailMemoryCacheRef.current.get(cacheKey) || null
         : null;
-      const pendingPrefetch = !full && tail === INITIAL_TIMELINE_WINDOW_SIZE
+      const pendingPrefetch = !options?.fresh && !full && tail === INITIAL_TIMELINE_WINDOW_SIZE
         ? sessionDetailPrefetchInFlightRef.current.get(cacheKey) || null
         : null;
       const prefetchedSession = freshCachedSession || (pendingPrefetch ? await pendingPrefetch : null);
@@ -19750,12 +19758,17 @@ export function CodexMobileApp() {
       attachments: draftAttachments.map((attachment) => attachment.id),
     });
     const sendTicket = queueRequestScope.capture(queueReadScope);
+    let activeDeliverySessionId: string | null = null;
+    let attemptRequestId: string | null = null;
+    const submissionFingerprint = `enqueue:${payloadFingerprint}`;
     return queueSubmission.run({
-      fingerprint: `enqueue:${payloadFingerprint}`,
+      fingerprint: submissionFingerprint,
       createRequestId: buildQueueId,
       sending: setIsSending,
       request: async (clientRequestId) => {
+        attemptRequestId = clientRequestId;
         setError(null);
+        setComposerDeliveryNotice(null);
         // The synchronous gate is held before this first await, including slash
         // commands. Two rapid clicks cannot both pass an async preflight.
         if (!saveAsDraft && draftAttachments.length === 0 && await handleSupportedSlashCommand(trimmedPrompt)) return null;
@@ -19764,6 +19777,21 @@ export function CodexMobileApp() {
           setError('בחר שעה לתיזמון הקבוע לפני השליחה.');
           return null;
         }
+        const pinnedEndpoint = composerMessageEndpointPins.read(clientRequestId);
+        let supportsLiveInput = composerLiveInputCapability.read(composerLiveInputScope);
+        if (!pinnedEndpoint && currentProfile?.provider === 'codex' && !saveAsDraft && !scheduledFor && scheduleType === 'once'
+          && supportsLiveInput === undefined) {
+          await loadModelCatalog(profileId);
+          if (!queueRequestScope.current(sendTicket)) return null;
+          supportsLiveInput = composerLiveInputCapability.read(composerLiveInputScope);
+        }
+        const activeConversation = composerRequestStateRef.current.queueItems.some(item => {
+          const status = queueExecutionStatus(item);
+          return (status === 'running' || status === 'cancelling')
+            && (item.sessionId === currentQueueKey || item.queueKey === currentQueueKey);
+        });
+        const endpoint = pinnedEndpoint || composerMessageEndpoint({ provider: currentProfile?.provider, saveAsDraft, scheduledFor, scheduleType,
+          supportsLiveInput, activeConversation, sessionBindingPending: !selectedSessionId && activeConversation });
         recordCodexBreadcrumb('queue-enqueue-requested', {
           profileId, selectedSessionId, queueKey: currentQueueKey,
           model: selectedModelSlug, reasoningEffort: selectedReasoningEffort,
@@ -19775,7 +19803,8 @@ export function CodexMobileApp() {
           await releaseWorkModeHoldsForUser(request, { profileId, sessionKey: currentQueueKey });
         }
         if (!queueRequestScope.current(sendTicket)) return null;
-        const data = await request<CodexQueueCreateResponse>(saveAsDraft ? '/api/codex/queue/drafts' : '/api/codex/queue/items', {
+        composerMessageEndpointPins.pin(clientRequestId, endpoint);
+        const data = await request<unknown>(endpoint, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -19811,41 +19840,48 @@ export function CodexMobileApp() {
           }),
         });
 
-        const createdItems = data.items && data.items.length > 0
-          ? data.items
-          : data.item
-            ? [data.item]
-            : [];
-
-        if (createdItems.length === 0 || createdItems.some((item) => !item || typeof item.id !== 'string' || !item.id)) {
-          throw new Error('השרת לא החזיר משימות חדשות לתור.');
-        }
-        return createdItems;
-      },
-      accepted: (createdItems) => {
-        recordCodexBreadcrumb('queue-enqueue-succeeded', {
-          itemIds: createdItems.map((item) => item.id),
-          statuses: createdItems.map((item) => item.status),
+        return parseComposerMessageAcceptance<CodexQueueServerItem>(data, {
+          endpoint, clientRequestId, profileId, sessionId: selectedSessionId,
         });
-        if (!selectedSessionId) {
-          draftQueueItemIdsRef.current[currentQueueKey] = Array.from(new Set([
-            ...(draftQueueItemIdsRef.current[currentQueueKey] || []),
-            ...createdItems.map((item) => item.id),
-          ]));
+      },
+      accepted: (accepted) => {
+        if (attemptRequestId) composerMessageEndpointPins.release(attemptRequestId);
+        if (accepted.kind === 'active-turn') {
+          activeDeliverySessionId = accepted.delivery.sessionId;
+          recordCodexBreadcrumb('active-turn-message-delivered', {
+            requestId: accepted.delivery.clientRequestId, receiptId: accepted.delivery.id,
+            profileId, sessionId: accepted.delivery.sessionId,
+            turnId: accepted.delivery.turnId,
+          });
+        } else {
+          recordCodexBreadcrumb('queue-enqueue-succeeded', {
+            itemIds: accepted.items.map((item) => item.id),
+            statuses: accepted.items.map((item) => item.status),
+          });
+          if (!selectedSessionId) {
+            draftQueueItemIdsRef.current[currentQueueKey] = Array.from(new Set([
+              ...(draftQueueItemIdsRef.current[currentQueueKey] || []),
+              ...accepted.items.map((item) => item.id),
+            ]));
+          }
         }
         // A late acknowledgement still belongs to its original conversation;
         // never clear a new server/session's composer or insert its queue rows.
         if (!queueRequestScope.acknowledged(sendTicket)) return;
-        startTransition(() => {
-          setQueueItems((current) => {
-            if (!queueRequestScope.current(sendTicket)) return current;
-            const nextById = new Map(current.map((item) => [item.id, item]));
-            for (const item of createdItems) {
-              nextById.set(item.id, item);
-            }
-            return sortQueueItemsForDisplay([...nextById.values()]);
+        if (accepted.kind === 'active-turn') {
+          setComposerDeliveryNotice(sendTicket);
+        } else {
+          startTransition(() => {
+            setQueueItems((current) => {
+              if (!queueRequestScope.current(sendTicket)) return current;
+              const nextById = new Map(current.map((item) => [item.id, item]));
+              for (const item of accepted.items) {
+                nextById.set(item.id, item);
+              }
+              return sortQueueItemsForDisplay([...nextById.values()]);
+            });
           });
-        });
+        }
         setPrompt((current) => current === prompt ? '' : current);
         if ((IS_WORKBENCH_EMBED || IS_EXTENSION_PANEL) && workbenchSelections.length > 0) {
           const sentIds = new Set(workbenchSelections.map((selection) => selection.selectionId));
@@ -19863,12 +19899,16 @@ export function CodexMobileApp() {
           setIsScheduleOpen(false);
           setScheduleType('once');
         }
-        if (!saveAsDraft) clearSessionContextSelectionAfterSend(sessionContextSelection);
+        if (!saveAsDraft && accepted.kind === 'queued') clearSessionContextSelectionAfterSend(sessionContextSelection);
         const sentAttachmentIds = new Set(draftAttachments.map((attachment) => attachment.id));
         setDraftAttachments((current) => removeAcknowledgedAttachments(current, sentAttachmentIds, url => URL.revokeObjectURL(url)));
         if (saveAsDraft) setQueuePanelStage('details');
       },
       failed: (sendError: any) => {
+        if (attemptRequestId && composerMessageProvenNotDelivered(sendError, composerMessageEndpointPins.read(attemptRequestId))) {
+          queueSubmission.releaseUnresolved(submissionFingerprint, attemptRequestId);
+          composerMessageEndpointPins.release(attemptRequestId);
+        }
         reportCodexClientLog({
           type: 'queue-enqueue-failed',
           message: sendError.message || 'Failed to enqueue Codex task',
@@ -19880,8 +19920,13 @@ export function CodexMobileApp() {
         });
         if (queueRequestScope.current(sendTicket)) setError(sendError.message || 'Failed to enqueue Codex task');
       },
-      refresh: () => queueRequestScope.current(sendTicket)
-        ? loadQueueItems(profileId, { silent: true, history: saveAsDraft ? true : undefined }) : undefined,
+      refresh: () => {
+        if (!queueRequestScope.current(sendTicket)) return;
+        return Promise.all([
+          loadQueueItems(profileId, { silent: true, history: saveAsDraft ? true : undefined }),
+          activeDeliverySessionId ? loadSessionDetail(activeDeliverySessionId, profileId, { silent: true, fresh: true }) : undefined,
+        ]);
+      },
       backgroundFailed: (refreshError: any) => reportCodexClientLog({
         type: 'queue-enqueue-refresh-failed', message: refreshError.message || 'Failed to refresh accepted task',
         details: { profileId, queueKey: currentQueueKey },
@@ -20516,6 +20561,7 @@ export function CodexMobileApp() {
 
     const requestToken = ++latestModelCatalogLoadTokenRef.current;
     const requestServerId = activeServerRef.current;
+    const capabilityTicket = composerLiveInputCapability.beginRead(JSON.stringify([requestServerId, nextProfileId]));
     setIsModelCatalogLoading(true);
 
     try {
@@ -20540,6 +20586,7 @@ export function CodexMobileApp() {
             || null;
 
       setAvailableModels(data.models);
+      composerLiveInputCapability.accept(capabilityTicket, data.liveInput);
       setModelPermissionSnapshot(data.permissions || null);
       setModelResponseSpeedSnapshot(data.responseSpeed || null);
       setModelMultiAgentSnapshot(data.multiAgent || null);
@@ -24034,7 +24081,7 @@ export function CodexMobileApp() {
                 <div dir="rtl" className="flex-1 rounded-[1.25rem] rounded-tr-sm border border-slate-100/80 bg-white px-4 py-3 text-[15px] leading-relaxed text-slate-700 shadow-sm">
                   <div className="flex items-center gap-2">
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>שומר את המשימה לשרת...</span>
+                    <span>שולח את ההודעה...</span>
                   </div>
                 </div>
               </div>
@@ -24056,6 +24103,12 @@ export function CodexMobileApp() {
             {error && (
               <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {error}
+              </div>
+            )}
+
+            {queueRequestScope.current(composerDeliveryNotice) && (
+              <div role="status" className="mb-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                {ACTIVE_TURN_MESSAGE_NOTICE}
               </div>
             )}
 
@@ -24969,7 +25022,7 @@ export function CodexMobileApp() {
                                       </button>
                                     ))}
                                   </div>
-                                  <div className="px-1 text-[9px] text-slate-500">רתמת Codex · הבחירה תחול על ההודעה הבאה באותה שיחה</div>
+                                  <div className="px-1 text-[9px] text-slate-500">רתמת Codex · הבחירה תחול על התור הבא באותה שיחה. מודל, הנחיות וכלים שנבחרו נשמרים לתור הבא; הודעה שמצורפת לריצה פעילה משתמשת בהגדרות הנוכחיות שלה.</div>
                                 </div>
                               )}
                               {availableModels.length === 0 ? (
