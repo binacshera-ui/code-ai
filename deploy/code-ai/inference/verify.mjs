@@ -7,7 +7,10 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-const args = process.argv.slice(2).filter(arg => arg !== '--legacy-openai');
+const selectedModels = process.argv.find(arg => arg.startsWith('--models='))?.slice('--models='.length).split(',');
+const args = process.argv.slice(2).filter(arg => arg !== '--legacy-openai' && !arg.startsWith('--models='));
+const models = selectedModels || ['gemini-4-argon', 'gemini-4-carbon', 'gemini-4-neon', 'gemini-4-hydrogen'];
+const continuationModel = selectedModels?.at(-1) || 'gemini-4-neon';
 const home = path.resolve(args[0]);
 const workspace = path.resolve(args[1]);
 const output = path.resolve(args[2]);
@@ -91,15 +94,15 @@ try {
   assert.equal(migrated.modelProvider, legacy ? 'openai' : 'code_ai');
   if (legacy) receipt.existingOpenAiThreadResumed = true;
   }
-  for (const model of ['gemini-4-argon', 'gemini-4-carbon', 'gemini-4-neon', 'gemini-4-hydrogen']) {
+  for (const model of models) {
     if (receipt.checks.some(check => check.model === model && check.tools?.length)) continue;
-    await turn(model, `Keep the same conversation. Run a shell command to compute 17 * 23. Then answer with the code from the first message and the arithmetic result. Do not read files or change anything.`, marker, true);
+    await turn(model, `Keep the same conversation. Run a shell command to compute 17 * 23. ${model.startsWith('deepseek-') ? `Also use apply_patch to create the harmless qualification file ${model}.txt containing only 391 in the current test workspace. Verify it with a shell command.` : 'Do not read files or change anything.'} Then answer with the code from the first message and the arithmetic result.`, marker, true);
   }
   await turn('gpt-6.1-sol', 'Now answer with the original code and the arithmetic result from previous tool output. No tools.', marker);
   await stop(); await start();
   const resumed = await call('thread/resume', { threadId: receipt.threadId, excludeTurns: true });
   assert.equal(resumed.thread.id, receipt.threadId);
-  await turn('gemini-4-neon', 'After process restart, answer with the original code and result. No tools.', marker);
+  await turn(continuationModel, 'After process restart, answer with the original code and result. No tools.', marker);
   const before = frames.length;
   await call('thread/compact/start', { threadId: receipt.threadId });
   const compacted = await wait(frame => frame.method === 'item/completed' && frame.params?.item?.type === 'contextCompaction'

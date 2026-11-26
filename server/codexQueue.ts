@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
+import { isCodexApiModel } from '../shared/codexApiModels.mjs';
 import {
   assertSubscriptionQuotaAllowed, isProfileSubscriptionBlocked,
   registerSubscriptionQuotaStopListener, isSubscriptionQuotaStopError,
@@ -1730,7 +1730,7 @@ registerSubscriptionQuotaStopListener(async event => {
   const stopping: CodexQueueItem[] = [];
   let changed = false;
   for (const item of state.items) {
-    if (!event.profileIds.includes(item.profileId) || isGeminiCodexModel(item.model)
+    if (!event.profileIds.includes(item.profileId) || isCodexApiModel(item.model)
         || item.status === 'draft' || isTerminalStatus(item.status) && !nativeSubmissionNeedsReconciliation(item.nativeSubmission)) continue;
     const hadCustody = nativeSubmissionNeedsReconciliation(item.nativeSubmission);
     item.subscriptionQuotaStopRequestedAt ||= nowIso();

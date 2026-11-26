@@ -1,13 +1,13 @@
 /** Read-only transport boundary shared by supervised model processes. */
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
+import { isCodexApiModel } from '../shared/codexApiModels.mjs';
 
 export const subscriptionAccountKey = accountId => createHash('sha256')
   .update('codex\0' + accountId.trim()).digest('hex');
 
 export async function subscriptionTransportBlocked(stateFile, accountId, model) {
-  if (!stateFile || !accountId || isGeminiCodexModel(model)) return false;
+  if (!stateFile || !accountId || isCodexApiModel(model)) return false;
   try {
     const bytes = await readFile(stateFile);
     if (bytes.length > 2 * 1024 * 1024) return true;

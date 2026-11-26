@@ -8,7 +8,7 @@ import {
   type SubscriptionQuotaStopSettings,
   type SubscriptionQuotaStopSnapshot,
 } from '../shared/subscriptionQuotaStop.js';
-import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
+import { isCodexApiModel } from '../shared/codexApiModels.mjs';
 import { loadCodexAccountUsage, type CodexAccountUsageSnapshot } from './codexAccountUsage.js';
 import { CODEX_APP_CONFIG } from './config.js';
 
@@ -290,13 +290,13 @@ export function createSubscriptionQuotaStopService(options: {
     return serialized(events => evaluate(profile, events, settings, updateOptions));
   }
   async function blocked(profile: SubscriptionQuotaProfile, model?: string | null) {
-    if (isGeminiCodexModel(model)) return false;
+    if (isCodexApiModel(model)) return false;
     const snapshot = await read(profile);
     return snapshot.enabled && snapshot.state === 'blocked';
   }
   async function assertAllowed(profile: SubscriptionQuotaProfile,
     execution: { model?: string | null; recovery?: boolean } = {}) {
-    if (execution.recovery || isGeminiCodexModel(execution.model)) return;
+    if (execution.recovery || isCodexApiModel(execution.model)) return;
     const snapshot = await read(profile);
     if (snapshot.enabled && snapshot.state === 'blocked') throw new SubscriptionQuotaStopError(snapshot);
   }

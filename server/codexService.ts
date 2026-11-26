@@ -1,5 +1,5 @@
 import { resolveCodexExecutionSelection } from './codexExecutionSelection.js';
-import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
+import { getCodexApiModel, isCodexApiModel } from '../shared/codexApiModels.mjs';
 import { sessionListLimit } from './sessionListLimit.js';
 import { readCodexRetryObservation } from './codexRetryObservation.mjs';
 import { readRecoveredQueueItems } from './codexQueueStore.mjs';
@@ -602,6 +602,7 @@ interface RawSessionMetaPayload {
 
 interface CodexConfigDefaults {
   modelProvider?: string | null;
+  modelCatalogJson?: string | null;
   model: string | null;
   reasoningEffort: string | null;
   serviceTier: string | null;
@@ -4738,6 +4739,7 @@ async function readCodexExecutionDefaults(profile: CodexProfile): Promise<CodexC
     const raw = await fs.readFile(configPath, 'utf-8');
     return {
       modelProvider: normalizeExecutionSettingValue(readRootTomlString(raw, 'model_provider')),
+      modelCatalogJson: normalizeExecutionSettingValue(readRootTomlString(raw, 'model_catalog_json')),
       model: normalizeExecutionSettingValue(readRootTomlString(raw, 'model')),
       reasoningEffort: normalizeExecutionSettingValue(readRootTomlString(raw, 'model_reasoning_effort')),
       serviceTier: normalizeCodexServiceTierValue(readRootTomlString(raw, 'service_tier')),
@@ -4882,7 +4884,7 @@ async function loadCodexAvailableModels(profile: CodexProfile): Promise<CodexAva
         description: normalizeExecutionSettingValue(entry?.description),
         defaultReasoningLevel: normalizeExecutionSettingValue(entry?.default_reasoning_level),
         supportedReasoningLevels,
-        availableResponseSpeedIds: isGeminiCodexModel(slug) ? [] : Array.from(new Set(
+        availableResponseSpeedIds: isCodexApiModel(slug) ? [] : Array.from(new Set(
           [
             'flex',
             ...(Array.isArray(entry?.additional_speed_tiers) ? entry.additional_speed_tiers : []),
@@ -4931,9 +4933,9 @@ function buildCodexResponseSpeedSnapshot(
   selectedModelOption: CodexAvailableModel | null,
   defaults: CodexConfigDefaults
 ): CodexResponseSpeedSnapshot {
-  if (isGeminiCodexModel(selectedModelOption?.slug)) return {
-    selectedModeId: null, selectedLabel: 'Gemini API', configurable: false,
-    note: 'המודל פועל ברתמת Codex דרך Gemini API. רמת החשיבה נבחרת בנפרד.', availableModes: [],
+  if (isCodexApiModel(selectedModelOption?.slug)) return {
+    selectedModeId: null, selectedLabel: `${getCodexApiModel(selectedModelOption?.slug)?.family === 'deepseek' ? 'DeepSeek' : 'Gemini'} API`, configurable: false,
+    note: 'המודל פועל ברתמת Codex באמצעות API. רמת החשיבה נבחרת בנפרד; החיוב אינו ממכסת המנוי.', availableModes: [],
   };
   if (!selectedModelOption) {
     return {
@@ -5248,7 +5250,7 @@ export async function runCodexPrompt(
     : promptText;
   const queueKey = buildProviderRunQueueKey(profile.id, sessionId, options.runId);
   const executionConfig = await resolveCodexExecutionConfig(profile, options.executionConfig);
-  const { modelProvider, serviceTier: configuredServiceTier } = await readCodexExecutionDefaults(profile);
+  const { modelProvider, modelCatalogJson, serviceTier: configuredServiceTier } = await readCodexExecutionDefaults(profile);
   const speedModel = (await loadCodexAvailableModels(profile)).find(model => model.slug === executionConfig.model);
   const serviceTier = normalizeCodexServiceTierConfigValue(selectedCodexResponseSpeed(
     speedModel?.availableResponseSpeedIds || [], configuredServiceTier));
@@ -5453,10 +5455,11 @@ export async function runCodexPrompt(
           ...(resumedSubmission ? { resumeSubmission: resumedSubmission } : {}),
           inheritOwnerSettings: true,
           managedOwner: true,
+          modelCatalogFile: modelProvider === 'code_ai' ? modelCatalogJson : null,
           expectedOwnerSettings: {
             model: executionConfig.model!, cwd: runCwd, approvalPolicy: 'never' as const,
             serviceTier,
-            ...(modelProvider === 'code_ai' && threadModelProvider && isGeminiCodexModel(executionConfig.model)
+            ...(modelProvider === 'code_ai' && threadModelProvider && isCodexApiModel(executionConfig.model)
               ? { modelProvider: threadModelProvider } : {}),
             sandbox: { type: 'dangerFullAccess' }, reasoningEffort: executionConfig.reasoningEffort || null,
           },

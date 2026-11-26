@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { isCodexApiModel } from '../shared/codexApiModels.mjs';
 
 interface AccountModel { slug: string; additional_speed_tiers?: unknown; service_tiers?: unknown; [key: string]: unknown }
 interface Auth { auth_mode?: string; OPENAI_API_KEY?: string; tokens?: { account_id?: string; access_token?: string } }
@@ -12,7 +13,7 @@ function scope(value: Auth): string {
 }
 export async function readCodexCatalogAccountScope(home: string): Promise<string> { return scope(await auth(home)); }
 
-/** Refresh the managed Gemini overlay from this account's real model catalog.
+/** Refresh the managed API overlay from this account's real model catalog.
  * A failed lookup never grants Ultrafast from another login's local overlay. */
 export async function refreshCodexAccountModels(home: string, expectedScope: string,
   options: { fetchImpl?: typeof fetch; clientVersion?: string } = {}): Promise<AccountModel[] | null> {
@@ -35,8 +36,8 @@ export async function refreshCodexAccountModels(home: string, expectedScope: str
     const managed = path.join(home, 'code-ai-models.json');
     if (configured && path.resolve(JSON.parse(configured)) === path.resolve(managed)) {
       const current = JSON.parse(await fs.readFile(managed, 'utf8'));
-      const aliases = (current.models || []).filter((m: AccountModel) => typeof m.slug === 'string' && m.slug.startsWith('gemini-'));
-      const bytes = JSON.stringify({ models: [...models, ...aliases] }, null, 2) + '\n';
+      const aliases = (current.models || []).filter((m: AccountModel) => isCodexApiModel(m?.slug));
+      const bytes = JSON.stringify({ models: [...models.filter(m => !isCodexApiModel(m.slug)), ...aliases] }, null, 2) + '\n';
       if (bytes !== JSON.stringify(current, null, 2) + '\n') {
         const metadata = await fs.stat(managed);
         const temporary = managed + '.' + randomUUID() + '.tmp';

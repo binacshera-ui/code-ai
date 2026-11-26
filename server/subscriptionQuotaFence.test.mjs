@@ -24,6 +24,10 @@ test('transport fences confirmed breaches, not observation age, while preserving
   entry.snapshot.state = 'blocked'; await save();
   assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gpt-6.1-sol', now), true);
   assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gemini-4-carbon', now), false);
+  for (const model of ['deepseek-v4.1-flash-venice', 'deepseek-v4.1-flash-experiential']) {
+    assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', model), false);
+  }
+  assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'deepseek-unknown'), true);
   assert.equal(await subscriptionTransportBlocked(file, null, 'gpt-6.1-sol', now), false);
   assert.equal(await subscriptionTransportBlocked(file, 'other-account', 'gpt-6.1-sol', now), false);
   entry.latch = { stoppedAt: new Date(now).toISOString() }; entry.snapshot.state = 'unavailable'; await save();
@@ -32,6 +36,8 @@ test('transport fences confirmed breaches, not observation age, while preserving
   assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gpt-6.1-sol', now), false);
   await writeFile(file, 'invalid');
   assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'gpt-6.1-sol', now), true);
+  assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'deepseek-v4.1-flash-venice'), false);
+  assert.equal(await subscriptionTransportBlocked(file, 'fixture-account', 'deepseek-v4.1-flash-experiential'), false);
 });
 
 test('live transport stops streaming subscription requests and fences models/images without stopping API billing', async t => {

@@ -79,6 +79,13 @@ test('policy is per subscription across derived homes, not per tab, profile, mod
   f.set(f.usage(2, 95)); await guard.update(f.profile, enabled);
   assert.equal(await guard.blocked(f.twin, 'gpt-6.1-sol'), true);
   assert.equal(await guard.blocked(f.twin, 'gemini-4-neon'), false);
+  for (const model of ['deepseek-v4.1-flash-venice', 'deepseek-v4.1-flash-experiential']) {
+    const reads = f.reads();
+    assert.equal(await guard.blocked(f.twin, model), false);
+    await guard.assertAllowed(f.twin, { model });
+    assert.equal(f.reads(), reads, 'API model admission must not fetch subscription quota');
+  }
+  assert.equal(await guard.blocked(f.twin, 'deepseek-unknown'), true);
   assert.equal(await guard.blocked(f.other, 'gpt-6.1-sol'), false);
   assert.ok(events.every(ids => ids.includes('main') && ids.includes('derived') && !ids.includes('other')));
   const bytes = await readFile(f.file, 'utf8');

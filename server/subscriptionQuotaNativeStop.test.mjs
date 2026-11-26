@@ -63,6 +63,22 @@ test('current future Gemini settings do not exempt a running GPT turn, and exact
   assert.equal(instance.calls.filter(call => call.method === 'thread/queue/delete').length, 0);
 });
 
+test('subscription stop leaves both exact DeepSeek API turns and idle API queues untouched', async () => {
+  const models = ['deepseek-v4.1-flash-venice', 'deepseek-v4.1-flash-experiential'];
+  const threads = models.flatMap((model, index) => [
+    { id: `deepseek-active-${index}`, model: 'gpt-6.1-sol', actualModel: model },
+    { id: `deepseek-idle-${index}`, model, idle: true, queue: [{ id: `queued-api-${index}` }] },
+  ]);
+  const instance = owner(threads);
+  const report = await stopNativeSubscriptionTurns(profile, { isBlocked: blocked, connect: async () => instance,
+    readTurnModel: async filename => threads.find(thread => filename === `/fixture/${thread.id}.jsonl`).actualModel,
+    confirmationMs: 0 });
+  assert.equal(report.attemptedTurns.length, 0);
+  assert.equal(report.apiTurnsSkipped.length, 2);
+  assert.equal(report.deletedQueuedInputs.length, 0);
+  assert.ok(!instance.calls.some(call => ['turn/interrupt', 'thread/queue/delete'].includes(call.method)));
+});
+
 test('unknown billing evidence stays pending; neither configured GPT nor guessed recency may authorize interruption', async () => {
   const instance = owner([{ id: 'unknown', model: 'gpt-6.1-sol' }]);
   const report = await stopNativeSubscriptionTurns(profile, {

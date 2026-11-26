@@ -5,7 +5,93 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { createInferenceRouter, openaiRequest, geminiRequest } from './codexInferenceRouter.mjs';
+import { createInferenceRouter, openaiRequest, geminiRequest, deepseekRequest, numericProviderUsage } from './codexInferenceRouter.mjs';
+
+test('direct DeepSeek keeps sealed reasoning and custom tool history without mutating native transcript', () => {
+  const reasoning = { type: 'reasoning', encrypted_content: 'sealed-provider-thought', summary: [] };
+  const call = { type: 'custom_tool_call', call_id: 'call-one', name: 'apply_patch', input: 'fixture patch' };
+  const result = { type: 'custom_tool_call_output', call_id: 'call-one', output: 'done' };
+  const original = { model: 'deepseek-v4.1-flash-venice', input: [reasoning, call, result,
+    { type: 'additional_tools', tools: [{ type: 'custom', name: 'apply_patch' }] }],
+    service_tier: 'ultrafast', prompt_cache_key: 'openai-cache', include: ['reasoning.encrypted_content'], store: true };
+  const value = deepseekRequest(original);
+  assert.equal(value.model, 'deepseek-v4-1-flash-1017-uncensored');
+  assert.deepEqual(value.input, [reasoning, call, result]);
+  assert.deepEqual(value.include, original.include);
+  assert.equal(value.tools[0].name, 'apply_patch');
+  assert.equal(value.store, false);
+  assert.equal(value.service_tier, undefined);
+  assert.equal(value.prompt_cache_key, undefined);
+  assert.deepEqual(value.venice_parameters, { include_venice_system_prompt: false });
+  assert.equal(original.input.length, 4);
+  assert.equal(original.store, true);
+  const longId = 'call_' + 'signature'.repeat(100);
+  const long = deepseekRequest({ model: 'deepseek-v4.1-flash-experiential', input: [
+    { type: 'function_call', id: 'fc_' + longId, call_id: longId, name: 'shell', arguments: '{}' },
+    { type: 'function_call_output', call_id: longId, output: 'done' },
+  ] });
+  assert.ok(long.input[0].id.length <= 64);
+  assert.equal(long.input[0].call_id, long.input[1].call_id);
+  const custom = openaiRequest({ input: [{ type: 'custom_tool_call', id: 'fc_experiential-call', call_id: 'call-stable' },
+    { type: 'custom_tool_call_output', call_id: 'call-stable', output: 'done' }] });
+  assert.match(custom.input[0].id, /^ctc_/);
+  assert.equal(custom.input[0].call_id, custom.input[1].call_id);
+  const thought = openaiRequest({ input: [
+    { type: 'reasoning', id: 'rs_gateway-summary', summary: [{ type: 'summary_text', text: 'summary only' }] },
+    { type: 'reasoning', id: 'rs_native', encrypted_content: 'sealed-native-thought' },
+    { role: 'assistant', content: 'observable result' },
+  ] });
+  assert.equal(thought.input.length, 2);
+  assert.equal(thought.input[0].id, 'rs_native');
+  assert.throws(() => deepseekRequest({ model: 'deepseek-unknown' }));
+});
+
+test('numeric usage preserves unknown cache telemetry and never records content', () => {
+  assert.deepEqual(numericProviderUsage({ input_tokens: 20, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+    unreported_token_details: ['cached_tokens'], secret: 'do-not-log', cost: 0.01 }), {
+    input_tokens: 20, input_tokens_details: { cache_write_tokens: 0 }, cost: 0.01, unreported_token_details: ['cached_tokens'],
+  });
+});
+
+test('both direct provider routes isolate credentials, retain SSE and reject unregistered models', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-deepseek-router-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const auth = path.join(root, 'auth.json');
+  await writeFile(auth, JSON.stringify({ tokens: { access_token: 'fixture-openai-secret', account_id: 'fixture-account' } }));
+  const calls = [], logs = [];
+  const upstream = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    calls.push({ url: req.url, headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString()) });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.end('data: {"type":"response.completed","response":{"usage":{"input_tokens":200,"input_tokens_details":{"cached_tokens":100},"output_tokens":10},"output_text":"private-content"}}\n\n');
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve)); t.after(() => upstream.close());
+  const base = `http://127.0.0.1:${upstream.address().port}`;
+  const server = createInferenceRouter({ authFiles: [auth], providerKeys: { VENICE_API_KEY: 'fixture-venice-secret', EXPLABS_API_KEY: 'fixture-explabs-secret' },
+    providerBaseUrls: { venice: `${base}/venice/v1`, experiential: `${base}/experiential/v1` } }, { logger: e => logs.push(e) });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1/responses`;
+  const headers = { Authorization: 'Bearer fixture-openai-secret', 'Content-Type': 'application/json', 'ChatGPT-Account-ID': 'fixture-account', session_id: 'fixture-thread', 'Content-Encoding': 'gzip' };
+  for (const model of ['deepseek-v4.1-flash-venice', 'deepseek-v4.1-flash-experiential']) {
+    const r = await fetch(endpoint, { method: 'POST', headers, body: zlib.gzipSync(Buffer.from(JSON.stringify({ model, input: [], stream: true }))) });
+    assert.equal(r.status, 200); assert.match(await r.text(), /response.completed/);
+  }
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, '/venice/v1/responses');
+  assert.equal(calls[0].headers.authorization, 'Bearer fixture-venice-secret');
+  assert.equal(calls[1].url, '/experiential/v1/responses');
+  assert.equal(calls[1].headers.authorization, 'Bearer fixture-explabs-secret');
+  assert.equal(calls[1].body.model, 'deepseek-v4.1-flash-uncensored');
+  for (const call of calls) {
+    assert.equal(call.headers['chatgpt-account-id'], undefined);
+    assert.equal(call.headers.session_id, undefined);
+    assert.equal(call.headers['content-encoding'], undefined);
+  }
+  assert.equal(logs.length, 2);
+  assert.doesNotMatch(JSON.stringify(logs), /private-content|fixture-.*secret|fixture-thread/);
+  const r = await fetch(endpoint, { method: 'POST', headers: { Authorization: headers.Authorization }, body: '{"model":"deepseek-unknown"}' });
+  assert.equal(r.status, 400); assert.equal(calls.length, 2);
+});
 
 test('native historical tool declarations merge once without losing namespace members or current definitions', () => {
   const old = { type: 'function', name: 'followup_task', parameters: { old: true } };

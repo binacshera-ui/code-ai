@@ -26,6 +26,17 @@ test('refreshes stale native metadata while preserving Gemini and all vendor fie
   assert.equal(calls, 1); assert.deepEqual(result, [f.model]);
   assert.deepEqual((await f.read()).models, [f.model, f.alias]);
 });
+test('account refresh preserves both registered DeepSeek suppliers but never retains guessed API aliases', async t => {
+  const f = await fixture(t);
+  const deepseek = ['deepseek-v4.1-flash-venice', 'deepseek-v4.1-flash-experiential']
+    .map(slug => ({ slug, service_tiers: [], input_modalities: slug.endsWith('venice') ? ['text', 'image'] : ['text'] }));
+  await writeFile(path.join(f.home, 'code-ai-models.json'), JSON.stringify({ models: [f.alias, ...deepseek,
+    { slug: 'gemini-unknown' }, { slug: 'deepseek-fake' }, { slug: 'gpt-retired' }] }));
+  await refreshCodexAccountModels(f.home, await readCodexCatalogAccountScope(f.home), {
+    fetchImpl: async () => Response.json({ models: [f.model] }),
+  });
+  assert.deepEqual((await f.read()).models, [f.model, f.alias, ...deepseek]);
+});
 test('a new unentitled account removes old Ultrafast metadata, rather than inheriting the prior subscription', async t => {
   const f = await fixture(t);
   await refreshCodexAccountModels(f.home, await readCodexCatalogAccountScope(f.home), { fetchImpl: async () => Response.json({ models: [f.model] }) });

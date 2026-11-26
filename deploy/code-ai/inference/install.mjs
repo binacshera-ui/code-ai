@@ -1,29 +1,53 @@
 #!/usr/bin/env node
 /** Provision Code AI's shared model transport. No separate Codex home/session store. */
-import { mkdir, readFile, writeFile, realpath } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, realpath, stat } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { parseEnv } from 'node:util';
-import { geminiCodexCatalog, GEMINI_CODEX_MODELS } from '../../../shared/codexGeminiModels.mjs';
+import { GEMINI_CODEX_MODELS } from '../../../shared/codexGeminiModels.mjs';
+import { codexApiCatalog, isCodexApiModel, isDeepseekCodexModel } from '../../../shared/codexApiModels.mjs';
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; };
 const homes = args.flatMap((arg, index) => arg === '--codex-home' ? [path.resolve(args[index + 1])] : []);
 if (!homes.length) throw new Error('At least one --codex-home is required');
 const runtimeRoot = path.resolve(option('--runtime-root', path.join(process.cwd(), '.code-ai/local/inference')));
-const keyFile = path.resolve(option('--key-file', ''));
+let previousSettings = {};
+try { previousSettings = JSON.parse(await readFile(path.join(runtimeRoot, 'settings.json'), 'utf8')); }
+catch (error) { if (error.code !== 'ENOENT') throw error; }
+const keyFile = path.resolve(option('--key-file', previousSettings.keyFile || ''));
 if (!parseEnv(await readFile(keyFile, 'utf8')).GEMINI_API_KEY) throw new Error('Gemini API key is unavailable');
+const providerKeyOption = option('--provider-key-file', previousSettings.providerKeyFile || null);
+const providerKeyFile = providerKeyOption ? path.resolve(providerKeyOption) : null;
+if (providerKeyFile) {
+  // Validate before writing settings or changing any Codex profile. This file
+  // belongs to Code AI; it is neither a provider proxy nor a secret copy in git.
+  let values;
+  try {
+    const metadata = await stat(providerKeyFile);
+    if (!metadata.isFile() || metadata.mode & 0o077) throw new Error('private-file-required');
+    values = parseEnv(await readFile(providerKeyFile, 'utf8'));
+  } catch { throw new Error('Provider API keys require a readable private file (mode 0600)'); }
+  if (!values.VENICE_API_KEY?.trim() || !values.EXPLABS_API_KEY?.trim()) {
+    throw new Error('Provider API key file must contain VENICE_API_KEY and EXPLABS_API_KEY');
+  }
+}
 await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
 const keyPath = path.join(runtimeRoot, 'adapter-key');
 try { await writeFile(keyPath, randomBytes(32).toString('hex') + '\n', { mode: 0o600, flag: 'wx' }); }
 catch (error) { if (error.code !== 'EEXIST') throw error; }
-const routerPort = Number(option('--port', '4188'));
-const adapterPort = Number(option('--adapter-port', '4189'));
+const routerPort = Number(option('--port', previousSettings.port || '4188'));
+const adapterPort = Number(option('--adapter-port', previousSettings.adapterPort || '4189'));
+const storageRootOption = option('--storage-root', process.env.CODEX_STORAGE_ROOT || null);
 const settings = {
+  ...previousSettings,
   runtimeRoot, keyFile, port: routerPort, adapterPort,
-  quotaStopStateFile: path.join(path.resolve(option('--storage-root', process.env.CODEX_STORAGE_ROOT || '.code-ai')), 'subscription-quota-stop.json'),
+  ...(providerKeyFile ? { providerKeyFile } : {}),
+  quotaStopStateFile: storageRootOption || !previousSettings.quotaStopStateFile
+    ? path.join(path.resolve(storageRootOption || '.code-ai'), 'subscription-quota-stop.json')
+    : previousSettings.quotaStopStateFile,
   geminiBaseUrl: `http://127.0.0.1:${adapterPort}/v1`,
-  openaiBaseUrl: option('--openai-base-url', 'https://chatgpt.com/backend-api/codex'),
+  openaiBaseUrl: option('--openai-base-url', previousSettings.openaiBaseUrl || 'https://chatgpt.com/backend-api/codex'),
   authFiles: homes.map(home => path.join(home, 'auth.json')), gatewayKeyFile: keyPath,
 };
 await writeFile(path.join(runtimeRoot, 'settings.json'), JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
@@ -42,11 +66,12 @@ for (const home of homes) {
   const filename = path.join(home, 'config.toml');
   const before = await readFile(filename, 'utf8');
   const cached = JSON.parse(await readFile(path.join(home, 'models_cache.json'), 'utf8'));
-  const base = cached.models.filter(model => !model.slug.startsWith('gemini-'));
+  const base = cached.models.filter(model => !model.slug.startsWith('gemini-') && !isCodexApiModel(model.slug));
   const template = base.find(model => model.slug === 'gpt-6.1-sol') || base[0];
   if (!template) throw new Error('Native model catalog is missing');
   const catalog = path.join(home, 'code-ai-models.json');
-  await writeFile(catalog, JSON.stringify({ models: [...base, ...geminiCodexCatalog(template)] }, null, 2) + '\n', { mode: 0o600 });
+  const apiModels = codexApiCatalog(template).filter(model => providerKeyFile || !isDeepseekCodexModel(model.slug));
+  await writeFile(catalog, JSON.stringify({ models: [...base, ...apiModels] }, null, 2) + '\n', { mode: 0o600 });
   const backup = path.join(runtimeRoot, `config-${path.basename(path.dirname(home))}.before.toml`);
   try { await writeFile(backup, before, { mode: 0o600, flag: 'wx' }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
@@ -63,4 +88,5 @@ for (const home of homes) {
   ].join('\n');
   await writeFile(filename, after, { mode: 0o600 });
 }
-console.log(JSON.stringify({ provisioned: true, runtimeRoot: await realpath(runtimeRoot), profiles: homes.length, models: GEMINI_CODEX_MODELS.map(model => model.slug) }));
+console.log(JSON.stringify({ provisioned: true, runtimeRoot: await realpath(runtimeRoot), profiles: homes.length,
+  models: codexApiCatalog({}).filter(model => providerKeyFile || !isDeepseekCodexModel(model.slug)).map(model => model.slug) }));

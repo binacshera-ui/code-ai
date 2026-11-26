@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { refreshCodexApiThread } from './codexApiThreadRefresh.mjs';
 import {
   codexUserInputRegistry,
   type CodexRpcRequestId,
@@ -91,6 +92,8 @@ export interface CodexAppServerRunOptions {
     inheritOwnerSettings?: boolean;
     /** Public native settings must match before adding any new queue input. */
     expectedOwnerSettings?: CodexSharedOwnerSettings;
+    /** Existing configured catalog only; reload metadata without changing execution settings. */
+    modelCatalogFile?: string | null;
     /** Requires the product broker's acknowledged atomic settings reservation. */
     managedOwner?: boolean;
     onSubmissionChanged?: (submission: CodexSharedSubmission) => void | Promise<void>;
@@ -935,7 +938,7 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
     // Provider identity belongs to the saved thread. Codex 0.171 rejects
     // changing it on resume; model selection still belongs to each new turn.
     const { modelProvider: requestedProvider, ...threadOptions } = options.threadOptions || {};
-    const threadResult = await request(sessionId ? 'thread/resume' : 'thread/start', {
+    let threadResult = await request(sessionId ? 'thread/resume' : 'thread/start', {
       ...(!options.sharedTransport ? threadOptions : {}), cwd: options.cwd,
       ...(!sessionId && requestedProvider
         && (!options.sharedTransport || !options.sharedTransport.resumeSubmission)
@@ -953,6 +956,14 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
       if (sessionId && !options.sharedTransport && error instanceof CodexRpcRejectedError
           && error.diagnostic?.reason === 'thread-writer-conflict') throw new CodexExternalWriterBusyError();
       throw error;
+    });
+    if (!object(threadResult) || !object(threadResult.thread) || typeof threadResult.thread.id !== 'string'
+        || !threadResult.thread.id.trim()) throw new Error('Codex app-server did not return a thread ID');
+    if (sessionId) threadResult = await refreshCodexApiThread({
+      rpc: request, threadResult, model: options.sharedTransport?.expectedOwnerSettings?.model,
+      catalogFile: options.sharedTransport?.modelCatalogFile,
+      managedOwner: options.sharedTransport?.managedOwner === true,
+      recovery: Boolean(options.sharedTransport?.resumeSubmission),
     });
     if (!object(threadResult) || !object(threadResult.thread) || typeof threadResult.thread.id !== 'string'
         || !threadResult.thread.id.trim()) throw new Error('Codex app-server did not return a thread ID');

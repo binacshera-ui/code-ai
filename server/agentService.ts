@@ -1,6 +1,6 @@
 import { CODEX_APP_CONFIG, type AppProvider } from './config.js';
 import { randomUUID } from 'node:crypto';
-import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
+import { isCodexApiModel } from '../shared/codexApiModels.mjs';
 import { assertSubscriptionQuotaAllowed, registerSubscriptionQuotaStopListener } from './subscriptionQuotaStop.js';
 import {
   cancelCodexRun,
@@ -474,7 +474,7 @@ registerCodexDeploymentDrainParticipant('agent', () => ({ ready: true, active: 0
 const subscriptionAgentRuns = new Map<string, { profileId: string; model: string | null }>();
 registerSubscriptionQuotaStopListener(async event => {
   for (const [runId, run] of subscriptionAgentRuns) {
-    if (event.profileIds.includes(run.profileId) && !isGeminiCodexModel(run.model)) cancelAgentRun(runId, run.profileId);
+    if (event.profileIds.includes(run.profileId) && !isCodexApiModel(run.model)) cancelAgentRun(runId, run.profileId);
   }
 });
 

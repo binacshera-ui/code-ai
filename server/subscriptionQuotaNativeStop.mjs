@@ -6,7 +6,7 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
 import { resolveCodexSharedSocket } from './codexSharedSocket.mjs';
-import { isGeminiCodexModel } from '../shared/codexGeminiModels.mjs';
+import { isCodexApiModel } from '../shared/codexApiModels.mjs';
 import { NATIVE_FRAME_BYTES } from './codexNativeTransport.mjs';
 
 const terminal = new Set(['completed', 'interrupted', 'failed']);
@@ -165,7 +165,7 @@ export async function stopNativeSubscriptionTurns(profile, {
         for (const row of queued) {
           if (!id(row?.id)) { error('queued-identity', threadId); continue; }
           const target = { threadId, queuedSubmissionId: row.id };
-          if (isGeminiCodexModel(thread.model)) continue;
+          if (isCodexApiModel(thread.model)) continue;
           if (typeof thread.model !== 'string' || !thread.model) { report.pendingQueuedInputs.push(target); continue; }
           if (!await isBlocked(profile)) return report;
           try {
@@ -180,7 +180,7 @@ export async function stopNativeSubscriptionTurns(profile, {
         for (const turn of turns) {
           const target = { threadId, turnId: turn.id };
           const model = await readTurnModel(thread.path, turn.id);
-          if (isGeminiCodexModel(model)) { report.apiTurnsSkipped.push(target); continue; }
+          if (isCodexApiModel(model)) { report.apiTurnsSkipped.push(target); continue; }
           if (typeof model !== 'string' || !model) { report.pendingTurns.push({ ...target, reason: 'billing-model-unavailable' }); continue; }
           if (!await isBlocked(profile)) return report;
           report.attemptedTurns.push(target);

@@ -49,6 +49,13 @@ import { createDurableQueueSubmission, createQueueRequestScope, queueListViewFor
 import type { ServerStatusSnapshot } from '../../../../shared/serverStatus';
 import { readServerStatus } from './serverStatusTransport';
 import { SubscriptionQuotaStopControl } from './SubscriptionQuotaStopControl';
+import {
+  availableCodexModelFamilies,
+  CODEX_MODEL_FAMILY_LABELS,
+  codexModelFamily,
+  resolveCodexModelFamily,
+  type CodexModelFamily,
+} from './codexModelPicker';
 import type { SubscriptionQuotaStopSnapshot } from '../../../../shared/subscriptionQuotaStop';
 import { collectSessionActivity } from './sessionUnread';
 import ReactMarkdown from 'react-markdown';
@@ -15909,7 +15916,7 @@ export function CodexMobileApp() {
   const [stopScheduleTarget, setStopScheduleTarget] = useState<CodexQueueServerItem | null>(null);
   const [isStopScheduleSaving, setIsStopScheduleSaving] = useState(false);
   const [availableModels, setAvailableModels] = useState<CodexModelOption[]>([]);
-  const [modelFamilyFilter, setModelFamilyFilter] = useState<'gpt' | 'gemini' | null>(null);
+  const [modelFamilyFilter, setModelFamilyFilter] = useState<CodexModelFamily | null>(null);
   const [modelPermissionSnapshot, setModelPermissionSnapshot] = useState<CodexPermissionSnapshotResponse | null>(null);
   const [modelResponseSpeedSnapshot, setModelResponseSpeedSnapshot] = useState<CodexResponseSpeedSnapshotResponse | null>(null);
   const [modelMultiAgentSnapshot, setModelMultiAgentSnapshot] = useState<CodexMultiAgentSnapshotResponse | null>(null);
@@ -22885,6 +22892,8 @@ export function CodexMobileApp() {
     () => availableModels.find((model) => model.slug === selectedModelSlug) || null,
     [availableModels, selectedModelSlug]
   );
+  const availableModelFamilies = useMemo(() => availableCodexModelFamilies(availableModels), [availableModels]);
+  const activeModelFamily = resolveCodexModelFamily(availableModelFamilies, selectedModelSlug, modelFamilyFilter);
   const supportedReasoningLevels = selectedModelOption?.supportedReasoningLevels || [];
   const selectedReasoningOption = useMemo(
     () => supportedReasoningLevels.find((level) => level.effort === selectedReasoningEffort) || null,
@@ -24946,17 +24955,17 @@ export function CodexMobileApp() {
                           </button>
                           {activeModelPanelSection === 'models' && (
                             <div className="space-y-1 border-t border-slate-100 px-2.5 py-2">
-                              {currentProfile?.provider === 'codex' && availableModels.some(model => model.slug.startsWith('gemini-')) && (
+                              {currentProfile?.provider === 'codex' && availableModelFamilies.length > 1 && (
                                 <div className="mb-2 space-y-1.5">
                                   <div className="flex gap-1 rounded-full bg-slate-100 p-1" role="group" aria-label="משפחת מודלים ברתמת Codex">
-                                    {(['gpt', 'gemini'] as const).map(family => (
+                                    {availableModelFamilies.map(family => (
                                       <button key={family} type="button"
-                                        aria-pressed={(modelFamilyFilter || (selectedModelSlug?.startsWith('gemini-') ? 'gemini' : 'gpt')) === family}
+                                        aria-pressed={activeModelFamily === family}
                                         onClick={() => setModelFamilyFilter(family)}
                                         className={cn('flex-1 rounded-full px-3 py-1.5 text-[11px] font-semibold transition',
-                                          (modelFamilyFilter || (selectedModelSlug?.startsWith('gemini-') ? 'gemini' : 'gpt')) === family
+                                          activeModelFamily === family
                                             ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}>
-                                        {family === 'gpt' ? 'GPT' : 'Gemini'}
+                                        {CODEX_MODEL_FAMILY_LABELS[family]}
                                       </button>
                                     ))}
                                   </div>
@@ -24969,8 +24978,7 @@ export function CodexMobileApp() {
                                 </div>
                               ) : (
                                 availableModels.filter(model => currentProfile?.provider !== 'codex'
-                                  || (modelFamilyFilter || (selectedModelSlug?.startsWith('gemini-') ? 'gemini' : 'gpt'))
-                                    === (model.slug.startsWith('gemini-') ? 'gemini' : 'gpt')).map((model) => (
+                                  || activeModelFamily === codexModelFamily(model.slug)).map((model) => (
                                   <button
                                     key={model.slug}
                                     type="button"

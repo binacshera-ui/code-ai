@@ -37,6 +37,8 @@ test('account stop fences all pending/scheduled/recurring conversations and dire
   const scheduled = await create('same-account', 'scheduled', { scheduledAt: new Date(Date.now() + 60000).toISOString() });
   const recurring = await create('first', 'recurring', { scheduledAt: new Date(Date.now() + 60000).toISOString(), recurrence: { frequency: 'daily', timeZone: 'UTC' } });
   const api = await create('first', 'api', { model: 'gemini-4-neon' });
+  const deepseek = await Promise.all(['deepseek-v4.1-flash-venice', 'deepseek-v4.1-flash-experiential']
+    .map(model => create('first', model, { model })));
   const other = await create('other-account', 'other');
   const draft = await create('first', 'draft', { saveAsDraft: true });
   const settings = { enabled: true, stopAtUsedPercent: 90.5, window: 'secondary' as const };
@@ -49,10 +51,14 @@ test('account stop fences all pending/scheduled/recurring conversations and dire
     assert.match(stopped?.error || '', /מכסת המנוי/);
     assert.equal(stopped?.prompt, item.prompt, 'unfinished input stays available');
   }
-  for (const item of [api, other]) assert.equal((await queue.getCodexQueueItem(item.id))?.status, 'queued');
+  for (const item of [api, ...deepseek, other]) assert.equal((await queue.getCodexQueueItem(item.id))?.status, 'queued');
   assert.equal((await queue.getCodexQueueItem(draft.id))?.status, 'draft');
   await assert.rejects(create('same-account', 'blocked'), error => (error as any).code === 'SUBSCRIPTION_QUOTA_STOP');
   await assert.rejects(queue.retryCodexQueueItem(waiting.id), error => (error as any).statusCode === 423);
+  for (const model of ['deepseek-v4.1-flash-venice', 'deepseek-v4.1-flash-experiential']) {
+    const admitted = await create('same-account', model + '-after-stop', { model });
+    assert.equal(admitted.status, 'queued', 'subscription stop must not reject independently billed DeepSeek');
+  }
   const agent = await import('./agentService.js');
   await assert.rejects(agent.runAgentPrompt('No model must run', undefined, 'first'), error => (error as any).statusCode === 423);
   await quota.updateSubscriptionQuotaStop(profiles[0], { ...settings, enabled: false });
