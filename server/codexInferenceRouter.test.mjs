@@ -85,7 +85,8 @@ test('same native history switches both DeepSeek providers and GPT without repla
     calls.push({ url: req.url, body, headers: req.headers });
     const item = { type: 'reasoning', id: `rs_${calls.length}`, encrypted_content: `sealed-${req.url}-${calls.length}`, summary: [] };
     if (body.stream) {
-      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      // The real ChatGPT Codex endpoint can omit Content-Type on valid SSE.
+      res.writeHead(200, req.url.includes('/openai/') ? {} : { 'Content-Type': 'text/event-stream' });
       const text = `data: ${JSON.stringify({ type: 'response.output_item.done', item })}\n\ndata: ${JSON.stringify({ type: 'response.completed', response: { output: [item] } })}\n\n`;
       res.write(text.slice(0, 23)); res.end(text.slice(23));
     } else {

@@ -236,7 +236,10 @@ export function createInferenceRouter(settings, { logger = event => console.log(
       }, incoming => {
         const responseHeaders = Object.fromEntries(Object.entries(incoming.headers).filter(([name]) => !HOP_HEADERS.has(name)));
         if (scope && incoming.statusCode >= 200 && incoming.statusCode < 300) {
-          const observer = providerStateObserver(incoming.headers['content-type'], item =>
+          // Codex's account endpoint may stream SSE without Content-Type.
+          // The accepted Responses request also declares the wire format.
+          const observer = providerStateObserver(incoming.headers['content-type'] ||
+            (body.stream ? 'text/event-stream' : 'application/json'), item =>
             providerState.record(item, { scope, provider, model: body.model }));
           let failed = false;
           const observe = action => {
