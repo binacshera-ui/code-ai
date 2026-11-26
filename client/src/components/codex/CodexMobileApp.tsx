@@ -25353,7 +25353,7 @@ export function CodexMobileApp() {
             <div dir="rtl" className="mt-3 flex items-center justify-between gap-3 px-1 text-xs text-slate-400">
               <span>
                 {selectedSessionId
-                  ? 'כל הודעה תמשיך לתור השרת עבור השיחה הפתוחה.'
+                  ? 'הודעות חדשות נשלחות לשיחה הפתוחה; הודעות מתוזמנות נשלחות במועד שבחרת.'
                   : activeComposerCwd
                     ? `שיחה חדשה תתחיל מתוך ${getPathBaseName(activeComposerCwd)} בשרת.`
                     : 'גם בלי שיחה פתוחה, השרת ייצור session חדש וימשיך לבד.'}
